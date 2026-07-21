@@ -160,6 +160,14 @@ apply_migrations() {
     "SELECT CASE WHEN to_regclass('public.crm_customers') IS NOT NULL THEN 1 ELSE 0 END"
   backfill_if_present "0006_outbox_consumer" \
     "SELECT CASE WHEN to_regclass('public.outbox_consumed_events') IS NOT NULL THEN 1 ELSE 0 END"
+  backfill_if_present "0007_crm_subaggregates" \
+    "SELECT CASE WHEN to_regclass('public.crm_contracts') IS NOT NULL THEN 1 ELSE 0 END"
+  backfill_if_present "0008_pm_delivery" \
+    "SELECT CASE WHEN to_regclass('public.pm_plans') IS NOT NULL THEN 1 ELSE 0 END"
+  backfill_if_present "0009_finance_ledger" \
+    "SELECT CASE WHEN to_regclass('public.finance_journal_entries') IS NOT NULL THEN 1 ELSE 0 END"
+  backfill_if_present "0010_finance_recon_dailygate" \
+    "SELECT CASE WHEN to_regclass('public.finance_daily_gate_state') IS NOT NULL THEN 1 ELSE 0 END"
 
   apply_migration_file "0001_foundation" \
     "${MIGRATIONS_DIR}/0001_foundation.sql" || true
@@ -173,6 +181,14 @@ apply_migrations() {
     "${MIGRATIONS_DIR}/0005_crm_customers.sql" || true
   apply_migration_file "0006_outbox_consumer" \
     "${MIGRATIONS_DIR}/0006_outbox_consumer.sql" || true
+  apply_migration_file "0007_crm_subaggregates" \
+    "${MIGRATIONS_DIR}/0007_crm_subaggregates.sql" || true
+  apply_migration_file "0008_pm_delivery" \
+    "${MIGRATIONS_DIR}/0008_pm_delivery.sql" || true
+  apply_migration_file "0009_finance_ledger" \
+    "${MIGRATIONS_DIR}/0009_finance_ledger.sql" || true
+  apply_migration_file "0010_finance_recon_dailygate" \
+    "${MIGRATIONS_DIR}/0010_finance_recon_dailygate.sql" || true
 }
 
 check_force_rls() {
@@ -186,12 +202,17 @@ WHERE n.nspname = 'public'
   AND c.relname IN (
     'orch_jobs', 'orch_work_items', 'orch_job_events',
     'orch_governance_controls', 'orch_governance_intents',
-    'crm_customers', 'outbox_consumed_events'
+    'crm_customers', 'outbox_consumed_events',
+    'crm_contracts', 'crm_communications', 'crm_next_actions', 'crm_operational_exceptions',
+    'pm_plans', 'pm_assignments', 'pm_targets', 'pm_target_observations',
+    'pm_variance_exceptions', 'delivery_projects',
+    'finance_journal_entries',
+    'finance_reconciliations', 'finance_exceptions', 'finance_daily_gate_state', 'finance_day_records'
   )
 ORDER BY c.relname;
 SQL
 )"
-  local expected=$'crm_customers=true/true\norch_governance_controls=true/true\norch_governance_intents=true/true\norch_job_events=true/true\norch_jobs=true/true\norch_work_items=true/true\noutbox_consumed_events=true/true'
+  local expected=$'crm_communications=true/true\ncrm_contracts=true/true\ncrm_customers=true/true\ncrm_next_actions=true/true\ncrm_operational_exceptions=true/true\ndelivery_projects=true/true\nfinance_daily_gate_state=true/true\nfinance_day_records=true/true\nfinance_exceptions=true/true\nfinance_journal_entries=true/true\nfinance_reconciliations=true/true\norch_governance_controls=true/true\norch_governance_intents=true/true\norch_job_events=true/true\norch_jobs=true/true\norch_work_items=true/true\noutbox_consumed_events=true/true\npm_assignments=true/true\npm_plans=true/true\npm_target_observations=true/true\npm_targets=true/true\npm_variance_exceptions=true/true'
   if [[ "${out}" == "${expected}" ]]; then
     record PASS "FORCE RLS flags" "relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events"
     log "FORCE RLS evidence:"
@@ -241,15 +262,20 @@ WHERE schemaname = 'public'
   AND tablename IN (
     'orch_jobs', 'orch_work_items', 'orch_job_events',
     'orch_governance_controls', 'orch_governance_intents',
-    'crm_customers', 'outbox_consumed_events'
+    'crm_customers', 'outbox_consumed_events',
+    'crm_contracts', 'crm_communications', 'crm_next_actions', 'crm_operational_exceptions',
+    'pm_plans', 'pm_assignments', 'pm_targets', 'pm_target_observations',
+    'pm_variance_exceptions', 'delivery_projects',
+    'finance_journal_entries',
+    'finance_reconciliations', 'finance_exceptions', 'finance_daily_gate_state', 'finance_day_records'
   )
   AND policyname = 'workspace_isolation';
 SQL
 )"
-  if [[ "${n}" == "7" ]]; then
-    record PASS "workspace_isolation policies" "7/7 on orch_*/orch_governance_*/crm_customers/outbox_consumed_events"
+  if [[ "${n}" == "22" ]]; then
+    record PASS "workspace_isolation policies" "22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*"
   else
-    record FAIL "workspace_isolation policies" "expected 7, got ${n}"
+    record FAIL "workspace_isolation policies" "expected 22, got ${n}"
   fi
 }
 
@@ -642,6 +668,381 @@ SQL
   fi
 }
 
+# P6-b G001 (PG-A/B/C1/C2) isolation proof: the 15 new domain-PG tables
+# (crm_contracts/communications/next_actions/operational_exceptions,
+# pm_plans/assignments/targets/target_observations/variance_exceptions,
+# delivery_projects, finance_journal_entries,
+# finance_reconciliations/exceptions/daily_gate_state/day_records) are all
+# granted to ai_crm_runtime_api (NOBYPASSRLS), so this mirrors the
+# crm_customers isolation block above: SET LOCAL ROLE ai_crm_runtime_api,
+# seed workspace A/B rows, assert per-workspace visibility, assert
+# cross-workspace inserts are denied by WITH CHECK, then clean up.
+run_p6b_g001_isolation() {
+  ensure_runtime_role_membership
+
+  local has_runtime
+  has_runtime="$(psql_q -c "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_crm_runtime_api' AND rolcanlogin AND NOT rolbypassrls)")"
+  if [[ "${has_runtime}" != "t" && "${has_runtime}" != "true" ]]; then
+    record SKIP "p6b-g001 isolation insert/select" "ai_crm_runtime_api missing or BYPASSRLS"
+    return 0
+  fi
+  if ! psql_q -c "SET ROLE ai_crm_runtime_api; SELECT current_user" >/dev/null 2>&1; then
+    record SKIP "p6b-g001 isolation insert/select" "cannot SET ROLE ai_crm_runtime_api (no membership); FORCE RLS flags still checked"
+    return 0
+  fi
+
+  local out
+  # shellcheck disable=SC2016
+  out="$(psql_q <<'SQL'
+BEGIN;
+
+RESET ROLE;
+INSERT INTO workspaces (id, name) VALUES
+  ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'smoke-ws-a'),
+  ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-ws-b')
+ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name;
+
+-- Clean prior smoke rows (owner/superuser path).
+DELETE FROM crm_contracts WHERE id LIKE 'smoke-%';
+DELETE FROM crm_communications WHERE id LIKE 'smoke-%';
+DELETE FROM crm_next_actions WHERE id LIKE 'smoke-%';
+DELETE FROM crm_operational_exceptions WHERE id LIKE 'smoke-%';
+DELETE FROM pm_plans WHERE id LIKE 'smoke-%';
+DELETE FROM pm_assignments WHERE id LIKE 'smoke-%';
+DELETE FROM pm_targets WHERE id LIKE 'smoke-%';
+DELETE FROM pm_target_observations WHERE id LIKE 'smoke-%';
+DELETE FROM pm_variance_exceptions WHERE id LIKE 'smoke-%';
+DELETE FROM delivery_projects WHERE id LIKE 'smoke-%';
+DELETE FROM finance_journal_entries WHERE id LIKE 'smoke-%';
+DELETE FROM finance_reconciliations WHERE id LIKE 'smoke-%';
+DELETE FROM finance_exceptions WHERE id LIKE 'smoke-%';
+DELETE FROM finance_daily_gate_state WHERE workspace_id IN ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb');
+DELETE FROM finance_day_records WHERE workspace_id IN ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb');
+
+SET LOCAL ROLE ai_crm_runtime_api;
+
+-- Workspace A context: seed one row per new table.
+SET LOCAL app.workspace_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+
+INSERT INTO crm_contracts (id, workspace_id, customer_id, title, scope, effective_from, value_krw, version)
+VALUES ('smoke-contract-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'smoke-customer-a', 'Smoke Contract A', 'smoke', '2026-01-01', 1000, 1);
+
+INSERT INTO crm_communications (id, workspace_id, customer_id, channel, summary, occurred_at, version)
+VALUES ('smoke-comm-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'smoke-customer-a', 'email', 'Smoke Comm A', '2026-01-01T00:00:00.000Z', 1);
+
+INSERT INTO crm_next_actions (id, workspace_id, customer_id, title, priority, due_at, status, version)
+VALUES ('smoke-action-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'smoke-customer-a', 'Smoke Action A', 5, '2026-02-01T00:00:00.000Z', 'open', 1);
+
+INSERT INTO crm_operational_exceptions (id, workspace_id, customer_id, title, severity, priority, occurred_at, status, version)
+VALUES ('smoke-exception-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'smoke-customer-a', 'Smoke Exception A', 'high', 5, '2026-01-15T00:00:00.000Z', 'open', 1);
+
+INSERT INTO pm_plans (id, workspace_id, project_id, version, revisions)
+VALUES ('smoke-plan-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'smoke-project-a', 1, '[]'::jsonb);
+
+INSERT INTO pm_assignments (id, workspace_id, project_id, plan_id, task_id, assignee_principal_id, assigned_by_principal_id, status, created_at)
+VALUES ('smoke-assignment-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'smoke-project-a', 'smoke-plan-a', 'smoke-task-a', 'principal-smoke', 'principal-smoke', 'active', now());
+
+INSERT INTO pm_targets (id, workspace_id, project_id, metric, target, tolerance, direction, version)
+VALUES ('smoke-target-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'smoke-project-a', 'schedule', 10, 1, 'max', 1);
+
+INSERT INTO pm_target_observations (id, workspace_id, project_id, target_id, actual, observed_at, evidence_ref)
+VALUES ('smoke-observation-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'smoke-project-a', 'smoke-target-a', 9, now(), 'smoke-evidence-a');
+
+INSERT INTO pm_variance_exceptions (id, workspace_id, project_id, target_id, metric, target, actual, variance, severity, evidence_ref)
+VALUES ('smoke-variance-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'smoke-project-a', 'smoke-target-a', 'schedule', 10, 9, 1, 'low', 'smoke-evidence-a');
+
+INSERT INTO delivery_projects (id, workspace_id, customer_id, name, contract_id, contract_scope, schedule_start, schedule_end, completion_rule, risk_threshold, status, version)
+VALUES ('smoke-project-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'smoke-customer-a', 'Smoke Project A', 'smoke-contract-a', 'smoke', '2026-01-01', '2026-12-31', 'all_required_deliverables_approved', 0.5, 'active', 1);
+
+INSERT INTO finance_journal_entries (id, workspace_id, entry_date, description, lines, debit_total_krw, credit_total_krw, status, created_by_principal_id)
+VALUES ('smoke-entry-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '2026-01-01', 'Smoke Entry A', '[]'::jsonb, 0, 0, 'DRAFT', 'principal-smoke');
+
+INSERT INTO finance_reconciliations (id, workspace_id, statement_row, ledger_amount_krw, variance_krw, status, reconciled_by_principal_id, reconciled_at)
+VALUES ('smoke-recon-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '{}'::jsonb, 1000, 0, 'matched', 'principal-smoke', now());
+
+INSERT INTO finance_exceptions (id, workspace_id, kind, variance_krw, status, opened_at)
+VALUES ('smoke-finexc-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'variance', 0, 'open', now());
+
+INSERT INTO finance_daily_gate_state (workspace_id, streak, tier)
+VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 1, 'conservative');
+
+INSERT INTO finance_day_records (workspace_id, date, qualifying, streak_after, tier_after)
+VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '2026-01-01', true, 1, 'conservative');
+
+-- Workspace B context: same shape, distinct ids/workspace.
+SET LOCAL app.workspace_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+
+INSERT INTO crm_contracts (id, workspace_id, customer_id, title, scope, effective_from, value_krw, version)
+VALUES ('smoke-contract-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-customer-b', 'Smoke Contract B', 'smoke', '2026-01-01', 2000, 1);
+
+INSERT INTO crm_communications (id, workspace_id, customer_id, channel, summary, occurred_at, version)
+VALUES ('smoke-comm-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-customer-b', 'email', 'Smoke Comm B', '2026-01-01T00:00:00.000Z', 1);
+
+INSERT INTO crm_next_actions (id, workspace_id, customer_id, title, priority, due_at, status, version)
+VALUES ('smoke-action-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-customer-b', 'Smoke Action B', 5, '2026-02-01T00:00:00.000Z', 'open', 1);
+
+INSERT INTO crm_operational_exceptions (id, workspace_id, customer_id, title, severity, priority, occurred_at, status, version)
+VALUES ('smoke-exception-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-customer-b', 'Smoke Exception B', 'high', 5, '2026-01-15T00:00:00.000Z', 'open', 1);
+
+INSERT INTO pm_plans (id, workspace_id, project_id, version, revisions)
+VALUES ('smoke-plan-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-project-b', 1, '[]'::jsonb);
+
+INSERT INTO pm_assignments (id, workspace_id, project_id, plan_id, task_id, assignee_principal_id, assigned_by_principal_id, status, created_at)
+VALUES ('smoke-assignment-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-project-b', 'smoke-plan-b', 'smoke-task-b', 'principal-smoke', 'principal-smoke', 'active', now());
+
+INSERT INTO pm_targets (id, workspace_id, project_id, metric, target, tolerance, direction, version)
+VALUES ('smoke-target-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-project-b', 'schedule', 10, 1, 'max', 1);
+
+INSERT INTO pm_target_observations (id, workspace_id, project_id, target_id, actual, observed_at, evidence_ref)
+VALUES ('smoke-observation-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-project-b', 'smoke-target-b', 9, now(), 'smoke-evidence-b');
+
+INSERT INTO pm_variance_exceptions (id, workspace_id, project_id, target_id, metric, target, actual, variance, severity, evidence_ref)
+VALUES ('smoke-variance-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-project-b', 'smoke-target-b', 'schedule', 10, 9, 1, 'low', 'smoke-evidence-b');
+
+INSERT INTO delivery_projects (id, workspace_id, customer_id, name, contract_id, contract_scope, schedule_start, schedule_end, completion_rule, risk_threshold, status, version)
+VALUES ('smoke-project-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-customer-b', 'Smoke Project B', 'smoke-contract-b', 'smoke', '2026-01-01', '2026-12-31', 'all_required_deliverables_approved', 0.5, 'active', 1);
+
+INSERT INTO finance_journal_entries (id, workspace_id, entry_date, description, lines, debit_total_krw, credit_total_krw, status, created_by_principal_id)
+VALUES ('smoke-entry-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '2026-01-01', 'Smoke Entry B', '[]'::jsonb, 0, 0, 'DRAFT', 'principal-smoke');
+
+INSERT INTO finance_reconciliations (id, workspace_id, statement_row, ledger_amount_krw, variance_krw, status, reconciled_by_principal_id, reconciled_at)
+VALUES ('smoke-recon-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '{}'::jsonb, 2000, 0, 'matched', 'principal-smoke', now());
+
+INSERT INTO finance_exceptions (id, workspace_id, kind, variance_krw, status, opened_at)
+VALUES ('smoke-finexc-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'variance', 0, 'open', now());
+
+INSERT INTO finance_daily_gate_state (workspace_id, streak, tier)
+VALUES ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 1, 'conservative');
+
+INSERT INTO finance_day_records (workspace_id, date, qualifying, streak_after, tier_after)
+VALUES ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '2026-01-01', true, 1, 'conservative');
+
+-- Isolation: under A, only A's smoke rows visible.
+SET LOCAL app.workspace_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+SELECT 'p6b_a_contracts=' || count(*)::text FROM crm_contracts WHERE id LIKE 'smoke-%';
+SELECT 'p6b_a_comms=' || count(*)::text FROM crm_communications WHERE id LIKE 'smoke-%';
+SELECT 'p6b_a_actions=' || count(*)::text FROM crm_next_actions WHERE id LIKE 'smoke-%';
+SELECT 'p6b_a_exceptions=' || count(*)::text FROM crm_operational_exceptions WHERE id LIKE 'smoke-%';
+SELECT 'p6b_a_plans=' || count(*)::text FROM pm_plans WHERE id LIKE 'smoke-%';
+SELECT 'p6b_a_assignments=' || count(*)::text FROM pm_assignments WHERE id LIKE 'smoke-%';
+SELECT 'p6b_a_targets=' || count(*)::text FROM pm_targets WHERE id LIKE 'smoke-%';
+SELECT 'p6b_a_observations=' || count(*)::text FROM pm_target_observations WHERE id LIKE 'smoke-%';
+SELECT 'p6b_a_variances=' || count(*)::text FROM pm_variance_exceptions WHERE id LIKE 'smoke-%';
+SELECT 'p6b_a_projects=' || count(*)::text FROM delivery_projects WHERE id LIKE 'smoke-%';
+SELECT 'p6b_a_entries=' || count(*)::text FROM finance_journal_entries WHERE id LIKE 'smoke-%';
+SELECT 'p6b_a_recons=' || count(*)::text FROM finance_reconciliations WHERE id LIKE 'smoke-%';
+SELECT 'p6b_a_finexc=' || count(*)::text FROM finance_exceptions WHERE id LIKE 'smoke-%';
+SELECT 'p6b_a_gatestate=' || count(*)::text FROM finance_daily_gate_state WHERE workspace_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+SELECT 'p6b_a_dayrecords=' || count(*)::text FROM finance_day_records WHERE workspace_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+
+-- Isolation: under B, only B's smoke rows visible.
+SET LOCAL app.workspace_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+SELECT 'p6b_b_contracts=' || count(*)::text FROM crm_contracts WHERE id LIKE 'smoke-%';
+SELECT 'p6b_b_comms=' || count(*)::text FROM crm_communications WHERE id LIKE 'smoke-%';
+SELECT 'p6b_b_actions=' || count(*)::text FROM crm_next_actions WHERE id LIKE 'smoke-%';
+SELECT 'p6b_b_exceptions=' || count(*)::text FROM crm_operational_exceptions WHERE id LIKE 'smoke-%';
+SELECT 'p6b_b_plans=' || count(*)::text FROM pm_plans WHERE id LIKE 'smoke-%';
+SELECT 'p6b_b_assignments=' || count(*)::text FROM pm_assignments WHERE id LIKE 'smoke-%';
+SELECT 'p6b_b_targets=' || count(*)::text FROM pm_targets WHERE id LIKE 'smoke-%';
+SELECT 'p6b_b_observations=' || count(*)::text FROM pm_target_observations WHERE id LIKE 'smoke-%';
+SELECT 'p6b_b_variances=' || count(*)::text FROM pm_variance_exceptions WHERE id LIKE 'smoke-%';
+SELECT 'p6b_b_projects=' || count(*)::text FROM delivery_projects WHERE id LIKE 'smoke-%';
+SELECT 'p6b_b_entries=' || count(*)::text FROM finance_journal_entries WHERE id LIKE 'smoke-%';
+SELECT 'p6b_b_recons=' || count(*)::text FROM finance_reconciliations WHERE id LIKE 'smoke-%';
+SELECT 'p6b_b_finexc=' || count(*)::text FROM finance_exceptions WHERE id LIKE 'smoke-%';
+SELECT 'p6b_b_gatestate=' || count(*)::text FROM finance_daily_gate_state WHERE workspace_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+SELECT 'p6b_b_dayrecords=' || count(*)::text FROM finance_day_records WHERE workspace_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+
+-- Cross-workspace insert must fail (WITH CHECK) — one representative DO
+-- block per table (mirrors the crm_customers/orch_jobs pattern above).
+SET LOCAL app.workspace_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+DO $BLK$
+BEGIN
+  BEGIN
+    INSERT INTO crm_contracts (id, workspace_id, customer_id, title, scope, effective_from, version)
+    VALUES ('smoke-contract-cross', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-customer-cross', 'Cross', 'smoke', '2026-01-01', 1);
+    RAISE EXCEPTION 'expected cross-workspace crm_contracts insert to be blocked by RLS';
+  EXCEPTION
+    WHEN insufficient_privilege THEN RAISE NOTICE 'contracts_cross_insert_blocked=insufficient_privilege';
+    WHEN OTHERS THEN
+      IF SQLERRM LIKE '%policy%' OR SQLSTATE IN ('42501', 'P0001', '28000') OR SQLERRM LIKE '%row-level security%' THEN
+        RAISE NOTICE 'contracts_cross_insert_blocked=%', SQLSTATE;
+      ELSIF SQLERRM = 'expected cross-workspace crm_contracts insert to be blocked by RLS' THEN
+        RAISE;
+      ELSE
+        RAISE NOTICE 'contracts_cross_insert_blocked=%:%', SQLSTATE, SQLERRM;
+      END IF;
+  END;
+END
+$BLK$;
+
+DO $BLK$
+BEGIN
+  BEGIN
+    INSERT INTO pm_plans (id, workspace_id, project_id, version)
+    VALUES ('smoke-plan-cross', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-project-cross', 1);
+    RAISE EXCEPTION 'expected cross-workspace pm_plans insert to be blocked by RLS';
+  EXCEPTION
+    WHEN insufficient_privilege THEN RAISE NOTICE 'plans_cross_insert_blocked=insufficient_privilege';
+    WHEN OTHERS THEN
+      IF SQLERRM LIKE '%policy%' OR SQLSTATE IN ('42501', 'P0001', '28000') OR SQLERRM LIKE '%row-level security%' THEN
+        RAISE NOTICE 'plans_cross_insert_blocked=%', SQLSTATE;
+      ELSIF SQLERRM = 'expected cross-workspace pm_plans insert to be blocked by RLS' THEN
+        RAISE;
+      ELSE
+        RAISE NOTICE 'plans_cross_insert_blocked=%:%', SQLSTATE, SQLERRM;
+      END IF;
+  END;
+END
+$BLK$;
+
+DO $BLK$
+BEGIN
+  BEGIN
+    INSERT INTO delivery_projects (id, workspace_id, customer_id, name, contract_id, contract_scope, schedule_start, schedule_end, completion_rule, risk_threshold, status)
+    VALUES ('smoke-project-cross', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-customer-cross', 'Cross', 'smoke-contract-cross', 'smoke', '2026-01-01', '2026-12-31', 'all_required_deliverables_approved', 0.5, 'active');
+    RAISE EXCEPTION 'expected cross-workspace delivery_projects insert to be blocked by RLS';
+  EXCEPTION
+    WHEN insufficient_privilege THEN RAISE NOTICE 'projects_cross_insert_blocked=insufficient_privilege';
+    WHEN OTHERS THEN
+      IF SQLERRM LIKE '%policy%' OR SQLSTATE IN ('42501', 'P0001', '28000') OR SQLERRM LIKE '%row-level security%' THEN
+        RAISE NOTICE 'projects_cross_insert_blocked=%', SQLSTATE;
+      ELSIF SQLERRM = 'expected cross-workspace delivery_projects insert to be blocked by RLS' THEN
+        RAISE;
+      ELSE
+        RAISE NOTICE 'projects_cross_insert_blocked=%:%', SQLSTATE, SQLERRM;
+      END IF;
+  END;
+END
+$BLK$;
+
+DO $BLK$
+BEGIN
+  BEGIN
+    INSERT INTO finance_journal_entries (id, workspace_id, entry_date, description, lines, debit_total_krw, credit_total_krw, status, created_by_principal_id)
+    VALUES ('smoke-entry-cross', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '2026-01-01', 'Cross', '[]'::jsonb, 0, 0, 'DRAFT', 'principal-smoke');
+    RAISE EXCEPTION 'expected cross-workspace finance_journal_entries insert to be blocked by RLS';
+  EXCEPTION
+    WHEN insufficient_privilege THEN RAISE NOTICE 'entries_cross_insert_blocked=insufficient_privilege';
+    WHEN OTHERS THEN
+      IF SQLERRM LIKE '%policy%' OR SQLSTATE IN ('42501', 'P0001', '28000') OR SQLERRM LIKE '%row-level security%' THEN
+        RAISE NOTICE 'entries_cross_insert_blocked=%', SQLSTATE;
+      ELSIF SQLERRM = 'expected cross-workspace finance_journal_entries insert to be blocked by RLS' THEN
+        RAISE;
+      ELSE
+        RAISE NOTICE 'entries_cross_insert_blocked=%:%', SQLSTATE, SQLERRM;
+      END IF;
+  END;
+END
+$BLK$;
+
+DO $BLK$
+BEGIN
+  BEGIN
+    INSERT INTO finance_reconciliations (id, workspace_id, statement_row, ledger_amount_krw, variance_krw, status, reconciled_by_principal_id, reconciled_at)
+    VALUES ('smoke-recon-cross', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '{}'::jsonb, 1000, 0, 'matched', 'principal-smoke', now());
+    RAISE EXCEPTION 'expected cross-workspace finance_reconciliations insert to be blocked by RLS';
+  EXCEPTION
+    WHEN insufficient_privilege THEN RAISE NOTICE 'recons_cross_insert_blocked=insufficient_privilege';
+    WHEN OTHERS THEN
+      IF SQLERRM LIKE '%policy%' OR SQLSTATE IN ('42501', 'P0001', '28000') OR SQLERRM LIKE '%row-level security%' THEN
+        RAISE NOTICE 'recons_cross_insert_blocked=%', SQLSTATE;
+      ELSIF SQLERRM = 'expected cross-workspace finance_reconciliations insert to be blocked by RLS' THEN
+        RAISE;
+      ELSE
+        RAISE NOTICE 'recons_cross_insert_blocked=%:%', SQLSTATE, SQLERRM;
+      END IF;
+  END;
+END
+$BLK$;
+
+DO $BLK$
+BEGIN
+  BEGIN
+    INSERT INTO finance_daily_gate_state (workspace_id, streak, tier)
+    VALUES ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 99, 'risk_tiered')
+    ON CONFLICT (workspace_id) DO UPDATE SET streak = EXCLUDED.streak;
+    RAISE EXCEPTION 'expected cross-workspace finance_daily_gate_state write to be blocked by RLS';
+  EXCEPTION
+    WHEN insufficient_privilege THEN RAISE NOTICE 'gatestate_cross_write_blocked=insufficient_privilege';
+    WHEN OTHERS THEN
+      IF SQLERRM LIKE '%policy%' OR SQLSTATE IN ('42501', 'P0001', '28000') OR SQLERRM LIKE '%row-level security%' THEN
+        RAISE NOTICE 'gatestate_cross_write_blocked=%', SQLSTATE;
+      ELSIF SQLERRM = 'expected cross-workspace finance_daily_gate_state write to be blocked by RLS' THEN
+        RAISE;
+      ELSE
+        RAISE NOTICE 'gatestate_cross_write_blocked=%:%', SQLSTATE, SQLERRM;
+      END IF;
+  END;
+END
+$BLK$;
+
+-- Cleanup smoke rows still under runtime + proper workspace contexts.
+SET LOCAL app.workspace_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+DELETE FROM crm_contracts WHERE id = 'smoke-contract-a';
+DELETE FROM crm_communications WHERE id = 'smoke-comm-a';
+DELETE FROM crm_next_actions WHERE id = 'smoke-action-a';
+DELETE FROM crm_operational_exceptions WHERE id = 'smoke-exception-a';
+DELETE FROM pm_target_observations WHERE id = 'smoke-observation-a';
+DELETE FROM pm_variance_exceptions WHERE id = 'smoke-variance-a';
+DELETE FROM pm_assignments WHERE id = 'smoke-assignment-a';
+DELETE FROM pm_targets WHERE id = 'smoke-target-a';
+DELETE FROM pm_plans WHERE id = 'smoke-plan-a';
+DELETE FROM delivery_projects WHERE id = 'smoke-project-a';
+DELETE FROM finance_journal_entries WHERE id = 'smoke-entry-a';
+DELETE FROM finance_reconciliations WHERE id = 'smoke-recon-a';
+DELETE FROM finance_exceptions WHERE id = 'smoke-finexc-a';
+DELETE FROM finance_day_records WHERE workspace_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+DELETE FROM finance_daily_gate_state WHERE workspace_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+
+SET LOCAL app.workspace_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+DELETE FROM crm_contracts WHERE id = 'smoke-contract-b';
+DELETE FROM crm_communications WHERE id = 'smoke-comm-b';
+DELETE FROM crm_next_actions WHERE id = 'smoke-action-b';
+DELETE FROM crm_operational_exceptions WHERE id = 'smoke-exception-b';
+DELETE FROM pm_target_observations WHERE id = 'smoke-observation-b';
+DELETE FROM pm_variance_exceptions WHERE id = 'smoke-variance-b';
+DELETE FROM pm_assignments WHERE id = 'smoke-assignment-b';
+DELETE FROM pm_targets WHERE id = 'smoke-target-b';
+DELETE FROM pm_plans WHERE id = 'smoke-plan-b';
+DELETE FROM delivery_projects WHERE id = 'smoke-project-b';
+DELETE FROM finance_journal_entries WHERE id = 'smoke-entry-b';
+DELETE FROM finance_reconciliations WHERE id = 'smoke-recon-b';
+DELETE FROM finance_exceptions WHERE id = 'smoke-finexc-b';
+DELETE FROM finance_day_records WHERE workspace_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+DELETE FROM finance_daily_gate_state WHERE workspace_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+
+SELECT 'p6b_isolation_ok=1';
+COMMIT;
+SQL
+)" || {
+    record FAIL "p6b-g001 isolation insert/select" "transaction failed; see ${RUN_LOG}"
+    return 0
+  }
+
+  log "p6b-g001 isolation transcript:"
+  log "${out}"
+
+  local ok=1
+  for marker in \
+    p6b_a_contracts=1 p6b_a_comms=1 p6b_a_actions=1 p6b_a_exceptions=1 \
+    p6b_a_plans=1 p6b_a_assignments=1 p6b_a_targets=1 p6b_a_observations=1 p6b_a_variances=1 \
+    p6b_a_projects=1 p6b_a_entries=1 p6b_a_recons=1 p6b_a_finexc=1 p6b_a_gatestate=1 p6b_a_dayrecords=1 \
+    p6b_b_contracts=1 p6b_b_comms=1 p6b_b_actions=1 p6b_b_exceptions=1 \
+    p6b_b_plans=1 p6b_b_assignments=1 p6b_b_targets=1 p6b_b_observations=1 p6b_b_variances=1 \
+    p6b_b_projects=1 p6b_b_entries=1 p6b_b_recons=1 p6b_b_finexc=1 p6b_b_gatestate=1 p6b_b_dayrecords=1 \
+    p6b_isolation_ok=1
+  do
+    printf '%s\n' "${out}" | grep -q "${marker}" || ok=0
+  done
+
+  if [[ "${ok}" == "1" ]]; then
+    record PASS "p6b-g001 isolation insert/select" "SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done"
+  else
+    record FAIL "p6b-g001 isolation insert/select" "unexpected counts/ids: ${out//$'\n'/; }"
+  fi
+}
+
 write_doc() {
   local overall="FAIL"
   if [[ "${FAIL_N}" -eq 0 ]]; then
@@ -786,6 +1187,7 @@ main() {
   check_policies
   run_isolation
   run_outbox_consumer_isolation
+  run_p6b_g001_isolation
   write_doc
 
   log "=== summary PASS=${PASS_N} FAIL=${FAIL_N} SKIP=${SKIP_N} ==="

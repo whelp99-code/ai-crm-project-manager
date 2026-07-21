@@ -117,6 +117,45 @@ export class CrmService {
       this.customers.set(customer.id, structuredClone(customer));
     }
   }
+  /**
+   * Restart-consistency hydrate-on-boot (PG-A — CRM sub-aggregates PG
+   * proof): rebuild the in-memory contracts/communications/nextActions/
+   * exceptions maps wholesale from persisted rows (read back from PG at
+   * process start via `CrmSubRepository.listAll*`), so a fresh process
+   * reflects prior sub-aggregates instead of starting empty. Closes the
+   * residual documented on `hydrateCustomers` above.
+   */
+  hydrateSubAggregates(input: {
+    contracts?: readonly CustomerContract[];
+    communications?: readonly Communication[];
+    nextActions?: readonly NextAction[];
+    exceptions?: readonly OperationalException[];
+  }): void {
+    if (input.contracts) {
+      this.contracts.clear();
+      for (const contract of input.contracts) {
+        this.contracts.set(contract.id, structuredClone(contract));
+      }
+    }
+    if (input.communications) {
+      this.communications.clear();
+      for (const communication of input.communications) {
+        this.communications.set(communication.id, structuredClone(communication));
+      }
+    }
+    if (input.nextActions) {
+      this.nextActions.clear();
+      for (const action of input.nextActions) {
+        this.nextActions.set(action.id, structuredClone(action));
+      }
+    }
+    if (input.exceptions) {
+      this.exceptions.clear();
+      for (const exception of input.exceptions) {
+        this.exceptions.set(exception.id, structuredClone(exception));
+      }
+    }
+  }
 
   createCustomer(input: Omit<Customer, "version">): Customer {
     this.assertUnique(this.customers, input.id, "customer");

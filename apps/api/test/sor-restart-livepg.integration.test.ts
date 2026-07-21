@@ -144,6 +144,10 @@ describe.skipIf(!LIVE)("G-01 SoR restart-consistency: hydrate-on-boot against RE
         await client.query(`DELETE FROM orch_job_events WHERE workspace_id = $1`, [WS_ID]);
         await client.query(`DELETE FROM orch_work_items WHERE workspace_id = $1`, [WS_ID]);
         await client.query(`DELETE FROM orch_jobs WHERE workspace_id = $1`, [WS_ID]);
+        // PG-B wiring (P6-b G001) now dual-writes this test's POST
+        // /api/pm/plans call for real; clean it up too or the workspaces FK
+        // delete below fails.
+        await client.query(`DELETE FROM pm_plans WHERE workspace_id = $1`, [WS_ID]);
       } finally {
         await client.query(`ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only`);
         await client.query(`ALTER TABLE audit_chain_heads ENABLE TRIGGER audit_chain_heads_no_delete`);

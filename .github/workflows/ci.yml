@@ -104,6 +104,10 @@ jobs:
             test/n09-notify.livepg.integration.test.ts \
             test/n12-n13-livepg.integration.test.ts \
             test/sor-restart-livepg.integration.test.ts \
+            test/pg-a-crm-sub.livepg.integration.test.ts \
+            test/pg-b-pm-delivery.livepg.integration.test.ts \
+            test/pg-c1-ledger.livepg.integration.test.ts \
+            test/pg-c2-recon-dailygate.livepg.integration.test.ts \
             --no-file-parallelism
           pnpm --filter @ai-crm/worker exec vitest run \
             test/worker-durable.live-pg.integration.test.ts \

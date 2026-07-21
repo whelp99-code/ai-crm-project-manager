@@ -92,6 +92,49 @@ export class PmService {
   private readonly observations = new Map<string, TargetObservation>();
   private readonly exceptions = new Map<string, VarianceException>();
 
+  /**
+   * Restart-consistency hydrate-on-boot (Ultragoal P6-b G001 / PG-B):
+   * rebuild every in-memory PM map wholesale from persisted rows (read back
+   * from PG at process start via `PmRepository.listAll*`), so a fresh
+   * process reflects prior plans/assignments/targets/observations/
+   * exceptions instead of starting empty. Mirrors
+   * `CrmService.hydrateCustomers`.
+   */
+  hydratePlans(plans: readonly PmPlan[]): void {
+    this.plans.clear();
+    for (const plan of plans) {
+      this.plans.set(plan.id, structuredClone(plan));
+    }
+  }
+
+  hydrateAssignments(assignments: readonly PmAssignment[]): void {
+    this.assignments.clear();
+    for (const assignment of assignments) {
+      this.assignments.set(assignment.id, structuredClone(assignment));
+    }
+  }
+
+  hydrateTargets(targets: readonly PmTarget[]): void {
+    this.targets.clear();
+    for (const target of targets) {
+      this.targets.set(target.id, structuredClone(target));
+    }
+  }
+
+  hydrateObservations(observations: readonly TargetObservation[]): void {
+    this.observations.clear();
+    for (const observation of observations) {
+      this.observations.set(observation.id, structuredClone(observation));
+    }
+  }
+
+  hydrateExceptions(exceptions: readonly VarianceException[]): void {
+    this.exceptions.clear();
+    for (const exception of exceptions) {
+      this.exceptions.set(exception.id, structuredClone(exception));
+    }
+  }
+
   createPlan(input: Omit<PmPlan, "version" | "revisions"> & PmPlanRevision): PmPlan {
     if (this.plans.has(input.id)) throw new PmDomainError("DUPLICATE_ID", `plan exists: ${input.id}`);
     if (input.revision !== 1) throw new PmDomainError("INVALID_REVISION", "initial revision must be 1");

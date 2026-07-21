@@ -60,6 +60,25 @@ export class ReconciliationService {
   constructor(config: FinancePackConfig) {
     this.config = assertFinancePackConfig(config);
   }
+  /**
+   * Restart-consistency hydrate-on-boot (PG-C2): rebuild the in-memory
+   * `reconciliations`/`exceptions` maps AND the `reconciledFingerprints`
+   * dedup set wholesale from persisted rows (read back from PG at process
+   * start), so a fresh process reflects prior reconciliations/exceptions
+   * instead of starting empty. Mirrors `CrmService.hydrateCustomers`.
+   */
+  hydrateReconciliations(reconciliations: readonly Reconciliation[], exceptions: readonly FinanceException[]): void {
+    this.reconciliations.clear();
+    this.exceptions.clear();
+    this.reconciledFingerprints.clear();
+    for (const exception of exceptions) {
+      this.exceptions.set(exception.id, structuredClone(exception));
+    }
+    for (const reconciliation of reconciliations) {
+      this.reconciliations.set(reconciliation.id, structuredClone(reconciliation));
+      this.reconciledFingerprints.add(`${reconciliation.workspaceId}::${reconciliation.statementRow.rowFingerprint}`);
+    }
+  }
 
   reconcile(input: ReconcileInput): Reconciliation {
     if (this.reconciliations.has(input.id)) {

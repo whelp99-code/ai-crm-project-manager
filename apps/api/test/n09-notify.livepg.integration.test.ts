@@ -271,6 +271,10 @@ describe.skipIf(!LIVE)("N-09 cross-process eventing via PG LISTEN/NOTIFY against
           await client.query(`DELETE FROM orch_job_events WHERE workspace_id = $1`, [ws]);
           await client.query(`DELETE FROM orch_work_items WHERE workspace_id = $1`, [ws]);
           await client.query(`DELETE FROM orch_jobs WHERE workspace_id = $1`, [ws]);
+          // PG-B wiring (P6-b G001) now dual-writes this test's POST
+          // /api/pm/plans calls (WS_XPROC/WS_RECONNECT) for real; clean up
+          // or the workspaces FK delete below fails.
+          await client.query(`DELETE FROM pm_plans WHERE workspace_id = $1`, [ws]);
         }
       } finally {
         await client.query(`ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only`);

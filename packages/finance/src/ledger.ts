@@ -51,7 +51,48 @@ export class LedgerService {
     this.accountCodes = new Set(config.chartOfAccounts.map((account) => account.code));
   }
 
+  /**
+   * Hydrate-on-boot (PG-C1 restart survival): replaces the in-memory entry
+   * set wholesale with `entries` (as persisted/restored from
+   * `PgLedgerRepository.listAllEntries()`). Mirrors
+   * `CrmService.hydrateCustomers` / `OrchestrationStore.hydrate` — clears
+   * first so a restart never merges stale in-memory state with the
+   * PG-sourced snapshot.
+   */
+  hydrateJournalEntries(entries: readonly JournalEntry[]): void {
+    this.entries.clear();
+    for (const entry of entries) {
+      this.entries.set(entry.id, structuredClone(entry));
+    }
+  }
+
   draft(input: DraftJournalEntryInput): JournalEntry {
+    return this.commitDraft(this.buildDraftEntry(input));
+  }
+
+  /**
+   * PG-FIRST fail-closed dual-write hook: validates and computes the DRAFT
+   * entry WITHOUT committing it to memory, so a caller (route wiring) can
+   * persist it to PG first and only call `commitDraft` once that write
+   * succeeds — a PG failure then never leaves memory ahead of PG. `draft()`
+   * is implemented as `commitDraft(buildDraftEntry(input))`, so behavior is
+   * unchanged for callers that do not split the two steps.
+   */
+  previewDraft(input: DraftJournalEntryInput): JournalEntry {
+    return structuredClone(this.buildDraftEntry(input));
+  }
+
+  /** PG-FIRST fail-closed dual-write hook: commits an already-validated (`previewDraft`) entry. */
+  commitDraft(entry: JournalEntry): JournalEntry {
+    if (this.entries.has(entry.id)) {
+      throw new FinanceDomainError("DUPLICATE_ID", `journal entry already exists: ${entry.id}`);
+    }
+    const stored = structuredClone(entry);
+    this.entries.set(stored.id, stored);
+    return structuredClone(stored);
+  }
+
+  private buildDraftEntry(input: DraftJournalEntryInput): JournalEntry {
     if (this.entries.has(input.id)) {
       throw new FinanceDomainError("DUPLICATE_ID", `journal entry already exists: ${input.id}`);
     }
@@ -83,17 +124,31 @@ export class LedgerService {
       throw new FinanceDomainError("UNBALANCED_ENTRY", `entry is unbalanced: debit ${debitTotal} != credit ${creditTotal}`);
     }
 
-    const entry: JournalEntry = {
+    return {
       ...input,
       lines: input.lines.map((line) => ({ ...line })),
       status: "DRAFT",
       version: 1,
     };
-    this.entries.set(entry.id, structuredClone(entry));
-    return structuredClone(entry);
   }
 
   verify(workspaceId: string, entryId: string, verifierPrincipalId: string): JournalEntry {
+    return this.commitVerify(this.buildVerifiedEntry(workspaceId, entryId, verifierPrincipalId));
+  }
+
+  /** PG-FIRST fail-closed dual-write hook: see `previewDraft` doc — same split for the VERIFIED transition. */
+  previewVerify(workspaceId: string, entryId: string, verifierPrincipalId: string): JournalEntry {
+    return structuredClone(this.buildVerifiedEntry(workspaceId, entryId, verifierPrincipalId));
+  }
+
+  /** PG-FIRST fail-closed dual-write hook: commits an already-validated (`previewVerify`) entry. */
+  commitVerify(entry: JournalEntry): JournalEntry {
+    const stored = structuredClone(entry);
+    this.entries.set(stored.id, stored);
+    return structuredClone(stored);
+  }
+
+  private buildVerifiedEntry(workspaceId: string, entryId: string, verifierPrincipalId: string): JournalEntry {
     const entry = this.requireEntry(workspaceId, entryId);
     if (entry.status !== "DRAFT") {
       throw new FinanceDomainError("INVALID_STATE", `entry ${entryId} is not DRAFT`);
@@ -101,17 +156,51 @@ export class LedgerService {
     if (verifierPrincipalId === entry.createdByPrincipalId) {
       throw new FinanceDomainError("SOD_VIOLATION", "verifier must differ from the drafting principal");
     }
-    const next: JournalEntry = {
+    return {
       ...entry,
       status: "VERIFIED",
       verifiedByPrincipalId: verifierPrincipalId,
       version: entry.version + 1,
     };
-    this.entries.set(entryId, next);
-    return structuredClone(next);
   }
 
   post(workspaceId: string, entryId: string, posterPrincipalId: string): JournalEntry {
+    const { next, reversedOriginal } = this.buildPostedEntries(workspaceId, entryId, posterPrincipalId);
+    return this.commitPost(next, reversedOriginal);
+  }
+
+  /**
+   * PG-FIRST fail-closed dual-write hook: validates and computes the atomic
+   * two-row POST transition (the posted `next` entry, plus — when this
+   * entry reverses another — the original entry's POSTED -> REVERSED
+   * transition) WITHOUT committing either to memory. A caller persists both
+   * rows to PG inside ONE `withWorkspaceScope` transaction first, and only
+   * calls `commitPost` after that PG write succeeds.
+   */
+  previewPost(workspaceId: string, entryId: string, posterPrincipalId: string): { next: JournalEntry; reversedOriginal?: JournalEntry } {
+    const { next, reversedOriginal } = this.buildPostedEntries(workspaceId, entryId, posterPrincipalId);
+    return {
+      next: structuredClone(next),
+      ...(reversedOriginal ? { reversedOriginal: structuredClone(reversedOriginal) } : {}),
+    };
+  }
+
+  /** PG-FIRST fail-closed dual-write hook: commits an already-validated (`previewPost`) atomic two-row transition. */
+  commitPost(next: JournalEntry, reversedOriginal?: JournalEntry): JournalEntry {
+    const storedNext = structuredClone(next);
+    this.entries.set(storedNext.id, storedNext);
+    if (reversedOriginal) {
+      const storedReversed = structuredClone(reversedOriginal);
+      this.entries.set(storedReversed.id, storedReversed);
+    }
+    return structuredClone(storedNext);
+  }
+
+  private buildPostedEntries(
+    workspaceId: string,
+    entryId: string,
+    posterPrincipalId: string,
+  ): { next: JournalEntry; reversedOriginal?: JournalEntry } {
     const entry = this.requireEntry(workspaceId, entryId);
     if (entry.status !== "VERIFIED") {
       throw new FinanceDomainError("INVALID_STATE", `entry ${entryId} is not VERIFIED`);
@@ -123,7 +212,7 @@ export class LedgerService {
       throw new FinanceDomainError("EVIDENCE_REQUIRED", "journal entry requires evidenceRef before it can be POSTED");
     }
 
-    // Validate the reversal target BEFORE committing any state, so a rejected
+    // Validate the reversal target BEFORE computing any state, so a rejected
     // double-reversal never strands a POSTED reversal that would distort balances.
     let reversedOriginal: JournalEntry | undefined;
     if (entry.reversesEntryId) {
@@ -140,11 +229,8 @@ export class LedgerService {
       postedByPrincipalId: posterPrincipalId,
       version: entry.version + 1,
     };
-    // Commit both sides together only after all validation has passed.
-    this.entries.set(entryId, next);
-    if (reversedOriginal) this.entries.set(reversedOriginal.id, reversedOriginal);
 
-    return structuredClone(next);
+    return reversedOriginal ? { next, reversedOriginal } : { next };
   }
 
   /**
@@ -154,6 +240,21 @@ export class LedgerService {
    * only once the reversal itself reaches POSTED (see `post`).
    */
   reverse(workspaceId: string, originalEntryId: string, reversalEntryId: string, principalId: string, entryDate: string): JournalEntry {
+    return this.draft(this.buildReversalInput(workspaceId, originalEntryId, reversalEntryId, principalId, entryDate));
+  }
+
+  /** PG-FIRST fail-closed dual-write hook: see `previewDraft` doc — same split for the reversal DRAFT. */
+  previewReverse(workspaceId: string, originalEntryId: string, reversalEntryId: string, principalId: string, entryDate: string): JournalEntry {
+    return this.previewDraft(this.buildReversalInput(workspaceId, originalEntryId, reversalEntryId, principalId, entryDate));
+  }
+
+  private buildReversalInput(
+    workspaceId: string,
+    originalEntryId: string,
+    reversalEntryId: string,
+    principalId: string,
+    entryDate: string,
+  ): DraftJournalEntryInput {
     const original = this.requireEntry(workspaceId, originalEntryId);
     if (original.status !== "POSTED") {
       throw new FinanceDomainError("INVALID_STATE", `entry ${originalEntryId} must be POSTED to reverse`);
@@ -166,7 +267,7 @@ export class LedgerService {
       ...(line.description !== undefined ? { description: line.description } : {}),
     }));
 
-    const input: DraftJournalEntryInput = {
+    return {
       id: reversalEntryId,
       workspaceId,
       entryDate,
@@ -176,7 +277,6 @@ export class LedgerService {
       reversesEntryId: originalEntryId,
       ...(original.evidenceRef !== undefined ? { evidenceRef: original.evidenceRef } : {}),
     };
-    return this.draft(input);
   }
 
   getEntry(workspaceId: string, entryId: string): JournalEntry {

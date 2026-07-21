@@ -10,12 +10,26 @@ import {
   baselinePayloadHash,
   classifyBaselineMutation,
   createPgCrmRepository,
+  createPgCrmSubRepository,
+  createPgPmRepository,
   type AuthorizationReceipt,
   type BaselinePatch,
+  type Communication,
   type CrmRepository,
+  type CrmSubRepository,
+  type CustomerContract,
+  type DeliveryProject,
   type FinanceSummary,
+  type NextAction,
+  type OperationalException,
+  type PmAssignment,
   type PmCheckpointReceipt,
+  type PmPlan,
+  type PmRepository,
+  type PmTarget,
   type ProjectSummary,
+  type TargetObservation,
+  type VarianceException,
 } from "@ai-crm/domain";
 import { ImportDomainError, ImportService, type ImportSourceKind } from "@ai-crm/imports";
 import {
@@ -23,9 +37,20 @@ import {
   FinanceDomainError,
   LedgerService,
   ReconciliationService,
+  type DayRecord,
   type FinancePackConfig,
   type StatementRowRef,
 } from "@ai-crm/finance";
+import {
+  createPgLedgerRepository,
+  type LedgerRepository,
+} from "@ai-crm/finance/pg-finance-ledger-adapter";
+import {
+  createPgDailyGateRepository,
+  createPgFinanceReconciliationRepository,
+  type DailyGateRepository,
+  type FinanceReconciliationRepository,
+} from "@ai-crm/finance/pg-finance-recon-adapter";
 import {
   ActionRegistry,
   GovernanceAuthorizationService,
@@ -364,6 +389,16 @@ export interface AiCrmRuntime {
   govRepo?: GovernanceRepository;
   /** PG-backed CRM customers repository (N-12 / D2). Absent in memory mode. */
   crmRepo?: CrmRepository;
+  /** PG-backed CRM sub-aggregates repository (PG-A / P6-b G001). Absent in memory mode. */
+  crmSubRepo?: CrmSubRepository;
+  /** PG-backed PM + delivery repository (PG-B / P6-b G001). Absent in memory mode. */
+  pmRepo?: PmRepository;
+  /** PG-backed finance ledger repository (PG-C1 / F6, PG-first fail-closed). Absent in memory mode. */
+  ledgerRepo?: LedgerRepository;
+  /** PG-backed finance reconciliation repository (PG-C2 / P6-b G001). Absent in memory mode. */
+  financeReconRepo?: FinanceReconciliationRepository;
+  /** PG-backed daily-gate repository (PG-C2 / P6-b G001). Absent in memory mode. */
+  dailyGateRepo?: DailyGateRepository;
   /**
    * Count of best-effort dual-write failures (DUALWRITE_FAILED) observed
    * since boot. Memory stays authoritative for the request path; this is
@@ -524,11 +559,20 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   let orchStore: OrchestrationStore | undefined;
   let govRepo: GovernanceRepository | undefined;
   let crmRepo: CrmRepository | undefined;
+  let crmSubRepo: CrmSubRepository | undefined;
+  let pmRepo: PmRepository | undefined;
+  let ledgerRepo: LedgerRepository | undefined;
+  let financeReconRepo: FinanceReconciliationRepository | undefined;
+  let dailyGateRepo: DailyGateRepository | undefined;
   // Stores hydrate-on-boot reads from: admin pool when configured, else the
   // main runtime pool/store (fallback documented on CreateAppOptions.adminDatabaseUrl).
   let hydrateOrchStore: OrchestrationStore | undefined;
   let hydrateGovRepo: GovernanceRepository | undefined;
   let hydrateCrmRepo: CrmRepository | undefined;
+  let hydrateCrmSubRepo: CrmSubRepository | undefined;
+  let hydratePmRepo: PmRepository | undefined;
+  let hydrateFinanceReconRepo: FinanceReconciliationRepository | undefined;
+  let hydrateDailyGateRepo: DailyGateRepository | undefined;
   // Cross-process eventing (N-09 / D6): opened in onReady only when a real
   // `databaseUrl`/`DATABASE_URL` pool is configured and `options.pgNotify`
   // is not explicitly `false`. See pg-notify.ts module doc comment.
@@ -545,11 +589,20 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     orchStore = createPgOrchestrationRepository(pool);
     govRepo = createPgGovernanceRepository(pool);
     crmRepo = createPgCrmRepository(pool);
+    crmSubRepo = createPgCrmSubRepository(pool);
+    pmRepo = createPgPmRepository(pool);
+    ledgerRepo = createPgLedgerRepository(pool);
+    financeReconRepo = createPgFinanceReconciliationRepository(pool);
+    dailyGateRepo = createPgDailyGateRepository(pool);
     persistenceMode = "pg";
     // Fallback hydrate source when no adminDatabaseUrl is configured (dev default).
     hydrateOrchStore = orchStore;
     hydrateGovRepo = govRepo;
     hydrateCrmRepo = crmRepo;
+    hydrateCrmSubRepo = crmSubRepo;
+    hydratePmRepo = pmRepo;
+    hydrateFinanceReconRepo = financeReconRepo;
+    hydrateDailyGateRepo = dailyGateRepo;
   }
 
   const aiCrm: AiCrmRuntime = {
@@ -562,6 +615,11 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   if (orchStore) aiCrm.orchStore = orchStore;
   if (govRepo) aiCrm.govRepo = govRepo;
   if (crmRepo) aiCrm.crmRepo = crmRepo;
+  if (crmSubRepo) aiCrm.crmSubRepo = crmSubRepo;
+  if (pmRepo) aiCrm.pmRepo = pmRepo;
+  if (ledgerRepo) aiCrm.ledgerRepo = ledgerRepo;
+  if (financeReconRepo) aiCrm.financeReconRepo = financeReconRepo;
+  if (dailyGateRepo) aiCrm.dailyGateRepo = dailyGateRepo;
   (app as FastifyInstance & { aiCrm?: AiCrmRuntime }).aiCrm = aiCrm;
   (app as FastifyInstance & { eventHub?: EventHub }).eventHub = eventHub;
   const decorateNotifyBridge = (bridge: PgNotifyBridge | undefined): void => {
@@ -640,6 +698,118 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
       aiCrm.dualWriteFailures += 1;
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[DUALWRITE_FAILED] target=crm_customers workspaceId=${customer.workspaceId} customerId=${customer.id} error=${message}`);
+    }
+  }
+  /**
+   * Dual-writes a single CRM contract onto `crm_contracts` (PG-A). Best-effort
+   * like `dualWriteCrmCustomer` — never fails the in-flight request.
+   */
+  async function dualWriteCrmContract(contract: CustomerContract): Promise<void> {
+    const repo = crmSubRepo;
+    if (!repo) return;
+    try {
+      await repo.saveContract(contract);
+    } catch (error) {
+      aiCrm.dualWriteFailures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[DUALWRITE_FAILED] target=crm_contracts workspaceId=${contract.workspaceId} contractId=${contract.id} error=${message}`);
+    }
+  }
+
+  async function dualWriteCrmCommunication(communication: Communication): Promise<void> {
+    const repo = crmSubRepo;
+    if (!repo) return;
+    try {
+      await repo.saveCommunication(communication);
+    } catch (error) {
+      aiCrm.dualWriteFailures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[DUALWRITE_FAILED] target=crm_communications workspaceId=${communication.workspaceId} communicationId=${communication.id} error=${message}`);
+    }
+  }
+
+  async function dualWriteCrmNextAction(action: NextAction): Promise<void> {
+    const repo = crmSubRepo;
+    if (!repo) return;
+    try {
+      await repo.saveNextAction(action);
+    } catch (error) {
+      aiCrm.dualWriteFailures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[DUALWRITE_FAILED] target=crm_next_actions workspaceId=${action.workspaceId} actionId=${action.id} error=${message}`);
+    }
+  }
+
+  async function dualWriteCrmException(exception: OperationalException): Promise<void> {
+    const repo = crmSubRepo;
+    if (!repo) return;
+    try {
+      await repo.saveException(exception);
+    } catch (error) {
+      aiCrm.dualWriteFailures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[DUALWRITE_FAILED] target=crm_operational_exceptions workspaceId=${exception.workspaceId} exceptionId=${exception.id} error=${message}`);
+    }
+  }
+
+  async function dualWritePmPlan(plan: PmPlan): Promise<void> {
+    const repo = pmRepo;
+    if (!repo) return;
+    try {
+      await repo.savePlan(plan);
+    } catch (error) {
+      aiCrm.dualWriteFailures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[DUALWRITE_FAILED] target=pm_plans workspaceId=${plan.workspaceId} planId=${plan.id} error=${message}`);
+    }
+  }
+
+  async function dualWritePmAssignment(assignment: PmAssignment): Promise<void> {
+    const repo = pmRepo;
+    if (!repo) return;
+    try {
+      await repo.saveAssignment(assignment);
+    } catch (error) {
+      aiCrm.dualWriteFailures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[DUALWRITE_FAILED] target=pm_assignments workspaceId=${assignment.workspaceId} assignmentId=${assignment.id} error=${message}`);
+    }
+  }
+
+  async function dualWritePmTarget(target: PmTarget): Promise<void> {
+    const repo = pmRepo;
+    if (!repo) return;
+    try {
+      await repo.saveTarget(target);
+    } catch (error) {
+      aiCrm.dualWriteFailures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[DUALWRITE_FAILED] target=pm_targets workspaceId=${target.workspaceId} targetId=${target.id} error=${message}`);
+    }
+  }
+
+  async function dualWritePmObservation(observation: TargetObservation, exception?: VarianceException): Promise<void> {
+    const repo = pmRepo;
+    if (!repo) return;
+    try {
+      await repo.saveObservation(observation);
+      if (exception) await repo.saveException(exception);
+    } catch (error) {
+      aiCrm.dualWriteFailures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[DUALWRITE_FAILED] target=pm_target_observations workspaceId=${observation.workspaceId} observationId=${observation.id} error=${message}`);
+    }
+  }
+
+  async function dualWriteDeliveryProject(project: DeliveryProject): Promise<void> {
+    const repo = pmRepo;
+    if (!repo) return;
+    try {
+      await repo.saveProject(project);
+    } catch (error) {
+      aiCrm.dualWriteFailures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[DUALWRITE_FAILED] target=delivery_projects workspaceId=${project.workspaceId} projectId=${project.id} error=${message}`);
     }
   }
 
@@ -724,11 +894,21 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
         orchStore = createPgOrchestrationRepository(pool);
         govRepo = createPgGovernanceRepository(pool);
         crmRepo = createPgCrmRepository(pool);
+        crmSubRepo = createPgCrmSubRepository(pool);
+        pmRepo = createPgPmRepository(pool);
+        ledgerRepo = createPgLedgerRepository(pool);
+        financeReconRepo = createPgFinanceReconciliationRepository(pool);
+        dailyGateRepo = createPgDailyGateRepository(pool);
         aiCrm.persistenceMode = "pg";
         aiCrm.pool = pool;
         aiCrm.orchStore = orchStore;
         aiCrm.govRepo = govRepo;
         aiCrm.crmRepo = crmRepo;
+        aiCrm.crmSubRepo = crmSubRepo;
+        aiCrm.pmRepo = pmRepo;
+        aiCrm.ledgerRepo = ledgerRepo;
+        aiCrm.financeReconRepo = financeReconRepo;
+        aiCrm.dailyGateRepo = dailyGateRepo;
         const notifyEnabled = options.pgNotify !== false;
         const ClientCtor = pgMod.Client ?? pgMod.default?.Client;
         if (notifyEnabled && ClientCtor && pool) {
@@ -796,6 +976,10 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
         hydrateOrchStore = createPgOrchestrationRepository(adminQueryable);
         hydrateGovRepo = createPgGovernanceRepository(adminQueryable);
         hydrateCrmRepo = createPgCrmRepository(adminQueryable);
+        hydrateCrmSubRepo = createPgCrmSubRepository(adminQueryable);
+        hydratePmRepo = createPgPmRepository(adminQueryable);
+        hydrateFinanceReconRepo = createPgFinanceReconciliationRepository(adminQueryable);
+        hydrateDailyGateRepo = createPgDailyGateRepository(adminQueryable);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(
@@ -811,22 +995,87 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     // FAIL-CLOSED — a boot that cannot prove it matches PG state must not
     // silently start serving stale/empty in-memory state as if it were
     // authoritative.
-    if (pool && orchStore && govRepo && crmRepo) {
+    if (pool && orchStore && govRepo && crmRepo && crmSubRepo && pmRepo && financeReconRepo && dailyGateRepo) {
       // Prefer the admin pool source when adminDatabaseUrl is configured;
       // otherwise fall back to the main runtime pool/store (documented dev
       // behavior on CreateAppOptions.adminDatabaseUrl).
       const hOrchStore = hydrateOrchStore ?? orchStore;
       const hGovRepo = hydrateGovRepo ?? govRepo;
       const hCrmRepo = hydrateCrmRepo ?? crmRepo;
+      const hCrmSubRepo = hydrateCrmSubRepo ?? crmSubRepo;
+      const hPmRepo = hydratePmRepo ?? pmRepo;
+      const hFinanceReconRepo = hydrateFinanceReconRepo ?? financeReconRepo;
+      const hDailyGateRepo = hydrateDailyGateRepo ?? dailyGateRepo;
       try {
-        const [snapshots, controls, intents, customers] = await Promise.all([
+        const [
+          snapshots,
+          controls,
+          intents,
+          customers,
+          contracts,
+          communications,
+          nextActions,
+          exceptions,
+          plans,
+          assignments,
+          targets,
+          observations,
+          pmExceptions,
+          projects,
+          allReconciliations,
+          allFinanceExceptions,
+          allGateStates,
+          allDayRecords,
+        ] = await Promise.all([
           hOrchStore.listJobSnapshots(),
           hGovRepo.listAllControls(),
           hGovRepo.listAllIntents(),
           hCrmRepo.listAllCustomers(),
+          hCrmSubRepo.listAllContracts(),
+          hCrmSubRepo.listAllCommunications(),
+          hCrmSubRepo.listAllNextActions(),
+          hCrmSubRepo.listAllExceptions(),
+          hPmRepo.listAllPlans(),
+          hPmRepo.listAllAssignments(),
+          hPmRepo.listAllTargets(),
+          hPmRepo.listAllObservations(),
+          hPmRepo.listAllExceptions(),
+          hPmRepo.listAllProjects(),
+          hFinanceReconRepo.listAllReconciliations(),
+          hFinanceReconRepo.listAllExceptions(),
+          hDailyGateRepo.listAllDailyGateStates(),
+          hDailyGateRepo.listAllDayRecords(),
         ]);
         orchestration.hydrate(snapshots);
         crm.hydrateCustomers(customers);
+        crm.hydrateSubAggregates({ contracts, communications, nextActions, exceptions });
+        pm.hydratePlans(plans);
+        pm.hydrateAssignments(assignments);
+        pm.hydrateTargets(targets);
+        pm.hydrateObservations(observations);
+        pm.hydrateExceptions(pmExceptions);
+        delivery.hydrateProjects(projects);
+        if (reconciliation) {
+          reconciliation.hydrateReconciliations(allReconciliations, allFinanceExceptions);
+        }
+        // Rebuild one DailyGate per workspace observed in the persisted state —
+        // NEVER replay recordDay (would double-backfill missing-day gaps and trip
+        // OUT_OF_ORDER). policyVersion is reconstructed from the LIVE pack, not
+        // from any persisted column (finance_daily_gate_state has none).
+        if (financePack) {
+          const dayRecordsByWorkspace = new Map<string, DayRecord[]>();
+          for (const row of allDayRecords) {
+            const list = dayRecordsByWorkspace.get(row.workspaceId) ?? [];
+            list.push(row);
+            dayRecordsByWorkspace.set(row.workspaceId, list);
+          }
+          for (const state of allGateStates) {
+            const restored = new DailyGate(financePack, state.workspaceId, financePack.packVersion);
+            restored.restoreState(state);
+            restored.hydrateDayRecords(dayRecordsByWorkspace.get(state.workspaceId) ?? []);
+            dailyGates.set(state.workspaceId, restored);
+          }
+        }
         // Audit restart-sourcing (N-13 / D3, closes the N-08 residual):
         // replay every persisted `audit_events` row for each workspace
         // observed in the hydrated controls/intents into the in-memory
@@ -865,6 +1114,19 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(`hydrate-on-boot failed; restart-consistent SoR could not be established: ${message}`);
+      }
+    }
+    // Ledger hydrate-on-boot (PG-C1 / F6, PG-first fail-closed): independent
+    // of the orch/gov/crm hydrate condition above since the ledger requires
+    // only `ledgerRepo` + a configured `financePack`/`ledger` instance, not
+    // the orchestration/governance repos.
+    if (ledgerRepo && ledger) {
+      try {
+        const entries = await ledgerRepo.listAllEntries();
+        ledger.hydrateJournalEntries(entries);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`ledger hydrate-on-boot failed; restart-consistent SoR could not be established: ${message}`);
       }
     }
   });
@@ -1255,36 +1517,43 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
       ...(typeof body.effectiveTo === "string" ? { effectiveTo: body.effectiveTo } : {}),
       ...(typeof body.valueKrw === "string" ? { valueKrw: body.valueKrw } : {}),
     });
+    await dualWriteCrmContract(contract);
     return reply.status(201).send(contract);
   });
 
   app.post<{ Params: { customerId: string } }>("/api/customers/:customerId/communications", async (request, reply) => {
     const ws = workspace(request);
     const body = objectBody(request.body);
-    return reply.status(201).send(crm.recordCommunication({
+    const communication = crm.recordCommunication({
       id: text(body, "id"), workspaceId: ws, customerId: request.params.customerId,
       channel: text(body, "channel") as "email" | "meeting" | "phone" | "note",
       summary: text(body, "summary"), occurredAt: text(body, "occurredAt"),
-    }));
+    });
+    await dualWriteCrmCommunication(communication);
+    return reply.status(201).send(communication);
   });
 
   app.post<{ Params: { customerId: string } }>("/api/customers/:customerId/exceptions", async (request, reply) => {
     const ws = workspace(request);
     const body = objectBody(request.body);
-    return reply.status(201).send(crm.addException({
+    const exception = crm.addException({
       id: text(body, "id"), workspaceId: ws, customerId: request.params.customerId,
       title: text(body, "title"), severity: text(body, "severity") as "critical" | "high" | "medium" | "low",
       priority: numberValue(body, "priority"), occurredAt: text(body, "occurredAt"), status: "open",
-    }));
+    });
+    await dualWriteCrmException(exception);
+    return reply.status(201).send(exception);
   });
 
   app.post<{ Params: { customerId: string } }>("/api/customers/:customerId/next-actions", async (request, reply) => {
     const ws = workspace(request);
     const body = objectBody(request.body);
-    return reply.status(201).send(crm.addNextAction({
+    const action = crm.addNextAction({
       id: text(body, "id"), workspaceId: ws, customerId: request.params.customerId,
       title: text(body, "title"), priority: numberValue(body, "priority"), dueAt: text(body, "dueAt"), status: "open",
-    }));
+    });
+    await dualWriteCrmNextAction(action);
+    return reply.status(201).send(action);
   });
 
   app.get<{ Params: { customerId: string } }>("/api/customers/:customerId/overview", async (request) => {
@@ -1317,6 +1586,7 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     });
     const key = `${ws}:${project.customerId}`;
     projectsByCustomer.set(key, [...(projectsByCustomer.get(key) ?? []), project.id]);
+    await dualWriteDeliveryProject(project);
     return reply.status(201).send(project);
   });
 
@@ -1344,17 +1614,21 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
         status: "CONSUMED",
       };
     }
-    return delivery.changeBaseline(ws, request.params.projectId, expectedVersion, patch, receipt);
+    const updated = delivery.changeBaseline(ws, request.params.projectId, expectedVersion, patch, receipt);
+    await dualWriteDeliveryProject(updated);
+    return updated;
   });
 
   app.post("/api/pm/plans", async (request, reply) => {
     const ws = workspace(request);
     const body = objectBody(request.body);
-    return reply.status(201).send(pm.createPlan({
+    const plan = pm.createPlan({
       id: text(body, "id"), workspaceId: ws, projectId: text(body, "projectId"), revision: 1,
       objective: text(body, "objective"), taskIds: arrayOfStrings(body.taskIds, "taskIds"),
       createdByPrincipalId: text(body, "createdByPrincipalId"), createdAt: text(body, "createdAt"),
-    }));
+    });
+    await dualWritePmPlan(plan);
+    return reply.status(201).send(plan);
   });
 
   app.post<{ Params: { planId: string } }>("/api/pm/plans/:planId/revisions", async (request) => {
@@ -1370,10 +1644,12 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     const receipt: PmCheckpointReceipt = {
       workspaceId: ws, resourceId: request.params.planId, resourceVersion: expectedVersion, actionType: "PM_PLAN_REVISE", status: "CONSUMED",
     };
-    return pm.revisePlan(ws, request.params.planId, expectedVersion, {
+    const revised = pm.revisePlan(ws, request.params.planId, expectedVersion, {
       objective, taskIds,
       createdByPrincipalId: text(body, "createdByPrincipalId"), createdAt: text(body, "createdAt"),
     }, receipt);
+    await dualWritePmPlan(revised);
+    return revised;
   });
 
   app.post("/api/pm/assignments", async (request, reply) => {
@@ -1390,11 +1666,13 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     const receipt: PmCheckpointReceipt = {
       workspaceId: ws, resourceId: planId, resourceVersion: planVersion, actionType: "PM_TASK_ASSIGN", status: "CONSUMED",
     };
-    return reply.status(201).send(pm.assignTask({
+    const assignment = pm.assignTask({
       id: text(body, "id"), workspaceId: ws, projectId: text(body, "projectId"), planId,
       taskId, assigneePrincipalId,
       assignedByPrincipalId: text(body, "assignedByPrincipalId"), status: "active", createdAt: text(body, "createdAt"),
-    }, planVersion, receipt));
+    }, planVersion, receipt);
+    await dualWritePmAssignment(assignment);
+    return reply.status(201).send(assignment);
   });
 
   app.post("/api/pm/targets", async (request, reply) => {
@@ -1403,29 +1681,33 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     const planId = text(body, "planId");
     const planVersion = numberValue(body, "planVersion");
     const metric = text(body, "metric") as "schedule" | "scope" | "deliverable" | "risk";
-    const target = numberValue(body, "target");
+    const targetValue = numberValue(body, "target");
     const tolerance = numberValue(body, "tolerance");
     const direction = text(body, "direction") as "max" | "min";
     consumeGovernedIntent(
       ws, text(body, "intentId"), "PM_TARGET_SET", planId, planVersion,
-      canonicalHashOf("PM_TARGET_SET", { metric, target, tolerance, direction }),
+      canonicalHashOf("PM_TARGET_SET", { metric, target: targetValue, tolerance, direction }),
     );
     const receipt: PmCheckpointReceipt = {
       workspaceId: ws, resourceId: planId, resourceVersion: planVersion, actionType: "PM_TARGET_SET", status: "CONSUMED",
     };
-    return reply.status(201).send(pm.setTarget({
+    const target = pm.setTarget({
       id: text(body, "id"), workspaceId: ws, projectId: text(body, "projectId"),
-      metric, target, tolerance, direction,
-    }, planId, planVersion, receipt));
+      metric, target: targetValue, tolerance, direction,
+    }, planId, planVersion, receipt);
+    await dualWritePmTarget(target);
+    return reply.status(201).send(target);
   });
 
   app.post("/api/pm/observations", async (request, reply) => {
     const ws = workspace(request);
     const body = objectBody(request.body);
-    return reply.status(201).send(pm.observe({
+    const { observation, exception } = pm.observe({
       id: text(body, "id"), workspaceId: ws, projectId: text(body, "projectId"), targetId: text(body, "targetId"),
       actual: numberValue(body, "actual"), observedAt: text(body, "observedAt"), evidenceRef: text(body, "evidenceRef"),
-    }));
+    });
+    await dualWritePmObservation(observation, exception);
+    return reply.status(201).send({ observation, exception });
   });
 
   app.post("/api/imports", async (request, reply) => {
@@ -1457,7 +1739,7 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     const { ledger: journal } = requireFinance();
     const ws = workspace(request);
     const body = objectBody(request.body);
-    const entry = journal.draft({
+    const draftInput = {
       id: text(body, "id"),
       workspaceId: ws,
       entryDate: text(body, "entryDate"),
@@ -1466,7 +1748,15 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
       ...(typeof body.importBatchId === "string" ? { importBatchId: body.importBatchId } : {}),
       lines: (Array.isArray(body.lines) ? body.lines : []) as Parameters<LedgerService["draft"]>[0]["lines"],
       createdByPrincipalId: text(body, "createdByPrincipalId"),
-    });
+    };
+    // PG-FIRST fail-closed (F6): compute the validated DRAFT without touching
+    // memory, persist to PG first (let a PG failure throw and 5xx before
+    // memory diverges), then commit the SAME already-validated entry to memory.
+    const draftEntry = journal.previewDraft(draftInput);
+    if (ledgerRepo) {
+      await ledgerRepo.saveEntry(draftEntry);
+    }
+    const entry = journal.commitDraft(draftEntry);
     return reply.status(201).send(entry);
   });
 
@@ -1477,7 +1767,11 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     const verifier = text(body, "verifierPrincipalId");
     const entry = journal.getEntry(ws, request.params.entryId);
     if (entry.importBatchId) imports.assertVerifierDistinct(ws, entry.importBatchId, verifier);
-    return journal.verify(ws, request.params.entryId, verifier);
+    const verified = journal.previewVerify(ws, request.params.entryId, verifier);
+    if (ledgerRepo) {
+      await ledgerRepo.saveEntry(verified);
+    }
+    return journal.commitVerify(verified);
   });
 
   app.post<{ Params: { entryId: string } }>("/api/finance/journal-entries/:entryId/post", async (request) => {
@@ -1499,16 +1793,24 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
       entry.version,
       canonicalHashOf("LEDGER_POST", { entryId: request.params.entryId }),
     );
-    return journal.post(ws, request.params.entryId, poster);
+    const { next, reversedOriginal } = journal.previewPost(ws, request.params.entryId, poster);
+    if (ledgerRepo) {
+      await ledgerRepo.postEntryAtomic(next, reversedOriginal);
+    }
+    return journal.commitPost(next, reversedOriginal);
   });
 
   app.post<{ Params: { entryId: string } }>("/api/finance/journal-entries/:entryId/reverse", async (request, reply) => {
     const { ledger: journal } = requireFinance();
     const ws = workspace(request);
     const body = objectBody(request.body);
-    return reply.status(201).send(
-      journal.reverse(ws, request.params.entryId, text(body, "reversalEntryId"), text(body, "principalId"), text(body, "entryDate")),
+    const reversalDraft = journal.previewReverse(
+      ws, request.params.entryId, text(body, "reversalEntryId"), text(body, "principalId"), text(body, "entryDate"),
     );
+    if (ledgerRepo) {
+      await ledgerRepo.saveEntry(reversalDraft);
+    }
+    return reply.status(201).send(journal.commitDraft(reversalDraft));
   });
 
   app.get("/api/finance/balances", async (request) => {
@@ -1530,6 +1832,18 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
       reconciledAt: text(body, "reconciledAt"),
       ...(typeof body.exceptionId === "string" ? { exceptionId: body.exceptionId } : {}),
     });
+    if (financeReconRepo) {
+      try {
+        await financeReconRepo.saveReconciliation(result);
+        if (result.exceptionId) {
+          const exception = recon.openExceptions(ws).find((e) => e.id === result.exceptionId);
+          if (exception) await financeReconRepo.saveException(exception);
+        }
+      } catch (error) {
+        aiCrm.dualWriteFailures += 1;
+        app.log.error({ error }, "finance reconciliation dual-write failed");
+      }
+    }
     return reply.status(201).send(result);
   });
 
@@ -1537,13 +1851,22 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     const { reconciliation: recon } = requireFinance();
     const ws = workspace(request);
     const body = objectBody(request.body);
-    return recon.resolveException(
+    const resolved = recon.resolveException(
       ws,
       request.params.exceptionId,
       text(body, "resolvedByPrincipalId"),
       text(body, "resolvedAt"),
       text(body, "resolutionNote"),
     );
+    if (financeReconRepo) {
+      try {
+        await financeReconRepo.saveException(resolved);
+      } catch (error) {
+        aiCrm.dualWriteFailures += 1;
+        app.log.error({ error }, "finance exception dual-write failed");
+      }
+    }
+    return resolved;
   });
 
   app.get("/api/finance/exceptions", async (request) => {
@@ -1554,7 +1877,8 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
   app.post("/api/finance/daily-gate/days", async (request, reply) => {
     const ws = workspace(request);
     const body = objectBody(request.body);
-    const record = dailyGate(ws).recordDay({
+    const gate = dailyGate(ws);
+    const record = gate.recordDay({
       date: text(body, "date"),
       importsCompleted: body.importsCompleted === true,
       entriesBalanced: body.entriesBalanced === true,
@@ -1562,7 +1886,36 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
       receivedAt: text(body, "receivedAt"),
       ...(body.backfilled === true ? { backfilled: true } : {}),
     });
+    if (dailyGateRepo) {
+      try {
+        await dailyGateRepo.appendDayRecord(ws, record);
+        // Save machine state on EVERY recordDay (streak/lastDateEpoch always
+        // change), not just on a tier transition — a missed save between two
+        // transitions would otherwise make restoreState() stale by however
+        // many days elapsed since the last tier flip.
+        await dailyGateRepo.saveDailyGateState(ws, gate.snapshotState());
+      } catch (error) {
+        aiCrm.dualWriteFailures += 1;
+        app.log.error({ error }, "daily-gate dual-write failed");
+      }
+    }
     return reply.status(201).send(record);
+  });
+
+  app.post("/api/finance/daily-gate/activate-risk-tier", async (request) => {
+    const ws = workspace(request);
+    const body = objectBody(request.body);
+    const gate = dailyGate(ws);
+    gate.activateRiskTier(numberValue(body, "approvedMatrixVersion"), text(body, "approverPrincipalId"));
+    if (dailyGateRepo) {
+      try {
+        await dailyGateRepo.saveDailyGateState(ws, gate.snapshotState());
+      } catch (error) {
+        aiCrm.dualWriteFailures += 1;
+        app.log.error({ error }, "daily-gate risk-tier-activation dual-write failed");
+      }
+    }
+    return gate.status();
   });
 
   app.get("/api/finance/daily-gate", async (request) => dailyGate(workspace(request)).status());

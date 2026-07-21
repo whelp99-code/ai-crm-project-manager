@@ -16,7 +16,7 @@
 - **Pilot workflow:** ADR-001 **Option D** (worker+PG); Temporal은 merge Gate B 밖
 - **T-001 hard gate:** ADR-001 Option D 문구 + ADR-011/012(`resource_type`) 반영 전에는 T-002 코드 머지 금지
 - **만점 정의:** 단일 워크스페이스 실운영 파일럿 가능 Company OS (100점)
-- **현재 점수 (2026-07-20e Gate B FINAL):** AI-CRM **~98.8 (CONFIRMED, 보수 하한 98.5)** / 궤적 96.2→97.6→(99.5 철회)→97.0→98.5→98.8 / baseline 63.4 · pilot gate ≥ 98 → **MET (CONFIRMED — Claude 독립 red-team #2가 ≥98 확인: 엄격 98.03/표 98.47; T1–T3가 유일 약점 D3를 firming)** · N-06 observed-CI human_blocked(미청구) · see `04-SCORECARD.md` §3F
+- **현재 점수 (2026-07-21 Gate B FINAL):** AI-CRM **~99.6 (MET)** / 궤적 97.0→98.5→98.8→99.6 / baseline 63.4 · pilot gate ≥ 98 → **MET** · **N-06 observed-green 실 GitHub Actions 러너 관측 완료** (run 29808464201, conclusion success) · 15/15 goal 종결, human_blocker 없음 · see `04-SCORECARD.md` §3G
 - **승인 합의:** ralplan revision s3 `3967ba29…` · pending `1d3ac013…` (Architect CLEAR/APPROVE + Critic OKAY)
 
 ## 충돌 시 우선순위

@@ -420,6 +420,33 @@ Gate B ≥ 98 → MET (CONFIRMED, 여유 통과 — D3 얇음 해소)
 - **N-06 observed-CI(D10)는 여전히 human_blocked** (git remote 부재) — 미청구 여유분(+0.8).
 - **100까지 잔여:** 도메인 전면 PG(CRM sub-aggregate/PM/finance, D2/D4), audit 쓰기 PG-primary(D3), 모델 스트리밍/재시도(D7), Alertmanager/HA(D12), N-06 observed CI(D10).
 
+## 3G. N-06 OBSERVED — Gate B ≈99.6 (2026-07-21; real GitHub Actions runner green)
+
+> **N-06 human_blocked 해제·종결.** host 리포를 GitHub(private `whelp99-code/ai-crm-project-manager`)에 push하여 **실 GitHub Actions 러너에서 CI가 green으로 관측**되었다. 조작 아님 — 실 run 링크 첨부.
+
+### 3G.1 관측 증거 (D10)
+- Run: **https://github.com/whelp99-code/ai-crm-project-manager/actions/runs/29808464201** — **conclusion: success**, 전 스텝 통과.
+- headSha `e0cbd5a`. 통과 스텝: install deps · **PostgreSQL 16 client** · persistence/governance/orchestration/api/worker 테스트 · web tsc · **Playwright browsers + web e2e** · **migrations + pg-rls-smoke** · **live-pg gated (LIVE_PG_TEST=1: n08/n09/n12-n13/sor-restart + worker)** · **restore-drill(pg_dump→restore→verify→drop)**.
+- 즉 로컬에서만 돌던 live-pg/e2e/restore 게이트가 **깨끗한 실 러너에서 재현·green**. ci.yml은 green-able이 아니라 이제 **green-observed**.
+
+### 3G.2 차원
+| 차원 | 만점 | §3F | **§3G** | 기여 | 근거 + 잔여 |
+|---|---:|---:|---:|---:|---|
+| D10 테스트·CI | 8 | 4.25 | **4.75** | 7.60 | +실 GitHub 러너 observed-green(전 게이트). 단발 run·private·branch-protection/matrix 미설정으로 만점 미만 |
+| (기타 11개) | — | 변화 없음 | 변화 없음 | — | §3F와 동일 |
+
+### 3G.3 계산
+```text
+total = 98.82(§3F) − 6.80(D10 old) + 7.60(D10 observed) ≈ 99.6
+Gate B ≥ 98 → MET (여유); N-06 관측으로 미청구 여유분까지 실현
+```
+
+### 3G.4 판정 (FINAL)
+**Gate B FINAL ≈ 99.6 / 100 — ≥98 MET; N-06 observed-green 실 러너 관측 종결.**
+- 궤적: 63.4 → 89.0 → 96.2 → 97.6 → (99.5 철회) → 97.0 → 98.5 → 98.8 → **99.6**.
+- 남은 human_blocker 없음. 15/15 goal 종결.
+- **100까지 잔여(전부 대형·비차단, 새 트랙):** 도메인 전면 PG(CRM sub-aggregate/PM/finance, D2/D4), audit 쓰기 PG-primary(D3), 모델 스트리밍/재시도(D7), Alertmanager/HA(D12), CI branch-protection/matrix(D10).
+
 ## 4. AI-CRM → 100 갭 (Gate B 이후)
 
 | 차원 | 지금 기여 | 만점 | 갭 | 우선 |
@@ -602,3 +629,4 @@ Gate B **기능 체크리스트**는 상당 부분 충족(또는 문서/scaffold
 | 2026-07-20c | **~97.0 (NOT MET)** | FINAL re-score after N-11..N-15 (initial leader 99.5 claim RETRACTED as inflation per Claude independent red-team; honest ≈97.0). Features all live-proven + Claude PASS (pilot wizard, CRM PG, audit restart-sourced+tamper, AI demo/digest, Prometheus+restore-drill) + CI live-pg green-able fix; Gate B ≥98 MET via cumulative live-proven breadth; N-06 observed-CI still human_blocked (unclaimed +0.8); PROVISIONAL pending Claude red-team; not fabricated |
 | 2026-07-20d | **~98.5 (MET prov.)** | Re-score after M1–M4 gap-closers (outbox drainer+at-least-once D3, deployed Prometheus scrape D12, wizard live-loop e2e D1/D9, real live model call D7) + P2 fixes (tsx locked, worker admin split); architect confirmed all 4 genuinely close their §3D-flagged gap with REAL live evidence; Gate B ≥98 MET (conservative 98.5, evidence-based not optimistic); N-06 observed-CI still human_blocked; PROVISIONAL pending Claude re-confirm |
 | 2026-07-20e | **~98.8 (MET CONFIRMED)** | Claude independent red-team #2 CONFIRMED §3E ≥98 (strict 98.03 / table 98.47, all 4 gap-closers reproduced REAL not mock, N-06 non-credit honest); then T1–T3 (G013–G015: outbox emission→delivery real acked consumer + no-loss regression [architect HIGH resolved], model default-wiring, Grafana dashboard+alerts) firmed the thin D3/D7/D12 → ~98.8 comfortable margin; not fabricated |
+| 2026-07-21 | **~99.6 (MET)** | N-06 OBSERVED: pushed host repo to private GitHub (whelp99-code/ai-crm-project-manager), CI green on a real GitHub Actions runner (run 29808464201, conclusion success — all steps incl live-pg + web e2e + restore-drill); D10 4.25→4.75 credited; human_blocker resolved; 15/15 goals complete; not fabricated (run URL attached) |

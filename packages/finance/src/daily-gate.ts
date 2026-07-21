@@ -108,6 +108,71 @@ export class DailyGate {
       throw new FinanceDomainError("INVALID_INPUT", "policyVersion must be a positive integer");
     }
   }
+  /**
+   * Restart-consistency hydrate-on-boot (PG-C2): restores the MACHINE
+   * STATE (streak/tier/lastDateEpoch/activatedMatrixVersion) directly from
+   * a persisted `finance_daily_gate_state` row, bypassing `recordDay`
+   * entirely. Replaying every historical day through `recordDay` would
+   * double-backfill missing-day gaps and would trip `OUT_OF_ORDER` on the
+   * first re-fed date, so hydrate MUST call this instead. `policyVersion`
+   * is never restored from here — the constructor already received the
+   * live `pack.packVersion` (§4 rule 5: a pack change resets the streak
+   * even across a restart, so the constructor's own reset-detection must
+   * run unchanged before this overwrite).
+   */
+  restoreState(state: {
+    streak: number;
+    tier: FinanceTier;
+    lastDateEpoch?: number;
+    activatedMatrixVersion?: number;
+  }): void {
+    if (!Number.isInteger(state.streak) || state.streak < 0) {
+      throw new FinanceDomainError("INVALID_INPUT", "streak must be a non-negative integer");
+    }
+    this.streak = state.streak;
+    this.tier = state.tier;
+    this.lastDateEpoch = state.lastDateEpoch;
+    this.activatedMatrixVersion = state.activatedMatrixVersion;
+  }
+
+  /**
+   * Current machine state for persistence (save-on-tier-transition). Mirrors
+   * `status()` but also exposes `lastDateEpoch`/`activatedMatrixVersion`,
+   * which `status()` intentionally omits from the public HTTP surface.
+   */
+  snapshotState(): {
+    streak: number;
+    tier: FinanceTier;
+    lastDateEpoch: number | undefined;
+    activatedMatrixVersion: number | undefined;
+  } {
+    return {
+      streak: this.streak,
+      tier: this.tier,
+      lastDateEpoch: this.lastDateEpoch,
+      activatedMatrixVersion: this.activatedMatrixVersion,
+    };
+  }
+
+  /**
+   * Read-only day-record hydrate: loads persisted `DayRecord`s verbatim
+   * (never replayed through `applyDay`/`recordDay`) so `historicalCorrection`
+   * lookups and any future day-record listing reflect PG history immediately
+   * after a restart.
+   */
+  hydrateDayRecords(records: readonly DayRecord[]): void {
+    this.records.clear();
+    for (const record of records) {
+      this.records.set(record.date, structuredClone(record));
+    }
+  }
+
+  /** Read-only day-record listing, sorted by date ascending. */
+  listDayRecords(): DayRecord[] {
+    return [...this.records.values()]
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+      .map((record) => structuredClone(record));
+  }
 
   recordDay(day: DayInput): DayRecord {
     this.assertDayInput(day);

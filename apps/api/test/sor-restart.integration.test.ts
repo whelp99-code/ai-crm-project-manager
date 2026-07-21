@@ -260,6 +260,30 @@ function createSharedFakePool() {
       return { rows: rows as T[], rowCount: rows.length };
     }
 
+    // --- P6-b G001 (PG-A/B/C1/C2): this fake pool does not seed any rows for
+    // the new sub-aggregate/PM/delivery/finance-recon/daily-gate tables, but
+    // hydrate-on-boot still issues cross-workspace listAll* reads against them
+    // once a pool is present (repo construction is unconditional on `pool`).
+    // Empty-result stubs keep this restart-consistency test scoped to its own
+    // orch_jobs/governance/crm_customers assertions.
+    if (
+      sql.startsWith("SELECT * FROM crm_contracts ORDER BY") ||
+      sql.startsWith("SELECT * FROM crm_communications ORDER BY") ||
+      sql.startsWith("SELECT * FROM crm_next_actions ORDER BY") ||
+      sql.startsWith("SELECT * FROM crm_operational_exceptions ORDER BY") ||
+      sql.startsWith("SELECT * FROM pm_plans ORDER BY") ||
+      sql.startsWith("SELECT * FROM pm_assignments ORDER BY") ||
+      sql.startsWith("SELECT * FROM pm_targets ORDER BY") ||
+      sql.startsWith("SELECT * FROM pm_target_observations ORDER BY") ||
+      sql.startsWith("SELECT * FROM pm_variance_exceptions ORDER BY") ||
+      sql.startsWith("SELECT * FROM delivery_projects ORDER BY") ||
+      sql.startsWith("SELECT * FROM finance_reconciliations ORDER BY") ||
+      sql.startsWith("SELECT * FROM finance_exceptions ORDER BY") ||
+      sql === "SELECT * FROM finance_daily_gate_state" ||
+      sql.startsWith("SELECT * FROM finance_day_records ORDER BY")
+    ) {
+      return { rows: [] as T[], rowCount: 0 };
+    }
 
     throw new Error(`unexpected SQL in shared fake pool: ${sql}`);
   }

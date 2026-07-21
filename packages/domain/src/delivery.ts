@@ -83,6 +83,20 @@ export function baselinePayloadHash(actionType: ActionType, patch: BaselinePatch
 export class DeliveryService {
   private readonly projects = new Map<string, DeliveryProject>();
 
+  /**
+   * Restart-consistency hydrate-on-boot (Ultragoal P6-b G001 / PG-B):
+   * rebuild the in-memory projects map wholesale from persisted
+   * `DeliveryProject` rows (read back from PG at process start via
+   * `PmRepository.listAllProjects`), so a fresh process reflects prior
+   * projects instead of starting empty. Mirrors `CrmService.hydrateCustomers`.
+   */
+  hydrateProjects(projects: readonly DeliveryProject[]): void {
+    this.projects.clear();
+    for (const project of projects) {
+      this.projects.set(project.id, structuredClone(project));
+    }
+  }
+
   createProject(project: Omit<DeliveryProject, "version" | "tasks" | "risks" | "status">): DeliveryProject {
     if (this.projects.has(project.id)) throw new DeliveryDomainError("DUPLICATE_ID", `project exists: ${project.id}`);
     if (project.scheduleEnd < project.scheduleStart) throw new DeliveryDomainError("INVALID_SCHEDULE", "schedule end precedes start");
