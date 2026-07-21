@@ -90,6 +90,19 @@ export interface GovernanceState {
   notifications: Record<string, NotificationRecord>;
   counters: Record<string, number>;
 }
+/**
+ * PG-FIRST fail-closed handle (D3): a computed-but-not-yet-committed
+ * governance state transition, returned by `preview*` methods. Route wiring
+ * persists `draft`'s new audit event(s) to PG (audit_events/audit_chain_heads
+ * /outbox) first; only a subsequent `commit*` call (same `draft`) makes the
+ * transition visible via `snapshot()`/`listAuditEvents()`/etc. Discarding the
+ * preview instead of committing it (e.g. on a PG write failure) leaves
+ * in-memory governance state byte-identical to before the attempted mutation.
+ */
+export interface GovernancePreview<T> {
+  draft: GovernanceState;
+  result: T;
+}
 
 export interface AuthorizationResult {
   actionType: ActionType;
@@ -226,11 +239,30 @@ export class GovernanceAuthorizationService {
     return `${prefix}-${value.toString().padStart(6, "0")}`;
   }
 
-  private transact<T>(operation: (draft: GovernanceState) => T): T {
+  /**
+   * PG-FIRST fail-closed split (D3): computes a validated transition into a
+   * detached draft WITHOUT committing it to `this.state`, so a caller (route
+   * wiring) can persist the draft's new audit event(s) to PG first and only
+   * call `commitTransact` once that write succeeds — a PG audit-write failure
+   * then never leaves in-memory governance state ahead of PG. `transact` is
+   * implemented as `commitTransact(previewTransact(operation))`, so behavior
+   * for callers that do not split the two steps (tests, non-route callers,
+   * memory mode) is unchanged.
+   */
+  private previewTransact<T>(operation: (draft: GovernanceState) => T): { draft: GovernanceState; result: T } {
     const draft = structuredClone(this.state);
     const result = operation(draft);
-    this.state = draft;
-    return structuredClone(result);
+    return { draft, result: structuredClone(result) };
+  }
+
+  /** PG-FIRST fail-closed dual-write hook: commits an already-validated (`previewTransact`) draft. */
+  private commitTransact<T>(preview: { draft: GovernanceState; result: T }): T {
+    this.state = preview.draft;
+    return structuredClone(preview.result);
+  }
+
+  private transact<T>(operation: (draft: GovernanceState) => T): T {
+    return this.commitTransact(this.previewTransact(operation));
   }
 
   private appendAudit(
@@ -261,8 +293,15 @@ export class GovernanceAuthorizationService {
     return event;
   }
 
-  authorize(request: AuthorizationRequest): AuthorizationResult {
-    return this.transact((draft) => {
+  /**
+   * PG-FIRST fail-closed split (D3): computes the validated authorize
+   * transition (policy decision + control/intent creation + audit append)
+   * into a detached draft without touching `this.state`. Route wiring
+   * persists the draft's new audit event(s) to PG first and only calls
+   * `commitAuthorize` once that write succeeds.
+   */
+  previewAuthorize(request: AuthorizationRequest): GovernancePreview<AuthorizationResult> {
+    return this.previewTransact((draft) => {
       const actionType = this.registry.resolve(request.command);
       const policy = evaluatePolicy({ actionType, payload: request.payload });
       if (policy.requiredControl === "BLOCK") {
@@ -299,8 +338,26 @@ export class GovernanceAuthorizationService {
     });
   }
 
-  decideControl(controlId: string, principalId: string, decision: "APPROVE" | "REJECT", workspaceId: string): ControlRequest {
-    return this.transact((draft) => {
+  /** PG-FIRST fail-closed dual-write hook: commits an already-validated (`previewAuthorize`) draft. */
+  commitAuthorize(preview: GovernancePreview<AuthorizationResult>): AuthorizationResult {
+    return this.commitTransact(preview);
+  }
+
+  authorize(request: AuthorizationRequest): AuthorizationResult {
+    return this.commitAuthorize(this.previewAuthorize(request));
+  }
+
+  /**
+   * PG-FIRST fail-closed split (D3): see `previewAuthorize` doc — same split
+   * for the APPROVE/REJECT decision transition.
+   */
+  previewDecideControl(
+    controlId: string,
+    principalId: string,
+    decision: "APPROVE" | "REJECT",
+    workspaceId: string,
+  ): GovernancePreview<ControlRequest> {
+    return this.previewTransact((draft) => {
       const control = draft.controls[controlId];
       if (!control || control.workspaceId !== workspaceId) {
         throw new GovernanceError("CONTROL_NOT_FOUND", `control not found: ${controlId}`);
@@ -316,6 +373,15 @@ export class GovernanceAuthorizationService {
       this.appendAudit(draft, control.workspaceId, `CONTROL_${decision}D`, control.id, { principalId });
       return control;
     });
+  }
+
+  /** PG-FIRST fail-closed dual-write hook: commits an already-validated (`previewDecideControl`) draft. */
+  commitDecideControl(preview: GovernancePreview<ControlRequest>): ControlRequest {
+    return this.commitTransact(preview);
+  }
+
+  decideControl(controlId: string, principalId: string, decision: "APPROVE" | "REJECT", workspaceId: string): ControlRequest {
+    return this.commitDecideControl(this.previewDecideControl(controlId, principalId, decision, workspaceId));
   }
   /** Terminalize a control that will not be consumed (job/work-item cancel). */
   cancelControl(controlId: string, workspaceId: string): ControlRequest {
@@ -359,8 +425,16 @@ export class GovernanceAuthorizationService {
     });
   }
 
-  consumeControl(controlId: string, binding: Binding, idempotencyKey?: string): ExecutionIntent {
-    return this.transact((draft) => {
+  /**
+   * PG-FIRST fail-closed split (D3): see `previewAuthorize` doc — same split
+   * for the consume (control -> intent) transition.
+   */
+  previewConsumeControl(
+    controlId: string,
+    binding: Binding,
+    idempotencyKey?: string,
+  ): GovernancePreview<ExecutionIntent> {
+    return this.previewTransact((draft) => {
       const control = draft.controls[controlId];
       if (!control || control.status !== "APPROVED") {
         throw new GovernanceError("CONTROL_NOT_APPROVED", `control cannot be consumed: ${controlId}`);
@@ -375,6 +449,15 @@ export class GovernanceAuthorizationService {
       this.appendAudit(draft, binding.workspaceId, "CONTROL_CONSUMED", control.id, { intentId: intent.id });
       return intent;
     });
+  }
+
+  /** PG-FIRST fail-closed dual-write hook: commits an already-validated (`previewConsumeControl`) draft. */
+  commitConsumeControl(preview: GovernancePreview<ExecutionIntent>): ExecutionIntent {
+    return this.commitTransact(preview);
+  }
+
+  consumeControl(controlId: string, binding: Binding, idempotencyKey?: string): ExecutionIntent {
+    return this.commitConsumeControl(this.previewConsumeControl(controlId, binding, idempotencyKey));
   }
 
   private createIntent(

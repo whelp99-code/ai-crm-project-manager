@@ -7371,3 +7371,1125 @@ orch_job_events relrowsecurity=true relforcerowsecurity=true
 orch_jobs relrowsecurity=true relforcerowsecurity=true
 orch_work_items relrowsecurity=true relforcerowsecurity=true
 ```
+
+### 2026-07-21T12:25:22Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T12-25-22Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T12:25:23Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T12-25-23Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T12:25:24Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T12-25-24Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T12:25:25Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T12-25-25Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T12:25:27Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T12-25-27Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:35:47Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-35-47Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:35:54Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-35-54Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:35:54Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-35-54Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:35:54Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-35-54Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:35:54Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-35-54Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:36:02Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-36-02Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:36:07Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-36-07Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:36:13Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-36-13Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:37:16Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-37-16Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:37:18Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-37-18Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:37:19Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-37-19Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:37:21Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-37-21Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:37:22Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-37-22Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:37:23Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-37-23Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:37:25Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-37-25Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:37:26Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-37-26Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```
+
+### 2026-07-21T13:37:27Z — PASS
+
+- Host: `ai_crm@localhost:5432/ai_crm`
+- Script: `packages/persistence/scripts/pg-rls-smoke.sh`
+- Counts: PASS=21 FAIL=0 SKIP=0
+- Full transcript: `/var/folders/f0/tbqwy3mn7rj7vy2j7ts0gxhr0000gn/T//ai-crm-pg-rls-smoke/run-2026-07-21T13-37-27Z.log`
+
+```
+PASS | connectivity — ai_crm as ai_crm super=true
+PASS | migration 0001_foundation — already applied (schema_migrations)
+PASS | migration 0002_model_gateway_and_break_glass_roles — already applied (schema_migrations)
+PASS | migration 0003_orchestration — already applied (schema_migrations)
+PASS | migration 0004_governance_snapshot — already applied (schema_migrations)
+PASS | migration 0005_crm_customers — already applied (schema_migrations)
+PASS | migration 0006_outbox_consumer — already applied (schema_migrations)
+PASS | migration 0007_crm_subaggregates — already applied (schema_migrations)
+PASS | migration 0008_pm_delivery — already applied (schema_migrations)
+PASS | migration 0009_finance_ledger — already applied (schema_migrations)
+PASS | migration 0010_finance_recon_dailygate — already applied (schema_migrations)
+PASS | FORCE RLS flags — relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events
+PASS | app_current_workspace_id() — function exists
+PASS | GUC name — app.workspace_id (via current_setting)
+PASS | fail-closed unset GUC — app_current_workspace_id() raises when app.workspace_id unset
+PASS | workspace_isolation policies — 22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*
+PASS | workspace isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; A/B isolated; cleanup done
+PASS | governance isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; orch_governance_controls A/B isolated + cross-workspace insert denied; cleanup done
+PASS | crm isolation insert/select — runtime role SET ROLE ai_crm_runtime_api; crm_customers A/B isolated + cross-workspace insert denied; cleanup done
+PASS | outbox_consumed_events isolation insert/select — SET ROLE ai_crm_runtime_worker; A/B isolated + cross-workspace insert denied; cleanup done
+PASS | p6b-g001 isolation insert/select — SET ROLE ai_crm_runtime_api; all 15 new tables A/B isolated + cross-workspace insert denied on contracts/plans/projects/entries/recons/gatestate; cleanup done
+```
+
+FORCE RLS evidence query:
+
+```sql
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('orch_jobs','orch_work_items','orch_job_events','orch_governance_controls','orch_governance_intents')
+ORDER BY 1;
+```
+
+Result (this run):
+
+```
+orch_governance_controls relrowsecurity=true relforcerowsecurity=true
+orch_governance_intents relrowsecurity=true relforcerowsecurity=true
+orch_job_events relrowsecurity=true relforcerowsecurity=true
+orch_jobs relrowsecurity=true relforcerowsecurity=true
+orch_work_items relrowsecurity=true relforcerowsecurity=true
+```

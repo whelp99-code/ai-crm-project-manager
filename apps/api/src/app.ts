@@ -61,6 +61,7 @@ import {
   intentToPersisted,
   type Binding,
   type GovernanceRepository,
+  type GovernanceState,
 } from "@ai-crm/governance";
 import {
   ModelGateway,
@@ -857,6 +858,33 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[DUALWRITE_FAILED] target=audit_chain workspaceId=${workspaceId} error=${message}`);
     }
+  }
+  /**
+   * PG-FIRST fail-closed audit append (D3, closes the N-08/§3F residual):
+   * mirrors the ledger's `previewDraft`/PG-write/`commitDraft` split
+   * (PG-C1). Used ONLY by the governance-bearing mutation routes
+   * (authorize/decide/consume) — appends the NEW audit event(s) already
+   * present in `preview.draft` (produced by `governance.preview*` but not
+   * yet committed to `this.state`) onto `audit_events`/`audit_chain_heads`/
+   * `outbox_events` inside one `withWorkspaceScope` transaction and MUST
+   * succeed before the caller commits the preview. Unlike `dualWriteAudit`,
+   * a PG failure here is NEVER swallowed — it propagates (5xx) so the
+   * caller never calls `governance.commit*`, and in-memory governance state
+   * therefore never advances past a failed PG audit write. No-op in memory
+   * mode (no `govRepo`) — behavior there is byte-identical to before D3.
+   */
+  async function pgFirstAuditAppend(workspaceId: string, draft: GovernanceState): Promise<void> {
+    const repo = govRepo;
+    if (!repo) return;
+    const pendingAll = draft.audits.filter((event) => event.workspaceId === workspaceId);
+    const already = dualWrittenAuditCount.get(workspaceId) ?? 0;
+    const pending = pendingAll.slice(already);
+    if (pending.length === 0) return;
+    await repo.appendAuditEvents(
+      workspaceId,
+      pending.map((event) => ({ kind: event.kind, subjectId: event.subjectId, data: event.data })),
+    );
+    dualWrittenAuditCount.set(workspaceId, pendingAll.length);
   }
 
   async function dualWriteAgentState(workspaceId: string, jobId: string): Promise<void> {
@@ -1924,7 +1952,12 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
   app.post("/api/governance/authorize", async (request, reply) => {
     const ws = workspace(request);
     const body = objectBody(request.body);
-    const result = governance.authorize({
+    // PG-FIRST fail-closed (D3, mirrors PG-C1 ledger preview/commit): compute
+    // the validated transition into a detached draft, persist its new audit
+    // event(s) to PG (audit_events/audit_chain_heads/outbox) BEFORE the
+    // in-memory governance state commits — a PG failure throws (5xx) here,
+    // before memory diverges.
+    const preview = governance.previewAuthorize({
       command: text(body, "command"),
       workspaceId: ws,
       resourceId: text(body, "resourceId"),
@@ -1932,8 +1965,9 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
       payload: "payload" in body ? body.payload : {},
       requesterPrincipalId: text(body, "requesterPrincipalId"),
     });
+    await pgFirstAuditAppend(ws, preview.draft);
+    const result = governance.commitAuthorize(preview);
     await dualWriteGovernance(ws);
-    await dualWriteAudit(ws);
     return reply.status(201).send(result);
   });
 
@@ -1975,9 +2009,12 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     if (decision !== "APPROVE" && decision !== "REJECT") {
       throw new GovernanceError("INVALID_DECISION", "decision must be APPROVE or REJECT");
     }
-    const result = governance.decideControl(request.params.controlId, text(body, "principalId"), decision, ws);
+    // PG-FIRST fail-closed (D3): see /api/governance/authorize doc — same
+    // preview/PG-audit-append/commit split for the APPROVE/REJECT decision.
+    const preview = governance.previewDecideControl(request.params.controlId, text(body, "principalId"), decision, ws);
+    await pgFirstAuditAppend(ws, preview.draft);
+    const result = governance.commitDecideControl(preview);
     await dualWriteGovernance(ws);
-    await dualWriteAudit(ws);
     return result;
   });
 
@@ -1991,13 +2028,17 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
       payloadHash: text(body, "payloadHash"),
       policyVersion: numberValue(body, "policyVersion"),
     };
-    const intent = governance.consumeControl(
+    const preview = governance.previewConsumeControl(
       request.params.controlId,
       binding,
       typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined,
     );
+    // PG-FIRST fail-closed (D3): see /api/governance/authorize doc — same
+    // preview/PG-audit-append/commit split for the consume (control -> intent)
+    // transition.
+    await pgFirstAuditAppend(ws, preview.draft);
+    const intent = governance.commitConsumeControl(preview);
     await dualWriteGovernance(ws);
-    await dualWriteAudit(ws);
     return reply.status(201).send(intent);
   });
 

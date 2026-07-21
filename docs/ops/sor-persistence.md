@@ -137,17 +137,68 @@ in-memory) for symmetry and future use; there is currently no
 
 ## Audit chain dual-write: `audit_events` / `audit_chain_heads` / `outbox_events` (N-08 / D3)
 
-Every governance mutation reachable from the HTTP surface — `POST
-/api/governance/authorize`, `.../controls/:id/decide`,
-`.../controls/:id/consume`, `POST /api/notifications`, `POST
-/api/notifications/:id/transition`, and any mutation folded into
+**PG-D (D3) update — audit write is now PG-PRIMARY fail-closed for
+governance-bearing mutations, closing the N-08/§3F "audit write
+memory-primary" residual.** `POST /api/governance/authorize`,
+`.../controls/:id/decide`, and `.../controls/:id/consume` no longer call
+the in-memory `governance.authorize`/`decideControl`/`consumeControl`
+directly. They mirror the PG-C1 ledger `previewDraft`/PG-write/`commitDraft`
+split (`apps/api/src/app.ts` ledger routes, `packages/finance/src/ledger.ts`):
+
+1. `governance.previewAuthorize` / `previewDecideControl` /
+   `previewConsumeControl` (`packages/governance/src/index.ts`) compute the
+   FULLY VALIDATED transition — including the new audit event(s) — into a
+   detached `{ draft, result }` handle WITHOUT touching the service's
+   committed `this.state`.
+2. `pgFirstAuditAppend(workspaceId, preview.draft)`
+   (`apps/api/src/app.ts`) is `await`ed next: it appends ONLY the audit
+   event(s) new since the last flush (`draft.audits` filtered/sliced against
+   the same `dualWrittenAuditCount` cursor `dualWriteAudit` uses) onto PG's
+   `audit_events`/`audit_chain_heads`/`outbox_events` via
+   `GovernanceRepository.appendAuditEvents`. **This call is NEVER wrapped in
+   a swallowing try/catch** — a PG failure (dropped connection, constraint
+   violation, RLS denial) throws straight out of the route handler, which
+   Fastify's default error path turns into a 5xx response.
+3. Only after that PG write resolves does the route call
+   `governance.commitAuthorize` / `commitDecideControl` /
+   `commitConsumeControl`, which assigns `preview.draft` onto the service's
+   `this.state` — this is the ONLY place the in-memory governance mutation
+   becomes visible (`GET /api/governance/controls`, `listAuditEvents`,
+   `verifyAuditChain`, etc.).
+
+Because the preview draft is a `structuredClone` detached from `this.state`
+(see `GovernanceAuthorizationService.previewTransact`/`commitTransact` in
+`packages/governance/src/index.ts`), a PG audit-write failure that throws
+before `commit*` runs leaves in-memory governance state **byte-identical**
+to before the attempted mutation — memory can never advance past a
+dropped/failed PG audit write for these three routes. `dualWriteGovernance`
+(control/intent row mirror to `orch_governance_controls`/`orch_governance_intents`)
+still runs best-effort AFTER the commit, unchanged — it is not part of the
+audit-integrity surface D3 hardens.
+
+Every OTHER governance-audit-bearing surface — `POST /api/notifications`,
+`POST /api/notifications/:id/transition`, and any mutation folded into
 `dualWriteAgentState` (agent command execution, job cancel, work-item
-completion, the AI-review REWORK bridge) — now calls `dualWriteAudit(ws)`
-after the in-memory mutation. `dualWriteAudit` tracks, per workspace, how
-many of `governance.listAuditEvents(workspaceId)`'s (in-memory, append-only
-within the process) events have already been flushed to PG, and appends only
-the new ones via `GovernanceRepository.appendAuditEvents(workspaceId,
-events)`.
+completion, the AI-review REWORK bridge) — still calls the pre-existing
+`dualWriteAudit(ws)` AFTER the in-memory mutation, and stays
+**best-effort**: a failure there is swallowed (`[DUALWRITE_FAILED]`
+warn + `dualWriteFailures` counter), memory stays authoritative, and the
+request still succeeds. This is an intentional, documented scope split
+(constraint: "notification best-effort stays") — only the
+authorize/decide/consume governance-bearing mutation routes are PG-primary
+fail-closed. `dualWriteAudit` tracks, per workspace, how many of
+`governance.listAuditEvents(workspaceId)`'s (in-memory, append-only within
+the process) events have already been flushed to PG, and appends only the
+new ones via `GovernanceRepository.appendAuditEvents(workspaceId, events)`.
+Both `pgFirstAuditAppend` and `dualWriteAudit` share the same
+`dualWrittenAuditCount` cursor, so a fail-closed flush from one of the three
+routes above is never redelivered by a later best-effort `dualWriteAudit`
+call for the same workspace.
+
+In memory mode (no `govRepo`/pool), `pgFirstAuditAppend` and
+`dualWriteAudit` both no-op immediately — behavior there is byte-identical
+to before D3; every pre-existing memory-mode API/governance test stays
+green unmodified.
 
 `PgGovernanceRepository.appendAuditEvents` (`packages/governance/src/pg-governance-adapter.ts`)
 does real, column-mapped, in-transaction work inside one
@@ -201,6 +252,10 @@ runtime decoration for tests / a future `/metrics` route) and emits
 `console.warn("[DUALWRITE_FAILED] target=... workspaceId=... ...")` with the
 workspace/job context and the underlying error message. `dualWriteAudit`
 uses `target=audit_chain`; `dualWriteCrmCustomer` uses `target=crm_customers`.
+This best-effort posture does NOT apply to `pgFirstAuditAppend` (see PG-D /
+D3 above) — that call is intentionally never wrapped in a try/catch, so a
+failure there increments nothing and emits no `[DUALWRITE_FAILED]` warn; it
+propagates as a thrown error / 5xx instead, by design.
 
 ## N-13: audit restart-sourced (D3 — CLOSES the N-08 residual above)
 
