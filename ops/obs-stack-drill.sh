@@ -99,7 +99,7 @@ cleanup() {
   local exit_code=$?
   if [[ "${COMPOSE_UP}" == "1" ]]; then
     log "Tearing down docker compose observability stack..."
-    docker compose -f "${COMPOSE_FILE}" down >>"${RUN_LOG}" 2>&1 || true
+    docker compose -p ai-crm-obs-drill -f "${COMPOSE_FILE}" down >>"${RUN_LOG}" 2>&1 || true
   fi
   if [[ -n "${API_PID}" ]] && kill -0 "${API_PID}" 2>/dev/null; then
     log "Stopping AI-CRM API harness (pid ${API_PID})..."
@@ -240,6 +240,24 @@ else
   record FAIL "webhook-catcher harness did not come up"
 fi
 
+# --- 3a. Wipe leftover state from a PRIOR drill run before starting fresh.
+#      alertmanager_data is a named, persistent volume (by design — it's
+#      what makes the within-run "silence survives a container restart"
+#      persistence proof in step 10 real). But that same persistence means
+#      Alertmanager's on-disk state (silences AND its notification log,
+#      nflog) survives across separate drill INVOCATIONS too, not just a
+#      single in-run restart. The alert this drill fires always has the
+#      exact same labels/fingerprint, so on a re-run within
+#      repeat_interval of a prior run's successful send, Alertmanager's
+#      persisted nflog correctly (per its own dedup semantics) suppresses
+#      re-sending the webhook notification — the alert still shows
+#      firing in /api/v2/alerts, but the webhook-catcher never gets a
+#      fresh POST. This is the root cause of the "fires + routes
+#      reliably, webhook-received flakes on a re-run" flake. Fix: start
+#      every run from a clean slate by tearing down any leftover
+#      containers/volumes from a previous run first.
+docker compose -p ai-crm-obs-drill -f "${COMPOSE_FILE}" down -v --remove-orphans >>"${RUN_LOG}" 2>&1 || true
+
 # --- 4. Start Prometheus + Grafana + Alertmanager pointed at the rendered config ---
 OVERRIDE_COMPOSE="${LOG_DIR}/docker-compose.override.yml"
 cat >"${OVERRIDE_COMPOSE}" <<COMPOSE_OVERRIDE
@@ -248,7 +266,7 @@ services:
     volumes:
       - ${RENDERED_PROM_CONFIG}:/etc/prometheus/prometheus.yml:ro
 COMPOSE_OVERRIDE
-docker compose -f "${COMPOSE_FILE}" -f "${OVERRIDE_COMPOSE}" up -d prometheus grafana alertmanager >>"${RUN_LOG}" 2>&1
+docker compose -p ai-crm-obs-drill -f "${COMPOSE_FILE}" -f "${OVERRIDE_COMPOSE}" up -d prometheus grafana alertmanager >>"${RUN_LOG}" 2>&1
 COMPOSE_UP=1
 record PASS "docker compose observability stack started (prometheus :${PROM_PORT}, grafana :${GRAFANA_PORT}, alertmanager :${ALERTMANAGER_PORT})"
 
@@ -352,6 +370,66 @@ else
   record FAIL "Alertmanager never reported healthy"
 fi
 
+# --- 7a. Reachability precheck: can the alertmanager container reach the
+#      host-run webhook-catcher over host.docker.internal? Diagnose this
+#      explicitly instead of letting it surface later as a mysterious
+#      webhook-received flake.
+WEBHOOK_REACHABLE=0
+WEBHOOK_REACHABLE_OUT="$(docker compose -p ai-crm-obs-drill -f "${COMPOSE_FILE}" -f "${OVERRIDE_COMPOSE}" exec -T alertmanager \
+  wget -q -O - --header="content-type: application/json" \
+  --post-data='{}' "http://host.docker.internal:${WEBHOOK_PORT}/webhook" 2>&1 || true)"
+if printf '%s' "${WEBHOOK_REACHABLE_OUT}" | grep -q '"status":"received"'; then
+  WEBHOOK_REACHABLE=1
+fi
+log "--- alertmanager -> host.docker.internal:${WEBHOOK_PORT}/webhook reachability precheck ---"
+log "${WEBHOOK_REACHABLE_OUT}"
+if [[ "${WEBHOOK_REACHABLE}" == "1" ]]; then
+  record PASS "alertmanager container can reach host webhook-catcher via host.docker.internal:${WEBHOOK_PORT}"
+else
+  record FAIL "alertmanager container CANNOT reach host webhook-catcher via host.docker.internal:${WEBHOOK_PORT} (check extra_hosts host-gateway and that the catcher is bound to 0.0.0.0)"
+fi
+: >"${WEBHOOK_LOG}" # the precheck probe above lands a harmless '{}' payload in the log; clear it before the real assertion
+
+# --- 7b. Clear any stale Alertmanager silences left over from a PRIOR drill
+#      run. alertmanager_data is a named, persistent volume (by design, so
+#      the persistence-survives-restart proof in step 10 is real) — but that
+#      also means a silence created by a previous run's persistence check
+#      (matcher alertname=AiCrmApiDownFast, endsAt +10m) can still be ACTIVE
+#      when this run starts. An active matching silence makes Alertmanager
+#      suppress notifications for AiCrmApiDownFast (it still shows as
+#      firing/suppressed in /api/v2/alerts) — this is the root cause of the
+#      "alert fires but webhook-received flakes on a re-run" flake. Expire
+#      any such leftover silences before forcing the alert so every run
+#      starts from a clean slate regardless of prior runs.
+STALE_SILENCES_JSON="$(curl -fsS "http://localhost:${ALERTMANAGER_PORT}/api/v2/silences" 2>/dev/null || true)"
+log "--- Alertmanager silences present at run start (pre-existing, expired below if still active) ---"
+log "${STALE_SILENCES_JSON}"
+STALE_IDS="$(printf '%s' "${STALE_SILENCES_JSON}" | node -e '
+let d = "";
+process.stdin.on("data", (c) => (d += c));
+process.stdin.on("end", () => {
+  try {
+    const silences = JSON.parse(d);
+    for (const s of silences) {
+      const matchesAlert = (s.matchers || []).some((m) => m.name === "alertname" && m.value === "AiCrmApiDownFast");
+      if (matchesAlert && s.status && s.status.state !== "expired") {
+        console.log(s.id);
+      }
+    }
+  } catch {}
+});
+' 2>/dev/null || true)"
+if [[ -n "${STALE_IDS}" ]]; then
+  while IFS= read -r sid; do
+    [[ -z "${sid}" ]] && continue
+    log "Expiring stale pre-existing silence ${sid} (from a previous drill run) before forcing the alert..."
+    curl -fsS -X DELETE "http://localhost:${ALERTMANAGER_PORT}/api/v2/silence/${sid}" >>"${RUN_LOG}" 2>&1 || true
+  done <<<"${STALE_IDS}"
+  record PASS "expired stale pre-existing AiCrmApiDownFast silence(s) from a previous run (would have suppressed webhook delivery)"
+else
+  record PASS "no stale pre-existing AiCrmApiDownFast silences found"
+fi
+
 # --- 8. FORCE an alert: kill the API so the scrape target goes down ---
 if [[ -n "${API_PID}" ]] && kill -0 "${API_PID}" 2>/dev/null; then
   log "Killing AI-CRM API harness (pid ${API_PID}) to force the ai-crm-api scrape target down..."
@@ -379,9 +457,16 @@ else
   record FAIL "Alertmanager never reported AiCrmApiDownFast firing"
 fi
 
+# Bounded, deterministic poll: alertmanager applies group_wait (1s) then
+# group_interval (5s) before it POSTs to the webhook receiver. Poll well
+# beyond that (45s, checked every 1s) to absorb docker networking / scheduler
+# jitter — this is a real retry window, not a weakened assertion: if the
+# webhook truly never receives the notification within the window, this
+# still FAILs.
 WEBHOOK_RECEIVED=0
 WEBHOOK_RECEIVED_LOG=""
-for _ in $(seq 1 40); do
+WEBHOOK_POLL_MAX=45
+for _ in $(seq 1 "${WEBHOOK_POLL_MAX}"); do
   if [[ -s "${WEBHOOK_LOG}" ]] && grep -q 'AiCrmApiDownFast' "${WEBHOOK_LOG}"; then
     WEBHOOK_RECEIVED=1
     WEBHOOK_RECEIVED_LOG="$(cat "${WEBHOOK_LOG}")"
@@ -389,11 +474,13 @@ for _ in $(seq 1 40); do
   fi
   sleep 1
 done
-log "--- webhook-catcher received payloads (${WEBHOOK_LOG}) ---"
+log "--- webhook-catcher received payloads (${WEBHOOK_LOG}) after up to ${WEBHOOK_POLL_MAX}s bounded poll ---"
 log "${WEBHOOK_RECEIVED_LOG}"
 if [[ "${WEBHOOK_RECEIVED}" == "1" ]]; then
   record PASS "webhook-catcher received the routed AiCrmApiDownFast notification"
 else
+  log "--- diagnostics: webhook-catcher never received it within ${WEBHOOK_POLL_MAX}s; recent alertmanager container logs ---"
+  docker compose -p ai-crm-obs-drill -f "${COMPOSE_FILE}" -f "${OVERRIDE_COMPOSE}" logs --tail=60 alertmanager >>"${RUN_LOG}" 2>&1 || true
   record FAIL "webhook-catcher never received a notification for AiCrmApiDownFast"
 fi
 
@@ -413,7 +500,7 @@ else
 fi
 
 log "Restarting alertmanager container (docker compose restart alertmanager)..."
-docker compose -f "${COMPOSE_FILE}" restart alertmanager >>"${RUN_LOG}" 2>&1 || true
+docker compose -p ai-crm-obs-drill -f "${COMPOSE_FILE}" restart alertmanager >>"${RUN_LOG}" 2>&1 || true
 
 SILENCE_SURVIVED=0
 SILENCE_AFTER_JSON=""
