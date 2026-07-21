@@ -80,7 +80,7 @@ message).
 | `AZURE_OPENAI_ASSUME_ZERO_RETENTION` | no | Set to `1` only when the deployment is contractually known (out of band) to honor zero-data-retention. A plain REST chat-completions call cannot itself prove the provider discarded the prompt/response server-side, so absent this flag the client honestly reports `retentionHonored: false` and `ModelGateway` then records the true `retentionMode: "retain"` rather than fabricating a zero-retention claim. |
 | `AZURE_OPENAI_MAX_RETRIES` | no (default `3`) | Extra retry attempts (beyond the first) on transient failures only: network errors, per-request timeouts, and HTTP `429`/`500`/`502`/`503`/`504`. Other 4xx responses (e.g. `400`/`401`/`403`) are never retried. `0` disables retry. |
 | `AZURE_OPENAI_RETRY_BASE_DELAY_MS` | no (default `300`) | Base delay for exponential backoff between retries (`base * 2^attempt` plus up to one more `base`'s worth of random jitter). |
-| `AZURE_OPENAI_TIMEOUT_MS` | no (default `30000`) | Per-request timeout enforced via `AbortController`; a hung gateway is aborted and treated as a retryable `PROVIDER_TIMEOUT` rather than blocking indefinitely. |
+| `AZURE_OPENAI_TIMEOUT_MS` | no (default `30000`) | Per-request timeout enforced via `AbortController`; covers the ENTIRE attempt (headers + body/SSE-stream consumption), so a gateway that returns headers and then stalls mid-body/mid-stream is aborted just like a hung connection, and treated as a retryable `PROVIDER_TIMEOUT` rather than blocking indefinitely. |
 | `AZURE_OPENAI_CIRCUIT_BREAKER_THRESHOLD` | no (default `5`) | Consecutive whole-invocation failures (i.e. after retries for that call are exhausted) before the in-process, per-client circuit breaker opens. |
 | `AZURE_OPENAI_CIRCUIT_BREAKER_COOLDOWN_MS` | no (default `30000`) | How long the breaker stays open before allowing a single half-open probe request through; the probe closes the breaker on success or re-opens it on failure. While open, `invoke()` fails fast with `AzureOpenAiClientError("MODEL_CIRCUIT_OPEN", ...)` without calling the provider. |
 | `AZURE_OPENAI_STREAM` | no (default unset/`false`) | Set to `1` to request `stream: true` and accumulate the SSE `delta.content` chunks before parsing the structured JSON plan once the stream completes. See "Streaming scope" below — this removes response-buffering latency, it does not stream partial structured output to callers (the plan is one JSON object and cannot be validated before it is complete). |
@@ -161,9 +161,11 @@ response driving the effect path end to end.
 
 `AzureOpenAiClient` now wraps every provider call with:
 
-- **Timeout**: an `AbortController` aborts the request after
-  `AZURE_OPENAI_TIMEOUT_MS`; the abort is surfaced as a retryable
-  `PROVIDER_TIMEOUT`.
+- **Timeout**: an `AbortController` aborts the ENTIRE attempt — headers
+  AND body/SSE-stream consumption — after `AZURE_OPENAI_TIMEOUT_MS`; a
+  gateway that returns headers and then stalls mid-body/mid-stream is
+  aborted just like a hung connection. The abort is surfaced as a
+  retryable `PROVIDER_TIMEOUT`.
 - **Retry with backoff**: network errors, timeouts, and HTTP
   `429`/`500`/`502`/`503`/`504` are retried up to `AZURE_OPENAI_MAX_RETRIES`
   times with exponential backoff + jitter
@@ -206,7 +208,9 @@ Proven offline (no network) by
 `test/model-resilience.integration.test.ts`, exercising `AzureOpenAiClient`
 directly with a stubbed `fetchImpl` for every case above (retry-then-succeed,
 no-retry-on-4xx, retry-exhaustion, breaker open/half-open/close, timeout
-abort, streaming SSE accumulation, and secret-free error messages).
+abort (both before headers and after headers during body/SSE-stream
+stall), a retryable mid-stream network reset, streaming SSE accumulation,
+and secret-free error messages).
 
 ## Honest scope / what this is NOT
 

@@ -278,6 +278,7 @@ class CircuitBreaker {
   private state: BreakerState = "closed";
   private consecutiveFailures = 0;
   private openedAt = 0;
+  private probeInFlight = false;
 
   constructor(
     private readonly failureThreshold: number,
@@ -296,14 +297,23 @@ class CircuitBreaker {
       }
       return false;
     }
-    // half-open: a probe is already in flight logically, but this client is
-    // single-flight per invoke() call so this is safe to allow through.
+    if (this.state === "half-open") {
+      // Gate half-open to exactly one in-flight probe: concurrent invoke()
+      // calls during the cooldown-elapsed window must not all hit the
+      // provider. The first caller through flips probeInFlight; it is
+      // cleared again by recordSuccess/recordFailure once that probe
+      // resolves.
+      if (this.probeInFlight) return false;
+      this.probeInFlight = true;
+      return true;
+    }
     return true;
   }
 
   recordSuccess(): void {
     this.state = "closed";
     this.consecutiveFailures = 0;
+    this.probeInFlight = false;
   }
 
   recordFailure(): void {
@@ -312,6 +322,7 @@ class CircuitBreaker {
       this.state = "open";
       this.openedAt = this.now();
     }
+    this.probeInFlight = false;
   }
 }
 
@@ -371,34 +382,55 @@ export class AzureOpenAiClient implements ModelClient {
     };
   }
 
-  private async fetchWithTimeout(body: Record<string, unknown>): Promise<Response> {
+  /**
+   * Runs `fn` under a single AbortController/timer that stays armed for the
+   * ENTIRE attempt — not just until response headers resolve. `fn` receives
+   * the abort signal and is expected to thread it through both the initial
+   * fetch and any subsequent body/stream reads (`res.json()`, `res.text()`,
+   * `consumeSse`), so a provider that returns 200 headers and then stalls
+   * mid-body/mid-stream still gets aborted and surfaced as a retryable
+   * PROVIDER_TIMEOUT, instead of hanging indefinitely. The timer is always
+   * cleared, on both success and failure, via `finally`.
+   */
+  private async withTimeout<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
     try {
-      return await this.config.fetchImpl(requestUrl(this.config), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...authHeaders(this.config),
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      return await fn(controller.signal);
     } catch (err) {
+      // Business-logic failures raised deeper in the pipeline (bad HTTP
+      // status, empty content, JSON-parse failure) already carry their own
+      // retryability classification — pass them through unchanged.
+      if (err instanceof AttemptFailure) throw err;
       if (isAbortError(err)) {
         throw new AttemptFailure(
           true,
           new AzureOpenAiClientError("PROVIDER_TIMEOUT", `Azure OpenAI request timed out after ${this.config.timeoutMs}ms`),
         );
       }
+      // Any other failure — before headers OR mid-body/mid-stream (e.g. a
+      // connection reset while reading the response) — is treated as a
+      // retryable network error, for parity with a pre-header network drop.
       // Never include the api-key header or its value in the thrown error.
       throw new AttemptFailure(
         true,
-        new AzureOpenAiClientError("NETWORK_ERROR", `Azure OpenAI request failed before receiving a response: ${errorMessage(err)}`),
+        new AzureOpenAiClientError("NETWORK_ERROR", `Azure OpenAI request failed: ${errorMessage(err)}`),
       );
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  private doFetch(body: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
+    return this.config.fetchImpl(requestUrl(this.config), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders(this.config),
+      },
+      body: JSON.stringify(body),
+      signal,
+    });
   }
 
   private async assertOk(res: Response): Promise<void> {
@@ -428,26 +460,30 @@ export class AzureOpenAiClient implements ModelClient {
   }
 
   private async attemptOnce(request: ModelClientRequest): Promise<ModelClientResponse> {
-    const res = await this.fetchWithTimeout(this.buildRequestBody(request, false));
-    await this.assertOk(res);
-    const payload = (await res.json()) as ChatCompletionResponse;
-    const content = payload.choices?.[0]?.message?.content;
-    return this.toModelClientResponse(typeof content === "string" ? content : "", payload.model, request);
-  }
-
-  private async attemptStreaming(request: ModelClientRequest): Promise<ModelClientResponse> {
-    const res = await this.fetchWithTimeout(this.buildRequestBody(request, true));
-    await this.assertOk(res);
-    if (!res.body) {
-      // Gateway/stub did not expose a stream body despite stream:true; fall
-      // back to treating the whole response as a single JSON payload rather
-      // than failing a resilience feature that is opt-in and best-effort.
+    return this.withTimeout(async (signal) => {
+      const res = await this.doFetch(this.buildRequestBody(request, false), signal);
+      await this.assertOk(res);
       const payload = (await res.json()) as ChatCompletionResponse;
       const content = payload.choices?.[0]?.message?.content;
       return this.toModelClientResponse(typeof content === "string" ? content : "", payload.model, request);
-    }
-    const { content, model } = await this.consumeSse(res.body);
-    return this.toModelClientResponse(content, model, request);
+    });
+  }
+
+  private async attemptStreaming(request: ModelClientRequest): Promise<ModelClientResponse> {
+    return this.withTimeout(async (signal) => {
+      const res = await this.doFetch(this.buildRequestBody(request, true), signal);
+      await this.assertOk(res);
+      if (!res.body) {
+        // Gateway/stub did not expose a stream body despite stream:true; fall
+        // back to treating the whole response as a single JSON payload rather
+        // than failing a resilience feature that is opt-in and best-effort.
+        const payload = (await res.json()) as ChatCompletionResponse;
+        const content = payload.choices?.[0]?.message?.content;
+        return this.toModelClientResponse(typeof content === "string" ? content : "", payload.model, request);
+      }
+      const { content, model } = await this.consumeSse(res.body);
+      return this.toModelClientResponse(content, model, request);
+    });
   }
 
   /** Reads an SSE `data: {...}` stream and accumulates `choices[0].delta.content` chunks. Ignores `[DONE]` and malformed frames. */

@@ -20,6 +20,19 @@ const REQUEST = {
   correlationId: "corr-1",
 };
 
+/**
+ * Structural offline guarantee: any test in this file that forgets to pass
+ * an explicit `fetchImpl` stub must fail LOUDLY (not silently hit the real
+ * network), so "offline by convention" becomes "offline by construction".
+ */
+function throwingFetchStub(): typeof fetch {
+  return (() => {
+    throw new Error(
+      "model-resilience.integration.test.ts: baseConfig() was not given an explicit fetchImpl stub — every test must supply one to stay network-free",
+    );
+  }) as unknown as typeof fetch;
+}
+
 function baseConfig(overrides: Partial<AzureOpenAiClientConfig>): AzureOpenAiClientConfig {
   return {
     endpoint: "https://resilience-test.example.com",
@@ -28,7 +41,7 @@ function baseConfig(overrides: Partial<AzureOpenAiClientConfig>): AzureOpenAiCli
     deployment: "resilience-test-model",
     apiVersion: "2024-08-01-preview",
     assumeZeroRetention: false,
-    fetchImpl: overrides.fetchImpl ?? (fetch as typeof fetch),
+    fetchImpl: overrides.fetchImpl ?? throwingFetchStub(),
     maxRetries: 3,
     retryBaseDelayMs: 1,
     timeoutMs: 50,
@@ -167,6 +180,107 @@ describe("D7 model-gateway resilience (offline, fetch-stub, no network)", () => 
     });
     const client = new AzureOpenAiClient(
       baseConfig({ fetchImpl: fetchMock as unknown as typeof fetch, maxRetries: 1, timeoutMs: 20 }),
+    );
+
+    const result = await client.invoke(REQUEST);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.structuredOutput).toMatchObject({ steps: [{ suggestedCommand: "internal.update" }] });
+  });
+  it(
+    "aborts a request that stalls AFTER headers resolve during JSON body consumption (PROVIDER_TIMEOUT, not an indefinite hang)",
+    async () => {
+      // Headers resolve immediately (ok:true), but res.json() never
+      // resolves on its own — it only rejects once the request's abort
+      // signal fires. Without the P2 fix (clearTimeout firing as soon as
+      // headers resolve), this attempt would hang forever instead of
+      // aborting; with the fix, the still-armed timer aborts the in-flight
+      // body read and the client surfaces PROVIDER_TIMEOUT.
+      const fetchMock = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
+        const stalledResponse = {
+          ok: true,
+          status: 200,
+          json: () =>
+            new Promise((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+            }),
+          text: async () => "",
+        } as unknown as Response;
+        return Promise.resolve(stalledResponse);
+      });
+      const client = new AzureOpenAiClient(
+        baseConfig({ fetchImpl: fetchMock as unknown as typeof fetch, maxRetries: 0, timeoutMs: 20 }),
+      );
+
+      await expect(client.invoke(REQUEST)).rejects.toMatchObject({ code: "PROVIDER_TIMEOUT" });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+    500,
+  );
+
+  it(
+    "aborts a request that stalls AFTER headers resolve during SSE stream consumption (PROVIDER_TIMEOUT, not an indefinite hang)",
+    async () => {
+      // Headers resolve immediately and res.body is present, but the
+      // stream's reader.read() never resolves on its own — only when the
+      // request's abort signal fires, mirroring how a real fetch
+      // implementation ties response-body reads to the request signal.
+      const hangingBody = (signal: AbortSignal): ReadableStream<Uint8Array> =>
+        ({
+          getReader: () => ({
+            read: () =>
+              new Promise((_resolve, reject) => {
+                signal.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+              }),
+            releaseLock: () => {},
+          }),
+        }) as unknown as ReadableStream<Uint8Array>;
+      const fetchMock = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
+        const stalledResponse = {
+          ok: true,
+          status: 200,
+          body: hangingBody(init?.signal as AbortSignal),
+          json: async () => ({}),
+          text: async () => "",
+        } as unknown as Response;
+        return Promise.resolve(stalledResponse);
+      });
+      const client = new AzureOpenAiClient(
+        baseConfig({ fetchImpl: fetchMock as unknown as typeof fetch, maxRetries: 0, timeoutMs: 20, stream: true }),
+      );
+
+      await expect(client.invoke(REQUEST)).rejects.toMatchObject({ code: "PROVIDER_TIMEOUT" });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+    500,
+  );
+
+  it("classifies a mid-stream read failure (connection reset after headers) as a retryable NETWORK_ERROR, on par with a pre-header network drop", async () => {
+    let calls = 0;
+    const brokenBody = {
+      getReader: () => ({
+        read: () => Promise.reject(new Error("socket hang up")),
+        releaseLock: () => {},
+      }),
+    } as unknown as ReadableStream<Uint8Array>;
+    const encoder = new TextEncoder();
+    const sseBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const planContent = planBody().choices[0]?.message.content ?? "";
+        const chunk = JSON.stringify({ model: "resilience-test-model", choices: [{ delta: { content: planContent } }] });
+        controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
+        controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
+        controller.close();
+      },
+    });
+    const fetchMock = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return { ok: true, status: 200, body: brokenBody, json: async () => ({}), text: async () => "" } as unknown as Response;
+      }
+      return new Response(sseBody, { status: 200, headers: { "content-type": "text/event-stream" } });
+    });
+    const client = new AzureOpenAiClient(
+      baseConfig({ fetchImpl: fetchMock as unknown as typeof fetch, maxRetries: 1, stream: true }),
     );
 
     const result = await client.invoke(REQUEST);
