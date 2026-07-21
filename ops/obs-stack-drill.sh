@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# obs-stack-drill.sh — live D12 proof that the deployed observability stack
-# (Prometheus + alert rules + Grafana datasource/dashboard) actually works
-# end-to-end, on top of the narrower scrape-only proof in
+# obs-stack-drill.sh — live D12/PG-F proof that the deployed observability
+# stack (Prometheus + alert rules + Grafana datasource/dashboard +
+# Alertmanager routing + persistent volumes) actually works end-to-end, on
+# top of the narrower scrape-only proof in
 # packages/persistence/scripts/prom-scrape-drill.sh.
 #
 # Local-only guard, same style as pg-rls-smoke.sh / prom-scrape-drill.sh:
@@ -15,16 +16,32 @@
 #      that serves GET /metrics and GET /metrics/prometheus in production.
 #   2. Seeds one job through the real POST /api/agent/commands route so
 #      ai_crm_agent_jobs_total is non-zero.
-#   3. Starts prometheus + grafana (docker-compose.observability.yml)
-#      pointed at host.docker.internal:${AI_CRM_API_PORT}.
-#   4. Waits for Prometheus to report the target up == 1.
-#   5. Asserts Prometheus loaded the alert rules: GET /api/v1/rules shows
-#      AiCrmApiDown and AiCrmDualWriteFailures.
-#   6. Asserts Grafana is up (GET /api/health), the Prometheus datasource
+#   3. Starts a tiny local webhook-catcher (plain node http server) on
+#      :${WEBHOOK_PORT} that records every alert payload Alertmanager sends
+#      it — the locally-assertable notification receiver.
+#   4. Starts prometheus + grafana + alertmanager
+#      (docker-compose.observability.yml) pointed at
+#      host.docker.internal:${AI_CRM_API_PORT}.
+#   5. Waits for Prometheus to report the target up == 1.
+#   6. Asserts Prometheus loaded the alert rules: GET /api/v1/rules shows
+#      AiCrmApiDown, AiCrmDualWriteFailures, and the fast test-only
+#      AiCrmApiDownFast.
+#   7. Asserts Grafana is up (GET /api/health), the Prometheus datasource
 #      health-checks OK (GET /api/datasources/uid/<uid>/health via the
 #      default admin:admin creds), and the ai-crm dashboard is provisioned
 #      (GET /api/dashboards/uid/ai-crm-overview).
-#   7. Tears everything down (compose down + kill the API process).
+#   8. Asserts Alertmanager is up (GET /api/v2/status).
+#   9. FORCES an alert to fire: kills the API harness so the scrape target
+#      goes down, which trips the fast (`for: 5s`) AiCrmApiDownFast rule.
+#      Asserts Alertmanager's GET /api/v2/alerts shows it firing AND the
+#      webhook-catcher actually received the notification.
+#  10. Asserts PERSISTENCE: creates an Alertmanager silence (state written
+#      to the alertmanager_data volume), `docker compose restart
+#      alertmanager`, and asserts the silence is still present afterwards
+#      (i.e. survives a container restart because it's volume-backed, not
+#      ephemeral container storage).
+#  11. Tears everything down (compose down + kill the API/webhook
+#      processes).
 #
 # Usage:
 #   ops/obs-stack-drill.sh
@@ -43,6 +60,8 @@ DOC_PATH="${ROOT}/docs/ops/observability.md"
 export AI_CRM_API_PORT="${AI_CRM_API_PORT:-3001}"
 PROM_PORT="${PROM_PORT:-9090}"
 GRAFANA_PORT="${GRAFANA_PORT:-3005}"
+ALERTMANAGER_PORT="${ALERTMANAGER_PORT:-9093}"
+WEBHOOK_PORT="${WEBHOOK_PORT:-9099}"
 GRAFANA_USER="admin"
 GRAFANA_PASS="admin"
 DASHBOARD_UID="ai-crm-overview"
@@ -54,6 +73,10 @@ RUN_LOG="${LOG_DIR}/run-${RUN_TS//[:]/-}.log"
 RENDERED_PROM_CONFIG="${LOG_DIR}/prometheus.rendered.yml"
 API_LOG="${LOG_DIR}/api.log"
 API_HARNESS="${LOG_DIR}/api-harness.mjs"
+WEBHOOK_LOG="${LOG_DIR}/webhook-received.log"
+WEBHOOK_HARNESS="${LOG_DIR}/webhook-catcher.mjs"
+WEBHOOK_STDOUT="${LOG_DIR}/webhook-catcher.stdout.log"
+: >"${WEBHOOK_LOG}"
 
 log() { printf '%s\n' "$*" | tee -a "${RUN_LOG}"; }
 
@@ -69,6 +92,7 @@ record() {
 }
 
 API_PID=""
+WEBHOOK_PID=""
 COMPOSE_UP=0
 
 cleanup() {
@@ -81,6 +105,11 @@ cleanup() {
     log "Stopping AI-CRM API harness (pid ${API_PID})..."
     kill "${API_PID}" 2>/dev/null || true
     wait "${API_PID}" 2>/dev/null || true
+  fi
+  if [[ -n "${WEBHOOK_PID}" ]] && kill -0 "${WEBHOOK_PID}" 2>/dev/null; then
+    log "Stopping webhook-catcher harness (pid ${WEBHOOK_PID})..."
+    kill "${WEBHOOK_PID}" 2>/dev/null || true
+    wait "${WEBHOOK_PID}" 2>/dev/null || true
   fi
   exit "${exit_code}"
 }
@@ -100,7 +129,7 @@ if [[ ! -f "${TSX_CLI}" ]]; then
 fi
 
 log "=== obs-stack-drill run ${RUN_TS} ==="
-log "AI_CRM_API_PORT=${AI_CRM_API_PORT} PROM_PORT=${PROM_PORT} GRAFANA_PORT=${GRAFANA_PORT}"
+log "AI_CRM_API_PORT=${AI_CRM_API_PORT} PROM_PORT=${PROM_PORT} GRAFANA_PORT=${GRAFANA_PORT} ALERTMANAGER_PORT=${ALERTMANAGER_PORT} WEBHOOK_PORT=${WEBHOOK_PORT}"
 
 # --- 1. Render the scrape target port into the mounted Prometheus config ---
 sed "s/host.docker.internal:3001/host.docker.internal:${AI_CRM_API_PORT}/" "${PROM_TEMPLATE}" >"${RENDERED_PROM_CONFIG}"
@@ -164,7 +193,54 @@ else
   record FAIL "AI-CRM API harness did not reach ready state with a seeded job"
 fi
 
-# --- 3. Start Prometheus + Grafana pointed at the rendered config ---
+# --- 3. Start the local webhook-catcher (the locally-assertable receiver) ---
+cat >"${WEBHOOK_HARNESS}" <<'EOF'
+import http from "node:http";
+import fs from "node:fs";
+
+const PORT = Number(process.env.WEBHOOK_PORT || 9099);
+const LOG_PATH = process.env.WEBHOOK_LOG;
+
+const server = http.createServer((req, res) => {
+  if (req.method === "POST" && req.url === "/webhook") {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      fs.appendFileSync(LOG_PATH, body + "\n");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "received" }));
+    });
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`webhook-catcher listening on :${PORT}`);
+});
+EOF
+
+WEBHOOK_PORT="${WEBHOOK_PORT}" WEBHOOK_LOG="${WEBHOOK_LOG}" node "${WEBHOOK_HARNESS}" >"${WEBHOOK_STDOUT}" 2>&1 &
+WEBHOOK_PID=$!
+
+WEBHOOK_READY=0
+for _ in $(seq 1 20); do
+  if curl -fsS -o /dev/null "http://127.0.0.1:${WEBHOOK_PORT}/webhook" -X POST -d '{}' 2>/dev/null; then
+    WEBHOOK_READY=1
+    break
+  fi
+  sleep 0.3
+done
+if [[ "${WEBHOOK_READY}" == "1" ]]; then
+  : >"${WEBHOOK_LOG}"
+  record PASS "webhook-catcher harness up on :${WEBHOOK_PORT}"
+else
+  cat "${WEBHOOK_STDOUT}" | tee -a "${RUN_LOG}" || true
+  record FAIL "webhook-catcher harness did not come up"
+fi
+
+# --- 4. Start Prometheus + Grafana + Alertmanager pointed at the rendered config ---
 OVERRIDE_COMPOSE="${LOG_DIR}/docker-compose.override.yml"
 cat >"${OVERRIDE_COMPOSE}" <<COMPOSE_OVERRIDE
 services:
@@ -172,11 +248,11 @@ services:
     volumes:
       - ${RENDERED_PROM_CONFIG}:/etc/prometheus/prometheus.yml:ro
 COMPOSE_OVERRIDE
-docker compose -f "${COMPOSE_FILE}" -f "${OVERRIDE_COMPOSE}" up -d prometheus grafana >>"${RUN_LOG}" 2>&1
+docker compose -f "${COMPOSE_FILE}" -f "${OVERRIDE_COMPOSE}" up -d prometheus grafana alertmanager >>"${RUN_LOG}" 2>&1
 COMPOSE_UP=1
-record PASS "docker compose observability stack started (prometheus :${PROM_PORT}, grafana :${GRAFANA_PORT})"
+record PASS "docker compose observability stack started (prometheus :${PROM_PORT}, grafana :${GRAFANA_PORT}, alertmanager :${ALERTMANAGER_PORT})"
 
-# --- 4. Wait for the Prometheus target to report up==1 ---
+# --- 5. Wait for the Prometheus target to report up==1 ---
 TARGET_UP=0
 for _ in $(seq 1 40); do
   TARGETS_JSON="$(curl -fsS "http://localhost:${PROM_PORT}/api/v1/targets" 2>/dev/null || true)"
@@ -193,12 +269,12 @@ else
   record FAIL "Prometheus target never reported up"
 fi
 
-# --- 5. Assert Prometheus loaded the alert rules ---
+# --- 6. Assert Prometheus loaded the alert rules (production + fast test-only) ---
 RULES_JSON=""
 RULES_LOADED=0
 for _ in $(seq 1 20); do
   RULES_JSON="$(curl -fsS "http://localhost:${PROM_PORT}/api/v1/rules" 2>/dev/null || true)"
-  if printf '%s' "${RULES_JSON}" | grep -q '"name":"AiCrmApiDown"' && printf '%s' "${RULES_JSON}" | grep -q '"name":"AiCrmDualWriteFailures"' && printf '%s' "${RULES_JSON}" | grep -q '"type":"alerting"'; then
+  if printf '%s' "${RULES_JSON}" | grep -q '"name":"AiCrmApiDown"' && printf '%s' "${RULES_JSON}" | grep -q '"name":"AiCrmDualWriteFailures"' && printf '%s' "${RULES_JSON}" | grep -q '"name":"AiCrmApiDownFast"' && printf '%s' "${RULES_JSON}" | grep -q '"type":"alerting"'; then
     RULES_LOADED=1
     break
   fi
@@ -207,9 +283,9 @@ done
 log "--- Prometheus /api/v1/rules ---"
 log "${RULES_JSON}"
 if [[ "${RULES_LOADED}" == "1" ]]; then
-  record PASS "Prometheus loaded alert rules AiCrmApiDown and AiCrmDualWriteFailures"
+  record PASS "Prometheus loaded alert rules AiCrmApiDown, AiCrmDualWriteFailures, AiCrmApiDownFast"
 else
-  record FAIL "Prometheus did not report both AiCrmApiDown and AiCrmDualWriteFailures in /api/v1/rules"
+  record FAIL "Prometheus did not report all three alert rules in /api/v1/rules"
 fi
 
 # --- 6a. Grafana up ---
@@ -258,6 +334,104 @@ if printf '%s' "${DASHBOARD_JSON}" | grep -q '"title":"AI-CRM Overview"'; then
 else
   record FAIL "Grafana dashboard ai-crm-overview not found via API"
 fi
+# --- 7. Alertmanager up ---
+ALERTMANAGER_UP=0
+for _ in $(seq 1 40); do
+  AM_STATUS_JSON="$(curl -fsS "http://localhost:${ALERTMANAGER_PORT}/api/v2/status" 2>/dev/null || true)"
+  if printf '%s' "${AM_STATUS_JSON}" | grep -q '"cluster"'; then
+    ALERTMANAGER_UP=1
+    break
+  fi
+  sleep 0.5
+done
+log "--- Alertmanager /api/v2/status ---"
+log "${AM_STATUS_JSON}"
+if [[ "${ALERTMANAGER_UP}" == "1" ]]; then
+  record PASS "Alertmanager is up (GET /api/v2/status)"
+else
+  record FAIL "Alertmanager never reported healthy"
+fi
+
+# --- 8. FORCE an alert: kill the API so the scrape target goes down ---
+if [[ -n "${API_PID}" ]] && kill -0 "${API_PID}" 2>/dev/null; then
+  log "Killing AI-CRM API harness (pid ${API_PID}) to force the ai-crm-api scrape target down..."
+  kill "${API_PID}" 2>/dev/null || true
+  wait "${API_PID}" 2>/dev/null || true
+  API_PID=""
+fi
+
+# --- 9. Assert the fast test alert FIRES in Alertmanager and the webhook-catcher RECEIVES it ---
+ALERT_FIRED=0
+AM_ALERTS_JSON=""
+for _ in $(seq 1 60); do
+  AM_ALERTS_JSON="$(curl -fsS "http://localhost:${ALERTMANAGER_PORT}/api/v2/alerts" 2>/dev/null || true)"
+  if printf '%s' "${AM_ALERTS_JSON}" | grep -q '"alertname":"AiCrmApiDownFast"'; then
+    ALERT_FIRED=1
+    break
+  fi
+  sleep 1
+done
+log "--- Alertmanager /api/v2/alerts ---"
+log "${AM_ALERTS_JSON}"
+if [[ "${ALERT_FIRED}" == "1" ]]; then
+  record PASS "Alertmanager /api/v2/alerts shows AiCrmApiDownFast firing"
+else
+  record FAIL "Alertmanager never reported AiCrmApiDownFast firing"
+fi
+
+WEBHOOK_RECEIVED=0
+WEBHOOK_RECEIVED_LOG=""
+for _ in $(seq 1 40); do
+  if [[ -s "${WEBHOOK_LOG}" ]] && grep -q 'AiCrmApiDownFast' "${WEBHOOK_LOG}"; then
+    WEBHOOK_RECEIVED=1
+    WEBHOOK_RECEIVED_LOG="$(cat "${WEBHOOK_LOG}")"
+    break
+  fi
+  sleep 1
+done
+log "--- webhook-catcher received payloads (${WEBHOOK_LOG}) ---"
+log "${WEBHOOK_RECEIVED_LOG}"
+if [[ "${WEBHOOK_RECEIVED}" == "1" ]]; then
+  record PASS "webhook-catcher received the routed AiCrmApiDownFast notification"
+else
+  record FAIL "webhook-catcher never received a notification for AiCrmApiDownFast"
+fi
+
+# --- 10. PERSISTENCE: write a silence, restart alertmanager, assert it survives ---
+SILENCE_ID=""
+SILENCE_CREATE_JSON="$(curl -fsS -X POST "http://localhost:${ALERTMANAGER_PORT}/api/v2/silences" \
+  -H "content-type: application/json" \
+  -d "{\"matchers\":[{\"name\":\"alertname\",\"value\":\"AiCrmApiDownFast\",\"isRegex\":false}],\"startsAt\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"endsAt\":\"$(date -u -v+10M +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u -d '+10 minutes' +%Y-%m-%dT%H:%M:%S.000Z)\",\"createdBy\":\"obs-stack-drill\",\"comment\":\"persistence-proof silence, restart-survival check\"}" \
+  2>/dev/null || true)"
+log "--- Alertmanager silence create response ---"
+log "${SILENCE_CREATE_JSON}"
+SILENCE_ID="$(printf '%s' "${SILENCE_CREATE_JSON}" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{console.log(JSON.parse(d).silenceID||"")}catch{console.log("")}})' 2>/dev/null || true)"
+if [[ -n "${SILENCE_ID}" ]]; then
+  record PASS "Created Alertmanager silence ${SILENCE_ID} (pre-restart persistence state)"
+else
+  record FAIL "Failed to create an Alertmanager silence for the persistence check"
+fi
+
+log "Restarting alertmanager container (docker compose restart alertmanager)..."
+docker compose -f "${COMPOSE_FILE}" restart alertmanager >>"${RUN_LOG}" 2>&1 || true
+
+SILENCE_SURVIVED=0
+SILENCE_AFTER_JSON=""
+for _ in $(seq 1 40); do
+  SILENCE_AFTER_JSON="$(curl -fsS "http://localhost:${ALERTMANAGER_PORT}/api/v2/silences" 2>/dev/null || true)"
+  if [[ -n "${SILENCE_ID}" ]] && printf '%s' "${SILENCE_AFTER_JSON}" | grep -q "\"id\":\"${SILENCE_ID}\""; then
+    SILENCE_SURVIVED=1
+    break
+  fi
+  sleep 1
+done
+log "--- Alertmanager /api/v2/silences after restart ---"
+log "${SILENCE_AFTER_JSON}"
+if [[ "${SILENCE_SURVIVED}" == "1" ]]; then
+  record PASS "Alertmanager silence ${SILENCE_ID} survived 'docker compose restart alertmanager' (volume-backed persistence)"
+else
+  record FAIL "Alertmanager silence did not survive the restart (persistence not proven)"
+fi
 
 log ""
 log "=== SUMMARY: ${PASS_N} PASS / ${FAIL_N} FAIL ==="
@@ -269,12 +443,24 @@ if [[ -w "$(dirname "${DOC_PATH}")" || -f "${DOC_PATH}" ]]; then
     echo "## obs-stack-drill run ${RUN_TS}"
     echo ""
     echo "- Result: ${PASS_N} PASS / ${FAIL_N} FAIL"
-    echo "- API port: ${AI_CRM_API_PORT}, Prometheus port: ${PROM_PORT}, Grafana port: ${GRAFANA_PORT}"
+    echo "- API port: ${AI_CRM_API_PORT}, Prometheus port: ${PROM_PORT}, Grafana port: ${GRAFANA_PORT}, Alertmanager port: ${ALERTMANAGER_PORT}, webhook-catcher port: ${WEBHOOK_PORT}"
     echo '```json'
     echo "${RULES_JSON}"
     echo '```'
     echo '```json'
     echo "${DASHBOARD_JSON}"
+    echo '```'
+    echo "Alertmanager /api/v2/alerts (firing AiCrmApiDownFast):"
+    echo '```json'
+    echo "${AM_ALERTS_JSON}"
+    echo '```'
+    echo "webhook-catcher received payload:"
+    echo '```json'
+    echo "${WEBHOOK_RECEIVED_LOG}"
+    echo '```'
+    echo "Alertmanager silence ${SILENCE_ID} after 'docker compose restart alertmanager' (persistence proof):"
+    echo '```json'
+    echo "${SILENCE_AFTER_JSON}"
     echo '```'
   } >>"${DOC_PATH}" 2>/dev/null || true
 fi

@@ -1,17 +1,26 @@
 # Observability stack — Prometheus scraper + alert rules for the AI-CRM API
-# `/metrics` endpoint, plus Grafana provisioned with a datasource and an
-# AI-CRM dashboard (closes the "no dashboards/alerting" gap; D12).
+# `/metrics` endpoint, Grafana provisioned with a datasource and an AI-CRM
+# dashboard, and Alertmanager routing fired alerts to a locally-assertable
+# webhook receiver (closes the "no dashboards/alerting" gap, D12, and the
+# "no Alertmanager/HA/persistence" residual, PG-F).
+#
+# All three services use named, persistent volumes (prometheus_data,
+# grafana_data, alertmanager_data) so TSDB samples, dashboards/settings, and
+# Alertmanager silences/notification state survive a container restart —
+# not wiped on every `docker compose restart`/recreate like the prior
+# ephemeral-storage setup.
 #
 # Kept separate from the root docker-compose.yml (Postgres SoR) so this can
 # be brought up/down independently without touching the ai_crm database.
 #
 # Usage:
-#   docker compose -f docker-compose.observability.yml up -d prometheus grafana
+#   docker compose -f docker-compose.observability.yml up -d prometheus grafana alertmanager
 #   docker compose -f docker-compose.observability.yml down
 #
 # See ops/obs-stack-drill.sh (and packages/persistence/scripts/prom-scrape-drill.sh
 # for the narrower scrape-only proof) for a live, end-to-end proof (host-run
-# API -> container scrape -> Prometheus rules -> Grafana datasource/dashboard).
+# API -> container scrape -> Prometheus rules -> Alertmanager -> receiver,
+# plus a persistence-survives-restart proof).
 services:
   prometheus:
     image: prom/prometheus:latest
@@ -19,8 +28,10 @@ services:
     ports:
       - "9090:9090"
     volumes:
+      - prometheus_data:/prometheus
       - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./ops/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./ops/prometheus/alerts-test.yml:/etc/prometheus/alerts-test.yml:ro
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
@@ -46,5 +57,28 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
+      - grafana_data:/var/lib/grafana
       - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: ai-crm-alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - alertmanager_data:/alertmanager
+      - ./ops/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    extra_hosts:
+      # So the webhook_configs receiver in alertmanager.yml can reach the
+      # host-run webhook-catcher harness (see ops/obs-stack-drill.sh)
+      # regardless of platform (see the prometheus service comment above).
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  alertmanager_data:

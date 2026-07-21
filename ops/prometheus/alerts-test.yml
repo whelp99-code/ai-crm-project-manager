@@ -1,0 +1,22 @@
+# Test-only fast-firing mirror of AiCrmApiDown, used exclusively by
+# ops/obs-stack-drill.sh to prove Prometheus -> Alertmanager -> receiver
+# routing end-to-end within seconds instead of waiting out the production
+# `for: 1m` in ops/prometheus/alerts.yml. Loaded alongside alerts.yml via
+# `rule_files:` in ops/prometheus/prometheus.yml; harmless in a normal run
+# because it simply never fires unless the ai-crm-api scrape target is down
+# (same as AiCrmApiDown, just faster). Not a production paging policy.
+groups:
+  - name: ai-crm.test-rules
+    rules:
+      - alert: AiCrmApiDownFast
+        expr: up{job="ai-crm-api"} == 0
+        for: 5s
+        labels:
+          severity: critical
+          test_only: "true"
+        annotations:
+          summary: "[TEST-ONLY] AI-CRM API scrape target is down (fast)"
+          description: >-
+            Fast-firing (for: 5s) mirror of AiCrmApiDown. Used only by
+            ops/obs-stack-drill.sh to prove Alertmanager routing end-to-end
+            within seconds; not intended as a production alerting rule.

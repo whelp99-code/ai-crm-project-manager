@@ -11,10 +11,21 @@ global:
   scrape_interval: 5s
   evaluation_interval: 5s
 
-# Alerting rules (D12) — see ops/prometheus/alerts.yml. Loaded rules are
-# visible at GET /api/v1/rules on the running Prometheus.
+# Alerting rules (D12) — see ops/prometheus/alerts.yml (production rules)
+# and ops/prometheus/alerts-test.yml (a fast-firing test-only mirror used by
+# ops/obs-stack-drill.sh). Loaded rules are visible at GET /api/v1/rules on
+# the running Prometheus.
 rule_files:
   - "/etc/prometheus/alerts.yml"
+  - "/etc/prometheus/alerts-test.yml"
+
+# Alertmanager (D12/PG-F) — routes fired alerts to the notification
+# receiver configured in ops/alertmanager/alertmanager.yml. `alertmanager`
+# resolves via the compose network (see docker-compose.observability.yml).
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
 
 scrape_configs:
   - job_name: "ai-crm-api"

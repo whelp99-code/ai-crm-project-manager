@@ -1,0 +1,27 @@
+# Alertmanager config for the AI-CRM observability stack (D12 / PG-F).
+#
+# Routes every alert to a single "webhook-catcher" receiver: a tiny local
+# HTTP server (started by ops/obs-stack-drill.sh, see webhook-catcher.mjs
+# harness) that records every alert payload it receives. This makes the
+# whole pipeline (Prometheus rule fires -> Alertmanager routes -> receiver
+# gets notified) locally assertable with no real Slack/email/PagerDuty
+# account needed. Alertmanager's own /api/v2/alerts (and /api/v2/silences,
+# used for the persistence proof) is also queried directly by the drill.
+#
+# group_wait/group_interval/repeat_interval are kept short so a drill run
+# observes routing within seconds instead of minutes.
+global:
+  resolve_timeout: 30s
+
+route:
+  receiver: "webhook-catcher"
+  group_by: ["alertname"]
+  group_wait: 1s
+  group_interval: 5s
+  repeat_interval: 5m
+
+receivers:
+  - name: "webhook-catcher"
+    webhook_configs:
+      - url: "http://host.docker.internal:9099/webhook"
+        send_resolved: true
