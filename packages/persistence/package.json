@@ -1,0 +1,28 @@
+{
+  "name": "@ai-crm/persistence",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Drizzle/PostgreSQL foundation schema: workspaces, principals, policy/control/intent governance with lease fencing, append-only audit chain, outbox, notifications, imports and model invocations, all workspace-bound under FORCE RLS.",
+  "main": "./src/schema.ts",
+  "types": "./src/schema.ts",
+  "exports": {
+    ".": "./src/schema.ts"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-crm/contracts": "workspace:*",
+    "drizzle-orm": "^0.36.4",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

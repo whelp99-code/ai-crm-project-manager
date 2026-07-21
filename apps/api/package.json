@@ -1,0 +1,30 @@
+{
+  "name": "@ai-crm/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/app.ts",
+  "scripts": {
+    "typecheck": "tsc -b --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-crm/ai-orchestrator": "workspace:*",
+    "@ai-crm/connectors": "workspace:*",
+    "@ai-crm/contracts": "workspace:*",
+    "@ai-crm/domain": "workspace:*",
+    "@ai-crm/finance": "workspace:*",
+    "@ai-crm/governance": "workspace:*",
+    "@ai-crm/imports": "workspace:*",
+    "@ai-crm/model-gateway": "workspace:*",
+    "@ai-crm/orchestration": "workspace:*",
+    "@ai-crm/policy-engine": "workspace:*",
+    "@ai-crm/reports": "workspace:*",
+    "fastify": "^5.6.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

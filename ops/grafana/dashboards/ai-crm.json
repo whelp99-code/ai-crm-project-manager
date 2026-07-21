@@ -1,0 +1,101 @@
+{
+  "uid": "ai-crm-overview",
+  "title": "AI-CRM Overview",
+  "tags": ["ai-crm", "d12"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Agent jobs by status",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "ai-crm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "ai-crm-prometheus" },
+          "expr": "ai_crm_agent_jobs_by_status",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Governance controls total",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "ai-crm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "ai-crm-prometheus" },
+          "expr": "ai_crm_governance_controls_total",
+          "legendFormat": "controls",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Dual-write failures",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "ai-crm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "ai-crm-prometheus" },
+          "expr": "ai_crm_dual_write_failures",
+          "legendFormat": "dual-write failures",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Scrape target up",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "ai-crm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" } } },
+            { "type": "value", "options": { "1": { "text": "UP", "color": "green" } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "ai-crm-prometheus" },
+          "expr": "up{job=\"ai-crm-api\"}",
+          "legendFormat": "up",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

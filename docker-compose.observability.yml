@@ -1,0 +1,50 @@
+# Observability stack — Prometheus scraper + alert rules for the AI-CRM API
+# `/metrics` endpoint, plus Grafana provisioned with a datasource and an
+# AI-CRM dashboard (closes the "no dashboards/alerting" gap; D12).
+#
+# Kept separate from the root docker-compose.yml (Postgres SoR) so this can
+# be brought up/down independently without touching the ai_crm database.
+#
+# Usage:
+#   docker compose -f docker-compose.observability.yml up -d prometheus grafana
+#   docker compose -f docker-compose.observability.yml down
+#
+# See ops/obs-stack-drill.sh (and packages/persistence/scripts/prom-scrape-drill.sh
+# for the narrower scrape-only proof) for a live, end-to-end proof (host-run
+# API -> container scrape -> Prometheus rules -> Grafana datasource/dashboard).
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ai-crm-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    extra_hosts:
+      # Docker Desktop (macOS/Windows) resolves this automatically; on Linux
+      # this mapping makes it resolve too, so the container can reach the
+      # host-run AI-CRM API regardless of platform.
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ai-crm-grafana
+    depends_on:
+      - prometheus
+    ports:
+      # Host 3005 to avoid clashing with a typical `next dev` on 3000 and
+      # the AI-CRM API on 3001.
+      - "3005:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro

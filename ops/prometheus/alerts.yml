@@ -1,0 +1,37 @@
+# Prometheus alerting rules over ai_crm_* metrics (D12).
+#
+# Wired via `rule_files:` in ops/prometheus/prometheus.yml. Loaded rules are
+# visible at GET /api/v1/rules on the running Prometheus (see
+# ops/obs-stack-drill.sh for a live assertion).
+#
+# No Alertmanager is deployed alongside this — these rules populate
+# Prometheus's own /alerts and /api/v1/rules views (and would page out if an
+# Alertmanager + notification channel were later wired to
+# `alerting.alertmanagers` in prometheus.yml). That wiring is an explicit
+# residual, documented in docs/ops/observability.md.
+groups:
+  - name: ai-crm.rules
+    rules:
+      - alert: AiCrmApiDown
+        expr: up{job="ai-crm-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AI-CRM API scrape target is down"
+          description: >-
+            Prometheus has not been able to scrape the ai-crm-api target for
+            at least 1 minute. The API process may be down or unreachable
+            from the Prometheus container.
+
+      - alert: AiCrmDualWriteFailures
+        expr: ai_crm_dual_write_failures > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AI-CRM dual-write failures observed"
+          description: >-
+            ai_crm_dual_write_failures has been greater than 0 for at least
+            1 minute, indicating the best-effort dual-write path is failing
+            for at least one workspace/control.

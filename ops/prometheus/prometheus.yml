@@ -1,0 +1,26 @@
+# Prometheus scrape config for the AI-CRM API `/metrics` endpoint.
+#
+# The AI-CRM API is host-run (process-local, per docs/ops/compose.md), so the
+# Prometheus container reaches it via `host.docker.internal`. Target port
+# 3001 matches the port documented in docs/ops/compose.md for a host-run
+# `apps/api` and the port packages/persistence/scripts/prom-scrape-drill.sh
+# starts its scrape-proof harness on. Override by editing this file (and the
+# AI_CRM_API_PORT env passed to the drill script) if you run the API on a
+# different port.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+# Alerting rules (D12) — see ops/prometheus/alerts.yml. Loaded rules are
+# visible at GET /api/v1/rules on the running Prometheus.
+rule_files:
+  - "/etc/prometheus/alerts.yml"
+
+scrape_configs:
+  - job_name: "ai-crm-api"
+    scrape_interval: 5s
+    metrics_path: /metrics/prometheus
+    static_configs:
+      - targets: ["host.docker.internal:3001"]
+        labels:
+          service: "ai-crm-api"

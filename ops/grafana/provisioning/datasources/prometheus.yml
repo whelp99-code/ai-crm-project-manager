@@ -1,0 +1,14 @@
+# Grafana datasource provisioning (D12) — points Grafana at the
+# ai-crm-prometheus container over the shared observability compose network.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: ai-crm-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: "5s"

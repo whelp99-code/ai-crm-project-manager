@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  PNPM_VERSION: "9.15.0"
+  NODE_VERSION: "22"
+
+jobs:
+  test:
+    name: Package tests + web typecheck + e2e
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ai_crm
+          POSTGRES_USER: ai_crm
+          POSTGRES_PASSWORD: ai_crm_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ai_crm -d ai_crm"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install PostgreSQL 16 client (version-matched to the postgres:16 service)
+        run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
+          psql --version
+
+      - name: Test @ai-crm/persistence
+        run: pnpm --filter @ai-crm/persistence test
+
+      - name: Test @ai-crm/governance
+        run: pnpm --filter @ai-crm/governance test
+
+      - name: Test @ai-crm/orchestration
+        run: pnpm --filter @ai-crm/orchestration test
+
+      - name: Test @ai-crm/api
+        run: pnpm --filter @ai-crm/api test
+
+      - name: Test @ai-crm/worker
+        run: pnpm --filter @ai-crm/worker test
+
+      - name: Typecheck @ai-crm/web
+        run: pnpm --filter @ai-crm/web exec tsc --noEmit
+
+      - name: Install Playwright browsers
+        run: pnpm --filter @ai-crm/web exec playwright install --with-deps chromium
+
+      - name: Web e2e tests
+        run: pnpm --filter @ai-crm/web test:e2e
+
+      - name: Apply migrations + live-pg RLS smoke
+        env:
+          DATABASE_URL: postgres://ai_crm:ai_crm_dev@localhost:5432/ai_crm
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: ai_crm
+          PGPASSWORD: ai_crm_dev
+          PGDATABASE: ai_crm
+        run: ./packages/persistence/scripts/pg-rls-smoke.sh
+
+      - name: Live-pg gated tests (LIVE_PG_TEST=1)
+        # Run ONLY the live-pg-gated files with DATABASE_URL set. Running the whole
+        # suite with DATABASE_URL globally set would force memory-mode tests into pg
+        # mode and fail. --no-file-parallelism serializes the files so the global
+        # append-only-trigger DISABLE/ENABLE dances in each file's setup/teardown do
+        # not race across files.
+        env:
+          DATABASE_URL: postgres://ai_crm:ai_crm_dev@localhost:5432/ai_crm
+          LIVE_PG_TEST: "1"
+        run: |
+          pnpm --filter @ai-crm/api exec vitest run \
+            test/n08-pg-primary.livepg.integration.test.ts \
+            test/n09-notify.livepg.integration.test.ts \
+            test/n12-n13-livepg.integration.test.ts \
+            test/sor-restart-livepg.integration.test.ts \
+            --no-file-parallelism
+          pnpm --filter @ai-crm/worker exec vitest run \
+            test/worker-durable.live-pg.integration.test.ts \
+            --no-file-parallelism
+      - name: "Restore drill (N-15/D12): pg_dump -> restore -> verify -> drop scratch db"
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: ai_crm
+          PGPASSWORD: ai_crm_dev
+          PGDATABASE: ai_crm
+        run: ./packages/persistence/scripts/restore-drill.sh
