@@ -78,6 +78,12 @@ message).
 | `AZURE_OPENAI_DEPLOYMENT` / `AZURE_OPENAI_MODEL` | no | Azure deployment name, or the model id for an OpenAI-compatible gateway. Defaults to `kr/claude-haiku-4.5` (a small/cheap deployment available on the pilot's configured gateway) if unset — set this explicitly for any other environment. |
 | `AZURE_OPENAI_API_VERSION` | no | Only used for the real Azure REST shape. Defaults to `2024-08-01-preview`. |
 | `AZURE_OPENAI_ASSUME_ZERO_RETENTION` | no | Set to `1` only when the deployment is contractually known (out of band) to honor zero-data-retention. A plain REST chat-completions call cannot itself prove the provider discarded the prompt/response server-side, so absent this flag the client honestly reports `retentionHonored: false` and `ModelGateway` then records the true `retentionMode: "retain"` rather than fabricating a zero-retention claim. |
+| `AZURE_OPENAI_MAX_RETRIES` | no (default `3`) | Extra retry attempts (beyond the first) on transient failures only: network errors, per-request timeouts, and HTTP `429`/`500`/`502`/`503`/`504`. Other 4xx responses (e.g. `400`/`401`/`403`) are never retried. `0` disables retry. |
+| `AZURE_OPENAI_RETRY_BASE_DELAY_MS` | no (default `300`) | Base delay for exponential backoff between retries (`base * 2^attempt` plus up to one more `base`'s worth of random jitter). |
+| `AZURE_OPENAI_TIMEOUT_MS` | no (default `30000`) | Per-request timeout enforced via `AbortController`; a hung gateway is aborted and treated as a retryable `PROVIDER_TIMEOUT` rather than blocking indefinitely. |
+| `AZURE_OPENAI_CIRCUIT_BREAKER_THRESHOLD` | no (default `5`) | Consecutive whole-invocation failures (i.e. after retries for that call are exhausted) before the in-process, per-client circuit breaker opens. |
+| `AZURE_OPENAI_CIRCUIT_BREAKER_COOLDOWN_MS` | no (default `30000`) | How long the breaker stays open before allowing a single half-open probe request through; the probe closes the breaker on success or re-opens it on failure. While open, `invoke()` fails fast with `AzureOpenAiClientError("MODEL_CIRCUIT_OPEN", ...)` without calling the provider. |
+| `AZURE_OPENAI_STREAM` | no (default unset/`false`) | Set to `1` to request `stream: true` and accumulate the SSE `delta.content` chunks before parsing the structured JSON plan once the stream completes. See "Streaming scope" below — this removes response-buffering latency, it does not stream partial structured output to callers (the plan is one JSON object and cannot be validated before it is complete). |
 
 ## Running the offline `MODEL_PROVIDER` wiring test
 
@@ -89,6 +95,19 @@ Runs unconditionally, network-free, in every `pnpm --filter @ai-crm/api
 test`. Stubs `global.fetch` for the `MODEL_PROVIDER=azure` /
 `openai_compatible` cases so the flag-logic wiring is proven without ever
 reaching the network.
+```
+pnpm --filter @ai-crm/api exec vitest run test/model-resilience.integration.test.ts
+```
+
+Also runs unconditionally, network-free (fetch is always a hand-rolled
+stub), in every `pnpm --filter @ai-crm/api test`. Proves, directly against
+`AzureOpenAiClient`: retry-then-succeed on HTTP 503, no-retry on HTTP 400,
+retry-exhaustion after `AZURE_OPENAI_MAX_RETRIES`, the circuit breaker
+opening after consecutive failures / failing fast with `MODEL_CIRCUIT_OPEN`
+/ half-opening and closing again after the cooldown, a hung request being
+aborted by `AZURE_OPENAI_TIMEOUT_MS` (and timeouts themselves being retried
+as transient failures), the `AZURE_OPENAI_STREAM=1` SSE-accumulation path,
+and that no thrown error message ever contains the raw api-key/bearer value.
 
 ## Running the live test
 
@@ -138,14 +157,73 @@ The live call returned `modelVersion: "claude-haiku-4.5"` and a
 to `INTERNAL_REVERSIBLE_UPDATE` and completed the work item — a real model
 response driving the effect path end to end.
 
+## Resilience (D7 gap closer PG-E: retry / circuit breaker / timeout / streaming)
+
+`AzureOpenAiClient` now wraps every provider call with:
+
+- **Timeout**: an `AbortController` aborts the request after
+  `AZURE_OPENAI_TIMEOUT_MS`; the abort is surfaced as a retryable
+  `PROVIDER_TIMEOUT`.
+- **Retry with backoff**: network errors, timeouts, and HTTP
+  `429`/`500`/`502`/`503`/`504` are retried up to `AZURE_OPENAI_MAX_RETRIES`
+  times with exponential backoff + jitter
+  (`AZURE_OPENAI_RETRY_BASE_DELAY_MS`). Other 4xx responses are never
+  retried — a bad request stays a bad request.
+- **Circuit breaker**: a per-`AzureOpenAiClient`-instance, in-process
+  breaker counts consecutive whole-invocation failures (after each
+  invocation's own retries are exhausted); once
+  `AZURE_OPENAI_CIRCUIT_BREAKER_THRESHOLD` is reached it opens and every
+  `invoke()` fails immediately with
+  `AzureOpenAiClientError("MODEL_CIRCUIT_OPEN", ...)` — no provider call is
+  made — until `AZURE_OPENAI_CIRCUIT_BREAKER_COOLDOWN_MS` elapses, at which
+  point a single half-open probe request is allowed through: success closes
+  the breaker, failure re-opens it.
+- **Streaming (opt-in, `AZURE_OPENAI_STREAM=1`)**: sends `stream: true` and
+  reads the SSE body, accumulating `choices[0].delta.content` chunks as they
+  arrive, then parses the fully-assembled text as the structured JSON plan
+  once the stream ends. This is an honest, thin streaming path: the natural-
+  command plan is a single JSON object and cannot be validated before it is
+  complete, so streaming here only avoids buffering the entire HTTP response
+  before any bytes are read — it does **not** stream partial structured
+  output to `ModelGateway`/callers, and it is not a general-purpose
+  token-streaming API. If a gateway's `stream: true` response has no
+  readable body, the client transparently falls back to parsing the whole
+  response as a single JSON payload rather than failing the (opt-in,
+  best-effort) streaming path.
+
+All four knobs are read from `process.env` (`AZURE_OPENAI_MAX_RETRIES`,
+`AZURE_OPENAI_RETRY_BASE_DELAY_MS`, `AZURE_OPENAI_TIMEOUT_MS`,
+`AZURE_OPENAI_CIRCUIT_BREAKER_THRESHOLD`,
+`AZURE_OPENAI_CIRCUIT_BREAKER_COOLDOWN_MS`, `AZURE_OPENAI_STREAM`; see the
+table above for defaults) and never logged. This resilience layer only
+exists on the real `AzureOpenAiClient` path — the offline/mock default
+(`MODEL_PROVIDER` unset/`mock`/`none`, no injected `modelClient`) is
+byte-for-byte unchanged, proven by
+`test/model-provider-wiring.integration.test.ts`'s first two cases and every
+other existing test file in the repo that never touches `MODEL_PROVIDER`.
+
+Proven offline (no network) by
+`test/model-resilience.integration.test.ts`, exercising `AzureOpenAiClient`
+directly with a stubbed `fetchImpl` for every case above (retry-then-succeed,
+no-retry-on-4xx, retry-exhaustion, breaker open/half-open/close, timeout
+abort, streaming SSE accumulation, and secret-free error messages).
+
 ## Honest scope / what this is NOT
 
-- This is a single deterministic (`temperature: 0`) request/response call,
-  not a production wiring. There is no retry policy, no streaming, no
-  circuit breaker, and no rate-limit/backoff handling — a transient HTTP
-  failure surfaces as a thrown `AzureOpenAiClientError` and fails the whole
-  `POST /api/agent/commands` call. Production hardening (retries, timeouts,
-  streaming, circuit-breaking, provider fallback) is further work.
+- This client still makes a single deterministic (`temperature: 0`)
+  request/response call per attempt; the resilience layer only governs how
+  many times and how it retries/backs off/gives up, not the model's
+  sampling behavior.
+- Streaming is opt-in and thin (see above): it reduces response-buffering
+  latency for the one call this client makes, it does not turn the
+  natural-command pipeline into a token-by-token streaming API, and there is
+  still no provider fallback (only one provider adapter exists by design,
+  ADR-010).
+- The circuit breaker is in-process and per-`AzureOpenAiClient` instance —
+  it resets on process restart and does not coordinate across multiple API
+  process instances/replicas. That is an acceptable pilot-grade scope; a
+  shared/distributed breaker (e.g. backed by Redis) is further work if this
+  ever runs multi-replica.
 - `retentionHonored` is best-effort and explicit: a bare REST call cannot
   verify server-side data handling. Treat `AZURE_OPENAI_ASSUME_ZERO_RETENTION`
   as a documentation flag for an out-of-band contractual guarantee, not
@@ -156,6 +234,8 @@ response driving the effect path end to end.
   With no `MODEL_PROVIDER` and no injected `modelClient`, behavior is
   unchanged: every other test file in the repo, and any deployment that
   leaves `MODEL_PROVIDER` unset, stays fully offline/fail-closed.
-- Setting `MODEL_PROVIDER=azure` in production wires in the single-call, no
-  retry/no streaming client described above — treat it as a pilot-grade
-  default, not a hardened production model-serving integration.
+- Setting `MODEL_PROVIDER=azure` in production now wires in the
+  retry/timeout/circuit-breaker-hardened client described above (streaming
+  still opt-in via `AZURE_OPENAI_STREAM=1`) — still a single provider
+  adapter with no cross-provider fallback, but no longer a bare
+  single-shot call with zero resilience.
