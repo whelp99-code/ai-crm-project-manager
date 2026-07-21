@@ -67,7 +67,7 @@ cleanup() {
   local exit_code=$?
   if [[ "${COMPOSE_UP}" == "1" ]]; then
     log "Tearing down docker compose observability stack..."
-    docker compose -f "${COMPOSE_FILE}" down >>"${RUN_LOG}" 2>&1 || true
+    docker compose -p ai-crm-prom-drill -f "${COMPOSE_FILE}" down >>"${RUN_LOG}" 2>&1 || true
   fi
   if [[ -n "${API_PID}" ]] && kill -0 "${API_PID}" 2>/dev/null; then
     log "Stopping AI-CRM API harness (pid ${API_PID})..."
@@ -169,7 +169,7 @@ services:
     volumes:
       - ${RENDERED_PROM_CONFIG}:/etc/prometheus/prometheus.yml:ro
 COMPOSE_OVERRIDE
-docker compose -f "${COMPOSE_FILE}" -f "${OVERRIDE_COMPOSE}" up -d prometheus >>"${RUN_LOG}" 2>&1
+docker compose -p ai-crm-prom-drill -f "${COMPOSE_FILE}" -f "${OVERRIDE_COMPOSE}" up -d prometheus >>"${RUN_LOG}" 2>&1
 COMPOSE_UP=1
 record PASS "docker compose observability stack started (prometheus on :${PROM_PORT})"
 

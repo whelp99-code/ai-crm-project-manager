@@ -36,10 +36,12 @@
 #      Asserts Alertmanager's GET /api/v2/alerts shows it firing AND the
 #      webhook-catcher actually received the notification.
 #  10. Asserts PERSISTENCE: creates an Alertmanager silence (state written
-#      to the alertmanager_data volume), `docker compose restart
-#      alertmanager`, and asserts the silence is still present afterwards
-#      (i.e. survives a container restart because it's volume-backed, not
-#      ephemeral container storage).
+#      to the alertmanager_data volume), then FORCE-RECREATES a fresh
+#      alertmanager container (`docker compose up -d --force-recreate
+#      alertmanager`, discarding the old container's writable layer
+#      entirely) and asserts the silence is still present afterwards (i.e.
+#      it can ONLY have come back from the named alertmanager_data volume,
+#      not ephemeral container storage — an airtight volume-backing proof).
 #  11. Tears everything down (compose down + kill the API/webhook
 #      processes).
 #
@@ -494,13 +496,33 @@ log "--- Alertmanager silence create response ---"
 log "${SILENCE_CREATE_JSON}"
 SILENCE_ID="$(printf '%s' "${SILENCE_CREATE_JSON}" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{console.log(JSON.parse(d).silenceID||"")}catch{console.log("")}})' 2>/dev/null || true)"
 if [[ -n "${SILENCE_ID}" ]]; then
-  record PASS "Created Alertmanager silence ${SILENCE_ID} (pre-restart persistence state)"
+  record PASS "Created Alertmanager silence ${SILENCE_ID} (pre-recreate persistence state)"
 else
   record FAIL "Failed to create an Alertmanager silence for the persistence check"
 fi
 
-log "Restarting alertmanager container (docker compose restart alertmanager)..."
-docker compose -p ai-crm-obs-drill -f "${COMPOSE_FILE}" restart alertmanager >>"${RUN_LOG}" 2>&1 || true
+log "Force-recreating alertmanager container (docker compose up -d --force-recreate alertmanager)..."
+# Force-recreate (not `restart`) so the container's writable layer is fully
+# discarded and a brand-new container is started from the image. `restart`
+# keeps the same container filesystem, so a silence surviving it does not
+# EXCLUSIVELY prove volume-backing (the writable layer could have been the
+# source). A force-recreated fresh container can ONLY read the silence back
+# from the named alertmanager_data volume mount — this is the airtight proof.
+docker compose -p ai-crm-obs-drill -f "${COMPOSE_FILE}" -f "${OVERRIDE_COMPOSE}" up -d --force-recreate alertmanager >>"${RUN_LOG}" 2>&1 || true
+
+ALERTMANAGER_RECREATED_UP=0
+for _ in $(seq 1 40); do
+  if curl -fsS "http://localhost:${ALERTMANAGER_PORT}/api/v2/status" >/dev/null 2>&1; then
+    ALERTMANAGER_RECREATED_UP=1
+    break
+  fi
+  sleep 1
+done
+if [[ "${ALERTMANAGER_RECREATED_UP}" == "1" ]]; then
+  record PASS "Force-recreated alertmanager container is healthy again (GET /api/v2/status)"
+else
+  record FAIL "Alertmanager did not come back up after force-recreate"
+fi
 
 SILENCE_SURVIVED=0
 SILENCE_AFTER_JSON=""
@@ -512,12 +534,12 @@ for _ in $(seq 1 40); do
   fi
   sleep 1
 done
-log "--- Alertmanager /api/v2/silences after restart ---"
+log "--- Alertmanager /api/v2/silences after force-recreate ---"
 log "${SILENCE_AFTER_JSON}"
 if [[ "${SILENCE_SURVIVED}" == "1" ]]; then
-  record PASS "Alertmanager silence ${SILENCE_ID} survived 'docker compose restart alertmanager' (volume-backed persistence)"
+  record PASS "Alertmanager silence ${SILENCE_ID} survived 'docker compose up -d --force-recreate alertmanager' (fresh container, volume-backed persistence proven)"
 else
-  record FAIL "Alertmanager silence did not survive the restart (persistence not proven)"
+  record FAIL "Alertmanager silence did not survive the force-recreate (persistence not proven)"
 fi
 
 log ""
@@ -545,7 +567,7 @@ if [[ -w "$(dirname "${DOC_PATH}")" || -f "${DOC_PATH}" ]]; then
     echo '```json'
     echo "${WEBHOOK_RECEIVED_LOG}"
     echo '```'
-    echo "Alertmanager silence ${SILENCE_ID} after 'docker compose restart alertmanager' (persistence proof):"
+    echo "Alertmanager silence ${SILENCE_ID} after 'docker compose up -d --force-recreate alertmanager' (fresh-container persistence proof):"
     echo '```json'
     echo "${SILENCE_AFTER_JSON}"
     echo '```'

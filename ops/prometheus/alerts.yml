@@ -4,11 +4,12 @@
 # visible at GET /api/v1/rules on the running Prometheus (see
 # ops/obs-stack-drill.sh for a live assertion).
 #
-# No Alertmanager is deployed alongside this — these rules populate
-# Prometheus's own /alerts and /api/v1/rules views (and would page out if an
-# Alertmanager + notification channel were later wired to
-# `alerting.alertmanagers` in prometheus.yml). That wiring is an explicit
-# residual, documented in docs/ops/observability.md.
+# Alertmanager IS deployed alongside this (see docker-compose.observability.yml,
+# the `alertmanager` service) and Prometheus is wired to it via
+# `alerting.alertmanagers` in ops/prometheus/prometheus.yml. Fired alerts are
+# routed to Alertmanager, which notifies a locally-assertable webhook
+# receiver (see docs/ops/observability.md, "Alertmanager + persistence
+# (PG-F / D12 extension)", and ops/obs-stack-drill.sh for a live proof).
 groups:
   - name: ai-crm.rules
     rules:

@@ -127,9 +127,11 @@ persistence, default creds. As of the PG-F (D12) extension below:
   Grafana, and Alertmanager each write to a named, persistent Docker volume
   (`prometheus_data`, `grafana_data`, `alertmanager_data`) instead of
   ephemeral container storage. State (TSDB samples, Grafana settings,
-  Alertmanager silences/notification log) survives `docker compose
-  restart`/recreate — proven live via an Alertmanager-silence
-  restart-survival check in the drill.
+  Alertmanager silences/notification log) survives `docker compose up -d
+  --force-recreate`/`down`+`up` — proven live via an airtight
+  Alertmanager-silence force-recreate-survival check in the drill (a fresh
+  container, not merely a restarted one, so the state can only have come
+  from the named volume).
 - **No HA — still a pilot residual.** Single Prometheus + single Grafana +
   single Alertmanager instance, no replication, no remote-write/long-term
   storage backend, no Alertmanager clustering across nodes.
@@ -218,13 +220,18 @@ whole pipeline (not just rule evaluation) is proven end-to-end.
 
 Persistence proof approach: the drill creates an Alertmanager silence via
 `POST /api/v2/silences` (state written under `/alertmanager`, the
-`alertmanager_data` volume mount), runs `docker compose restart
-alertmanager`, then re-queries `GET /api/v2/silences` and asserts the same
-silence ID is still present — proof the volume, not the ephemeral
-container filesystem, is the source of truth for Alertmanager state. The
-same volume-backed pattern applies to `prometheus_data` (TSDB samples) and
-`grafana_data` (dashboards/settings/sessions), which use the identical
-named-volume mechanism.
+`alertmanager_data` volume mount), then FORCE-RECREATES a brand-new
+alertmanager container (`docker compose up -d --force-recreate
+alertmanager`) — discarding the old container's writable layer entirely,
+not just restarting the same one — waits for the fresh container to
+report healthy, then re-queries `GET /api/v2/silences` and asserts the
+same silence ID is still present. Because the prior container's
+filesystem no longer exists, the silence can ONLY have been read back
+from the named `alertmanager_data` volume — an airtight proof, not merely
+suggestive of volume-backing. The same volume-backed pattern applies to
+`prometheus_data` (TSDB samples) and `grafana_data`
+(dashboards/settings/sessions), which use the identical named-volume
+mechanism.
 
 Bring up the full stack including Alertmanager:
 
@@ -238,7 +245,7 @@ docker compose -f docker-compose.observability.yml down   # teardown (volumes pe
 
 `ops/obs-stack-drill.sh` extends the scrape-only drill above to prove the
 dashboard + alerting + Alertmanager-routing + persistence layers
-end-to-end, live, no mocks (13 assertions):
+end-to-end, live, no mocks (16 assertions):
 
 1. Boots the real `createApp()` API via `tsx` on `0.0.0.0:${AI_CRM_API_PORT}`
    and seeds one job (same harness pattern as `prom-scrape-drill.sh`).
@@ -262,12 +269,17 @@ end-to-end, live, no mocks (13 assertions):
    AND the webhook-catcher's received-payload log actually contains it —
    proving Prometheus → Alertmanager → receiver end-to-end, not just rule
    evaluation.
-10. Asserts **persistence**: creates an Alertmanager silence (`POST
-    /api/v2/silences`), runs `docker compose restart alertmanager`, then
-    asserts `GET /api/v2/silences` still shows that silence ID — proving
-    Alertmanager state survives a container restart because it's written
-    to the volume-backed `alertmanager_data` volume, not ephemeral
-    container storage.
+10. Asserts **persistence with an airtight volume-backing proof**: creates
+    an Alertmanager silence (`POST /api/v2/silences`), then
+    FORCE-RECREATES a fresh alertmanager container (`docker compose up -d
+    --force-recreate alertmanager`, discarding the old container's
+    writable layer entirely — not a `restart`, which would preserve it and
+    leave the proof non-exclusive), waits for the fresh container to
+    report healthy again (`GET /api/v2/status`), then asserts `GET
+    /api/v2/silences` still shows that silence ID — proving Alertmanager
+    state can ONLY have come from the volume-backed `alertmanager_data`
+    volume, since the container filesystem it was written to no longer
+    exists.
 11. Tears down the compose stack and kills the API/webhook harness
     processes unconditionally (`trap ... EXIT`), even on failure.
 
@@ -279,21 +291,19 @@ ops/obs-stack-drill.sh
 AI_CRM_API_PORT=3005 ops/obs-stack-drill.sh
 ```
 
-### Captured PASS output (2026-07-20T13:59:43Z)
+### Captured PASS output
 
-```
-=== obs-stack-drill run 2026-07-20T13:59:43Z ===
-AI_CRM_API_PORT=3001 PROM_PORT=9090 GRAFANA_PORT=3005
-[PASS] AI-CRM API harness up on :3001 with ai_crm_agent_jobs_total==1
-[PASS] docker compose observability stack started (prometheus :9090, grafana :3005)
-[PASS] Prometheus target ai-crm-api reports health=up
-[PASS] Prometheus loaded alert rules AiCrmApiDown and AiCrmDualWriteFailures
-[PASS] Grafana is up (GET /api/health database=ok)
-[PASS] Grafana Prometheus datasource health-checks OK
-[PASS] Grafana dashboard ai-crm-overview is provisioned (title=AI-CRM Overview)
-
-=== SUMMARY: 7 PASS / 0 FAIL ===
-```
+Each `ops/obs-stack-drill.sh` invocation appends a full `## obs-stack-drill
+run <timestamp>` section to the bottom of this file (see below) with the
+live `SUMMARY: <N> PASS / 0 FAIL` line, the `/api/v1/rules` and dashboard
+JSON, the firing Alertmanager alert, the webhook-catcher payload, and the
+post-force-recreate `/api/v2/silences` response for that exact run — so
+the most recent run at the bottom of this document is always the current
+captured proof, not a stale hand-copied excerpt. As of the force-recreate
+persistence hardening (this section), a clean run reports **16 PASS / 0
+FAIL** (one more assertion than before: a new "Force-recreated
+alertmanager container is healthy again" check between the silence-create
+and silence-survives steps).
 
 `/api/v1/rules` proof (both alert rules loaded, `"health":"ok"`,
 `"type":"alerting"`):
@@ -316,8 +326,8 @@ directories with no errors.
 
 Teardown verified clean: `docker ps -a` before/after the drill shows only
 the pre-existing `ai-crmprojectmanager-postgres-1` container — no
-`ai-crm-prometheus` / `ai-crm-grafana` containers left behind, and no
-`ai_crm` Postgres volume touched.
+`ai-crm-prometheus` / `ai-crm-grafana` / `ai-crm-alertmanager` containers
+left behind, and no `ai_crm` Postgres volume touched.
 
 ## Run 2026-07-20T06:49:28Z
 
@@ -672,4 +682,58 @@ webhook-catcher received payload:
 Alertmanager silence af99cc1c-f60e-41b7-ad2b-b5e3786f6c7e after 'docker compose restart alertmanager' (persistence proof):
 ```json
 [{"id":"af99cc1c-f60e-41b7-ad2b-b5e3786f6c7e","status":{"state":"active"},"updatedAt":"2026-07-21T14:51:04.425Z","comment":"persistence-proof silence, restart-survival check","createdBy":"obs-stack-drill","endsAt":"2026-07-21T15:01:04.000Z","matchers":[{"isEqual":true,"isRegex":false,"name":"alertname","value":"AiCrmApiDownFast"}],"startsAt":"2026-07-21T14:51:04.425Z"}]
+```
+
+## obs-stack-drill run 2026-07-21T14:52:21Z
+
+- Result: 15 PASS / 0 FAIL
+- API port: 3001, Prometheus port: 9090, Grafana port: 3005, Alertmanager port: 9093, webhook-catcher port: 9099
+```json
+{"status":"success","data":{"groups":[{"name":"ai-crm.test-rules","file":"/etc/prometheus/alerts-test.yml","rules":[{"state":"inactive","name":"AiCrmApiDownFast","query":"up{job=\"ai-crm-api\"} == 0","duration":5,"keepFiringFor":0,"labels":{"severity":"critical","test_only":"true"},"annotations":{"description":"Fast-firing (for: 5s) mirror of AiCrmApiDown. Used only by ops/obs-stack-drill.sh to prove Alertmanager routing end-to-end within seconds; not intended as a production alerting rule.","summary":"[TEST-ONLY] AI-CRM API scrape target is down (fast)"},"alerts":[],"health":"ok","evaluationTime":0.00026125,"lastEvaluation":"2026-07-21T14:52:28.058250338Z","type":"alerting"}],"interval":5,"limit":0,"evaluationTime":0.00031475,"lastEvaluation":"2026-07-21T14:52:28.058201505Z"},{"name":"ai-crm.rules","file":"/etc/prometheus/alerts.yml","rules":[{"state":"inactive","name":"AiCrmApiDown","query":"up{job=\"ai-crm-api\"} == 0","duration":60,"keepFiringFor":0,"labels":{"severity":"critical"},"annotations":{"description":"Prometheus has not been able to scrape the ai-crm-api target for at least 1 minute. The API process may be down or unreachable from the Prometheus container.","summary":"AI-CRM API scrape target is down"},"alerts":[],"health":"ok","evaluationTime":0.000278667,"lastEvaluation":"2026-07-21T14:52:29.781369214Z","type":"alerting"},{"state":"inactive","name":"AiCrmDualWriteFailures","query":"ai_crm_dual_write_failures \u003e 0","duration":60,"keepFiringFor":0,"labels":{"severity":"warning"},"annotations":{"description":"ai_crm_dual_write_failures has been greater than 0 for at least 1 minute, indicating the best-effort dual-write path is failing for at least one workspace/control.","summary":"AI-CRM dual-write failures observed"},"alerts":[],"health":"ok","evaluationTime":0.000119875,"lastEvaluation":"2026-07-21T14:52:29.781657505Z","type":"alerting"}],"interval":5,"limit":0,"evaluationTime":0.000491084,"lastEvaluation":"2026-07-21T14:52:29.781289297Z"}]}}
+```
+```json
+{"meta":{"type":"db","canSave":true,"canEdit":true,"canAdmin":true,"canStar":true,"canDelete":true,"slug":"ai-crm-overview","url":"/d/ai-crm-overview/ai-crm-overview","expires":"0001-01-01T00:00:00Z","created":"2026-07-21T14:52:25Z","updated":"2026-07-21T14:52:25Z","updatedBy":"Anonymous","createdBy":"Anonymous","version":1,"hasAcl":false,"isFolder":false,"apiVersion":"v0alpha1","folderId":3420830387142656,"folderUid":"cfssdoe3nlo1sf","folderTitle":"AI-CRM","folderUrl":"/dashboards/f/cfssdoe3nlo1sf/ai-crm","provisioned":true,"provisionedExternalId":"ai-crm.json","annotationsPermissions":{"dashboard":{"canAdd":true,"canEdit":true,"canDelete":true}}},"dashboard":{"editable":false,"id":3420830589841408,"panels":[{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"gridPos":{"h":8,"w":12,"x":0,"y":0},"id":1,"targets":[{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"expr":"ai_crm_agent_jobs_by_status","legendFormat":"{{status}}","refId":"A"}],"title":"Agent jobs by status","type":"timeseries"},{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"gridPos":{"h":8,"w":12,"x":12,"y":0},"id":2,"targets":[{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"expr":"ai_crm_governance_controls_total","legendFormat":"controls","refId":"A"}],"title":"Governance controls total","type":"timeseries"},{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"fieldConfig":{"defaults":{"thresholds":{"mode":"absolute","steps":[{"color":"green","value":null},{"color":"red","value":1}]}},"overrides":[]},"gridPos":{"h":8,"w":12,"x":0,"y":8},"id":3,"targets":[{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"expr":"ai_crm_dual_write_failures","legendFormat":"dual-write failures","refId":"A"}],"title":"Dual-write failures","type":"timeseries"},{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"fieldConfig":{"defaults":{"mappings":[{"options":{"0":{"color":"red","text":"DOWN"}},"type":"value"},{"options":{"1":{"color":"green","text":"UP"}},"type":"value"}],"thresholds":{"mode":"absolute","steps":[{"color":"red","value":null},{"color":"green","value":1}]}},"overrides":[]},"gridPos":{"h":8,"w":12,"x":12,"y":8},"id":4,"targets":[{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"expr":"up{job=\"ai-crm-api\"}","legendFormat":"up","refId":"A"}],"title":"Scrape target up","type":"stat"}],"refresh":"5s","schemaVersion":39,"tags":["ai-crm","d12"],"time":{"from":"now-15m","to":"now"},"timezone":"browser","title":"AI-CRM Overview","uid":"ai-crm-overview","version":1}}
+```
+Alertmanager /api/v2/alerts (firing AiCrmApiDownFast):
+```json
+[{"annotations":{"description":"Fast-firing (for: 5s) mirror of AiCrmApiDown. Used only by ops/obs-stack-drill.sh to prove Alertmanager routing end-to-end within seconds; not intended as a production alerting rule.","summary":"[TEST-ONLY] AI-CRM API scrape target is down (fast)"},"endsAt":"2026-07-21T14:56:43.057Z","fingerprint":"c86447645a486ee1","receivers":[{"name":"webhook-catcher"}],"startsAt":"2026-07-21T14:52:43.057Z","status":{"inhibitedBy":[],"mutedBy":[],"silencedBy":[],"state":"active"},"updatedAt":"2026-07-21T14:52:43.068Z","generatorURL":"http://e32931627685:9090/graph?g0.expr=up%7Bjob%3D%22ai-crm-api%22%7D+%3D%3D+0\u0026g0.tab=1","labels":{"alertname":"AiCrmApiDownFast","instance":"host.docker.internal:3001","job":"ai-crm-api","service":"ai-crm-api","severity":"critical","test_only":"true"}}]
+```
+webhook-catcher received payload:
+```json
+{"receiver":"webhook-catcher","status":"firing","alerts":[{"status":"firing","labels":{"alertname":"AiCrmApiDownFast","instance":"host.docker.internal:3001","job":"ai-crm-api","service":"ai-crm-api","severity":"critical","test_only":"true"},"annotations":{"description":"Fast-firing (for: 5s) mirror of AiCrmApiDown. Used only by ops/obs-stack-drill.sh to prove Alertmanager routing end-to-end within seconds; not intended as a production alerting rule.","summary":"[TEST-ONLY] AI-CRM API scrape target is down (fast)"},"startsAt":"2026-07-21T14:52:43.057Z","endsAt":"0001-01-01T00:00:00Z","generatorURL":"http://e32931627685:9090/graph?g0.expr=up%7Bjob%3D%22ai-crm-api%22%7D+%3D%3D+0\u0026g0.tab=1","fingerprint":"c86447645a486ee1"}],"notification_reason":"first notification","groupLabels":{"alertname":"AiCrmApiDownFast"},"commonLabels":{"alertname":"AiCrmApiDownFast","instance":"host.docker.internal:3001","job":"ai-crm-api","service":"ai-crm-api","severity":"critical","test_only":"true"},"commonAnnotations":{"description":"Fast-firing (for: 5s) mirror of AiCrmApiDown. Used only by ops/obs-stack-drill.sh to prove Alertmanager routing end-to-end within seconds; not intended as a production alerting rule.","summary":"[TEST-ONLY] AI-CRM API scrape target is down (fast)"},"externalURL":"http://db31c96b9dcb:9093","version":"4","groupKey":"{}:{alertname=\"AiCrmApiDownFast\"}","truncatedAlerts":0}
+```
+Alertmanager silence fbe0aa0c-0c3c-45ac-b000-279a56363131 after 'docker compose restart alertmanager' (persistence proof):
+```json
+[{"id":"fbe0aa0c-0c3c-45ac-b000-279a56363131","status":{"state":"active"},"updatedAt":"2026-07-21T14:52:44.577Z","comment":"persistence-proof silence, restart-survival check","createdBy":"obs-stack-drill","endsAt":"2026-07-21T15:02:44.000Z","matchers":[{"isEqual":true,"isRegex":false,"name":"alertname","value":"AiCrmApiDownFast"}],"startsAt":"2026-07-21T14:52:44.577Z"}]
+```
+
+## obs-stack-drill run 2026-07-21T15:01:08Z
+
+- Result: 16 PASS / 0 FAIL
+- API port: 3001, Prometheus port: 9090, Grafana port: 3005, Alertmanager port: 9093, webhook-catcher port: 9099
+```json
+{"status":"success","data":{"groups":[{"name":"ai-crm.test-rules","file":"/etc/prometheus/alerts-test.yml","rules":[{"state":"inactive","name":"AiCrmApiDownFast","query":"up{job=\"ai-crm-api\"} == 0","duration":5,"keepFiringFor":0,"labels":{"severity":"critical","test_only":"true"},"annotations":{"description":"Fast-firing (for: 5s) mirror of AiCrmApiDown. Used only by ops/obs-stack-drill.sh to prove Alertmanager routing end-to-end within seconds; not intended as a production alerting rule.","summary":"[TEST-ONLY] AI-CRM API scrape target is down (fast)"},"alerts":[],"health":"ok","evaluationTime":0.000221083,"lastEvaluation":"2026-07-21T15:01:18.060979791Z","type":"alerting"}],"interval":5,"limit":0,"evaluationTime":0.0002685,"lastEvaluation":"2026-07-21T15:01:18.060938375Z"},{"name":"ai-crm.rules","file":"/etc/prometheus/alerts.yml","rules":[{"state":"inactive","name":"AiCrmApiDown","query":"up{job=\"ai-crm-api\"} == 0","duration":60,"keepFiringFor":0,"labels":{"severity":"critical"},"annotations":{"description":"Prometheus has not been able to scrape the ai-crm-api target for at least 1 minute. The API process may be down or unreachable from the Prometheus container.","summary":"AI-CRM API scrape target is down"},"alerts":[],"health":"ok","evaluationTime":0.000273125,"lastEvaluation":"2026-07-21T15:01:14.777682679Z","type":"alerting"},{"state":"inactive","name":"AiCrmDualWriteFailures","query":"ai_crm_dual_write_failures \u003e 0","duration":60,"keepFiringFor":0,"labels":{"severity":"warning"},"annotations":{"description":"ai_crm_dual_write_failures has been greater than 0 for at least 1 minute, indicating the best-effort dual-write path is failing for at least one workspace/control.","summary":"AI-CRM dual-write failures observed"},"alerts":[],"health":"ok","evaluationTime":0.000102417,"lastEvaluation":"2026-07-21T15:01:14.777964346Z","type":"alerting"}],"interval":5,"limit":0,"evaluationTime":0.000429292,"lastEvaluation":"2026-07-21T15:01:14.777640346Z"}]}}
+```
+```json
+{"meta":{"type":"db","canSave":true,"canEdit":true,"canAdmin":true,"canStar":true,"canDelete":true,"slug":"ai-crm-overview","url":"/d/ai-crm-overview/ai-crm-overview","expires":"0001-01-01T00:00:00Z","created":"2026-07-21T15:01:11Z","updated":"2026-07-21T15:01:11Z","updatedBy":"Anonymous","createdBy":"Anonymous","version":1,"hasAcl":false,"isFolder":false,"apiVersion":"v0alpha1","folderId":3423037206630400,"folderUid":"ffssegjwcwohsa","folderTitle":"AI-CRM","folderUrl":"/dashboards/f/ffssegjwcwohsa/ai-crm","provisioned":true,"provisionedExternalId":"ai-crm.json","annotationsPermissions":{"dashboard":{"canAdd":true,"canEdit":true,"canDelete":true}}},"dashboard":{"editable":false,"id":3423037233954816,"panels":[{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"gridPos":{"h":8,"w":12,"x":0,"y":0},"id":1,"targets":[{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"expr":"ai_crm_agent_jobs_by_status","legendFormat":"{{status}}","refId":"A"}],"title":"Agent jobs by status","type":"timeseries"},{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"gridPos":{"h":8,"w":12,"x":12,"y":0},"id":2,"targets":[{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"expr":"ai_crm_governance_controls_total","legendFormat":"controls","refId":"A"}],"title":"Governance controls total","type":"timeseries"},{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"fieldConfig":{"defaults":{"thresholds":{"mode":"absolute","steps":[{"color":"green","value":null},{"color":"red","value":1}]}},"overrides":[]},"gridPos":{"h":8,"w":12,"x":0,"y":8},"id":3,"targets":[{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"expr":"ai_crm_dual_write_failures","legendFormat":"dual-write failures","refId":"A"}],"title":"Dual-write failures","type":"timeseries"},{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"fieldConfig":{"defaults":{"mappings":[{"options":{"0":{"color":"red","text":"DOWN"}},"type":"value"},{"options":{"1":{"color":"green","text":"UP"}},"type":"value"}],"thresholds":{"mode":"absolute","steps":[{"color":"red","value":null},{"color":"green","value":1}]}},"overrides":[]},"gridPos":{"h":8,"w":12,"x":12,"y":8},"id":4,"targets":[{"datasource":{"type":"prometheus","uid":"ai-crm-prometheus"},"expr":"up{job=\"ai-crm-api\"}","legendFormat":"up","refId":"A"}],"title":"Scrape target up","type":"stat"}],"refresh":"5s","schemaVersion":39,"tags":["ai-crm","d12"],"time":{"from":"now-15m","to":"now"},"timezone":"browser","title":"AI-CRM Overview","uid":"ai-crm-overview","version":1}}
+```
+Alertmanager /api/v2/alerts (firing AiCrmApiDownFast):
+```json
+[{"annotations":{"description":"Fast-firing (for: 5s) mirror of AiCrmApiDown. Used only by ops/obs-stack-drill.sh to prove Alertmanager routing end-to-end within seconds; not intended as a production alerting rule.","summary":"[TEST-ONLY] AI-CRM API scrape target is down (fast)"},"endsAt":"2026-07-21T15:05:33.057Z","fingerprint":"c86447645a486ee1","receivers":[{"name":"webhook-catcher"}],"startsAt":"2026-07-21T15:01:33.057Z","status":{"inhibitedBy":[],"mutedBy":[],"silencedBy":[],"state":"active"},"updatedAt":"2026-07-21T15:01:33.062Z","generatorURL":"http://50360d976495:9090/graph?g0.expr=up%7Bjob%3D%22ai-crm-api%22%7D+%3D%3D+0\u0026g0.tab=1","labels":{"alertname":"AiCrmApiDownFast","instance":"host.docker.internal:3001","job":"ai-crm-api","service":"ai-crm-api","severity":"critical","test_only":"true"}}]
+```
+webhook-catcher received payload:
+```json
+{"receiver":"webhook-catcher","status":"firing","alerts":[{"status":"firing","labels":{"alertname":"AiCrmApiDownFast","instance":"host.docker.internal:3001","job":"ai-crm-api","service":"ai-crm-api","severity":"critical","test_only":"true"},"annotations":{"description":"Fast-firing (for: 5s) mirror of AiCrmApiDown. Used only by ops/obs-stack-drill.sh to prove Alertmanager routing end-to-end within seconds; not intended as a production alerting rule.","summary":"[TEST-ONLY] AI-CRM API scrape target is down (fast)"},"startsAt":"2026-07-21T15:01:33.057Z","endsAt":"0001-01-01T00:00:00Z","generatorURL":"http://50360d976495:9090/graph?g0.expr=up%7Bjob%3D%22ai-crm-api%22%7D+%3D%3D+0\u0026g0.tab=1","fingerprint":"c86447645a486ee1"}],"notification_reason":"first notification","groupLabels":{"alertname":"AiCrmApiDownFast"},"commonLabels":{"alertname":"AiCrmApiDownFast","instance":"host.docker.internal:3001","job":"ai-crm-api","service":"ai-crm-api","severity":"critical","test_only":"true"},"commonAnnotations":{"description":"Fast-firing (for: 5s) mirror of AiCrmApiDown. Used only by ops/obs-stack-drill.sh to prove Alertmanager routing end-to-end within seconds; not intended as a production alerting rule.","summary":"[TEST-ONLY] AI-CRM API scrape target is down (fast)"},"externalURL":"http://9cf1580903e4:9093","version":"4","groupKey":"{}:{alertname=\"AiCrmApiDownFast\"}","truncatedAlerts":0}
+```
+Alertmanager silence c3d6a9b0-9685-4b34-83b9-be62ad718a20 after 'docker compose up -d --force-recreate alertmanager' (fresh-container persistence proof):
+```json
+[{"id":"c3d6a9b0-9685-4b34-83b9-be62ad718a20","status":{"state":"active"},"updatedAt":"2026-07-21T15:01:34.576Z","comment":"persistence-proof silence, restart-survival check","createdBy":"obs-stack-drill","endsAt":"2026-07-21T15:11:34.000Z","matchers":[{"isEqual":true,"isRegex":false,"name":"alertname","value":"AiCrmApiDownFast"}],"startsAt":"2026-07-21T15:01:34.576Z"}]
+```
+
+## Run 2026-07-21T15:01:39Z
+
+- Result: 5 PASS / 0 FAIL
+- API port: 3001, Prometheus port: 9090
+```json
+{"status":"success","data":{"resultType":"vector","result":[{"metric":{"__name__":"ai_crm_agent_jobs_total","instance":"host.docker.internal:3001","job":"ai-crm-api","service":"ai-crm-api"},"value":[1784646110.316,"1"]}]}}
 ```
