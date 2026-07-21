@@ -886,6 +886,55 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     );
     dualWrittenAuditCount.set(workspaceId, pendingAll.length);
   }
+  /**
+   * Per-workspace async mutex (P6-b G002 / PG-D fix, architect P2): the
+   * PG-first governance (authorize/decide/consume) and ledger
+   * (draft/verify/post/reverse) routes all follow the same
+   * preview -> await PG write -> commit shape. The `await` lets a second
+   * same-workspace request interleave between preview (snapshot of the
+   * pre-image via `structuredClone(this.state)`) and commit (`this.state =
+   * draft`): both requests preview from the SAME pre-image, both commit,
+   * and the later commit clobbers the earlier in-memory (lost update on
+   * GET /audit / GET /controls), while a concurrent pair of
+   * `/consume` calls on one APPROVED control can both pass the
+   * `control.status === "APPROVED"` preview check before either commits
+   * (TOCTOU: two `CONTROL_CONSUMED` for a single-use control). PG chain
+   * integrity itself is safe (`FOR UPDATE` on the head row serializes the
+   * PG write), but the in-memory SoR can transiently diverge from it and
+   * from itself.
+   *
+   * `withWorkspaceMutex` closes this by serializing the ENTIRE
+   * preview->PG-write->commit critical section per workspace: a Promise
+   * chain keyed by workspace id, so a second same-workspace mutation's
+   * `fn` never starts until the first's has fully settled (success OR
+   * failure — a thrown/rejected mutation releases the lock immediately,
+   * it never wedges the workspace). Different workspaces get independent
+   * chains and never block each other (no global lock, no cross-workspace
+   * head-of-line blocking, no deadlock — there is only ever one lock per
+   * key, acquired and released in FIFO order, never nested). In-process
+   * only (single-instance); multi-instance ordering is already handled by
+   * PG's `FOR UPDATE` head lock plus the documented single-instance
+   * eventing note. Memory mode is unaffected: the mutex still serializes
+   * the in-memory preview/commit pair even with no `govRepo`/`ledgerRepo`,
+   * which is strictly safer and adds negligible overhead (a resolved-
+   * promise `.then()` hop) for the single-request common case.
+   */
+  const workspaceMutexChains = new Map<string, Promise<void>>();
+  function withWorkspaceMutex<T>(workspaceId: string, fn: () => Promise<T>): Promise<T> {
+    const tail = workspaceMutexChains.get(workspaceId) ?? Promise.resolve();
+    const result = tail.then(fn, fn);
+    const settled = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    workspaceMutexChains.set(workspaceId, settled);
+    void settled.then(() => {
+      if (workspaceMutexChains.get(workspaceId) === settled) {
+        workspaceMutexChains.delete(workspaceId);
+      }
+    });
+    return result;
+  }
 
   async function dualWriteAgentState(workspaceId: string, jobId: string): Promise<void> {
     await dualWriteJobSnapshot(workspaceId, jobId);
@@ -1779,12 +1828,17 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     };
     // PG-FIRST fail-closed (F6): compute the validated DRAFT without touching
     // memory, persist to PG first (let a PG failure throw and 5xx before
-    // memory diverges), then commit the SAME already-validated entry to memory.
-    const draftEntry = journal.previewDraft(draftInput);
-    if (ledgerRepo) {
-      await ledgerRepo.saveEntry(draftEntry);
-    }
-    const entry = journal.commitDraft(draftEntry);
+    // memory diverges), then commit the SAME already-validated entry to
+    // memory — inside the per-workspace mutex (P6-b G002 / PG-D fix) so a
+    // concurrent same-workspace mutation can never preview from a pre-image
+    // this request already committed past.
+    const entry = await withWorkspaceMutex(ws, async () => {
+      const draftEntry = journal.previewDraft(draftInput);
+      if (ledgerRepo) {
+        await ledgerRepo.saveEntry(draftEntry);
+      }
+      return journal.commitDraft(draftEntry);
+    });
     return reply.status(201).send(entry);
   });
 
@@ -1795,11 +1849,16 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     const verifier = text(body, "verifierPrincipalId");
     const entry = journal.getEntry(ws, request.params.entryId);
     if (entry.importBatchId) imports.assertVerifierDistinct(ws, entry.importBatchId, verifier);
-    const verified = journal.previewVerify(ws, request.params.entryId, verifier);
-    if (ledgerRepo) {
-      await ledgerRepo.saveEntry(verified);
-    }
-    return journal.commitVerify(verified);
+    // Per-workspace mutex (P6-b G002 / PG-D fix): serializes preview->PG-
+    // write->commit the same way the governance routes do (see
+    // /api/governance/authorize doc).
+    return withWorkspaceMutex(ws, async () => {
+      const verified = journal.previewVerify(ws, request.params.entryId, verifier);
+      if (ledgerRepo) {
+        await ledgerRepo.saveEntry(verified);
+      }
+      return journal.commitVerify(verified);
+    });
   });
 
   app.post<{ Params: { entryId: string } }>("/api/finance/journal-entries/:entryId/post", async (request) => {
@@ -1813,32 +1872,44 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     if (entry.importBatchId) imports.assertVerifierDistinct(ws, entry.importBatchId, poster);
     // LEDGER_POST is permanently REQUIRE_APPROVAL: a fresh consumed governance
     // intent bound to this entry+version+payload must exist before posting.
-    consumeGovernedIntent(
-      ws,
-      text(body, "intentId"),
-      "LEDGER_POST",
-      request.params.entryId,
-      entry.version,
-      canonicalHashOf("LEDGER_POST", { entryId: request.params.entryId }),
-    );
-    const { next, reversedOriginal } = journal.previewPost(ws, request.params.entryId, poster);
-    if (ledgerRepo) {
-      await ledgerRepo.postEntryAtomic(next, reversedOriginal);
-    }
-    return journal.commitPost(next, reversedOriginal);
+    // Per-workspace mutex (P6-b G002 / PG-D fix): the single-use intent
+    // consumption + preview->PG-write->commit all run inside one critical
+    // section per workspace, so a concurrent same-workspace post can never
+    // observe/consume the same intent or preview from a pre-image this
+    // request already committed past.
+    return withWorkspaceMutex(ws, async () => {
+      consumeGovernedIntent(
+        ws,
+        text(body, "intentId"),
+        "LEDGER_POST",
+        request.params.entryId,
+        entry.version,
+        canonicalHashOf("LEDGER_POST", { entryId: request.params.entryId }),
+      );
+      const { next, reversedOriginal } = journal.previewPost(ws, request.params.entryId, poster);
+      if (ledgerRepo) {
+        await ledgerRepo.postEntryAtomic(next, reversedOriginal);
+      }
+      return journal.commitPost(next, reversedOriginal);
+    });
   });
 
   app.post<{ Params: { entryId: string } }>("/api/finance/journal-entries/:entryId/reverse", async (request, reply) => {
     const { ledger: journal } = requireFinance();
     const ws = workspace(request);
     const body = objectBody(request.body);
-    const reversalDraft = journal.previewReverse(
-      ws, request.params.entryId, text(body, "reversalEntryId"), text(body, "principalId"), text(body, "entryDate"),
-    );
-    if (ledgerRepo) {
-      await ledgerRepo.saveEntry(reversalDraft);
-    }
-    return reply.status(201).send(journal.commitDraft(reversalDraft));
+    // Per-workspace mutex (P6-b G002 / PG-D fix): serializes preview->PG-
+    // write->commit the same way the governance routes do.
+    const reversed = await withWorkspaceMutex(ws, async () => {
+      const reversalDraft = journal.previewReverse(
+        ws, request.params.entryId, text(body, "reversalEntryId"), text(body, "principalId"), text(body, "entryDate"),
+      );
+      if (ledgerRepo) {
+        await ledgerRepo.saveEntry(reversalDraft);
+      }
+      return journal.commitDraft(reversalDraft);
+    });
+    return reply.status(201).send(reversed);
   });
 
   app.get("/api/finance/balances", async (request) => {
@@ -1952,22 +2023,29 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
   app.post("/api/governance/authorize", async (request, reply) => {
     const ws = workspace(request);
     const body = objectBody(request.body);
-    // PG-FIRST fail-closed (D3, mirrors PG-C1 ledger preview/commit): compute
-    // the validated transition into a detached draft, persist its new audit
-    // event(s) to PG (audit_events/audit_chain_heads/outbox) BEFORE the
-    // in-memory governance state commits — a PG failure throws (5xx) here,
-    // before memory diverges.
-    const preview = governance.previewAuthorize({
-      command: text(body, "command"),
-      workspaceId: ws,
-      resourceId: text(body, "resourceId"),
-      resourceVersion: numberValue(body, "resourceVersion"),
-      payload: "payload" in body ? body.payload : {},
-      requesterPrincipalId: text(body, "requesterPrincipalId"),
+    // PG-FIRST fail-closed (D3, mirrors PG-C1 ledger preview/commit), inside
+    // the per-workspace mutex (P6-b G002 / PG-D fix): compute the validated
+    // transition into a detached draft, persist its new audit event(s) to PG
+    // (audit_events/audit_chain_heads/outbox) BEFORE the in-memory
+    // governance state commits — a PG failure throws (5xx) here, before
+    // memory diverges. `withWorkspaceMutex` serializes this whole
+    // preview->PG-write->commit section per workspace so a concurrent
+    // same-workspace request can never preview from a pre-image this
+    // request already committed past.
+    const result = await withWorkspaceMutex(ws, async () => {
+      const preview = governance.previewAuthorize({
+        command: text(body, "command"),
+        workspaceId: ws,
+        resourceId: text(body, "resourceId"),
+        resourceVersion: numberValue(body, "resourceVersion"),
+        payload: "payload" in body ? body.payload : {},
+        requesterPrincipalId: text(body, "requesterPrincipalId"),
+      });
+      await pgFirstAuditAppend(ws, preview.draft);
+      const committed = governance.commitAuthorize(preview);
+      await dualWriteGovernance(ws);
+      return committed;
     });
-    await pgFirstAuditAppend(ws, preview.draft);
-    const result = governance.commitAuthorize(preview);
-    await dualWriteGovernance(ws);
     return reply.status(201).send(result);
   });
 
@@ -2010,11 +2088,15 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
       throw new GovernanceError("INVALID_DECISION", "decision must be APPROVE or REJECT");
     }
     // PG-FIRST fail-closed (D3): see /api/governance/authorize doc — same
-    // preview/PG-audit-append/commit split for the APPROVE/REJECT decision.
-    const preview = governance.previewDecideControl(request.params.controlId, text(body, "principalId"), decision, ws);
-    await pgFirstAuditAppend(ws, preview.draft);
-    const result = governance.commitDecideControl(preview);
-    await dualWriteGovernance(ws);
+    // preview/PG-audit-append/commit split for the APPROVE/REJECT decision,
+    // inside the per-workspace mutex (P6-b G002 / PG-D fix).
+    const result = await withWorkspaceMutex(ws, async () => {
+      const preview = governance.previewDecideControl(request.params.controlId, text(body, "principalId"), decision, ws);
+      await pgFirstAuditAppend(ws, preview.draft);
+      const committed = governance.commitDecideControl(preview);
+      await dualWriteGovernance(ws);
+      return committed;
+    });
     return result;
   });
 
@@ -2028,17 +2110,26 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
       payloadHash: text(body, "payloadHash"),
       policyVersion: numberValue(body, "policyVersion"),
     };
-    const preview = governance.previewConsumeControl(
-      request.params.controlId,
-      binding,
-      typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined,
-    );
     // PG-FIRST fail-closed (D3): see /api/governance/authorize doc — same
-    // preview/PG-audit-append/commit split for the consume (control -> intent)
-    // transition.
-    await pgFirstAuditAppend(ws, preview.draft);
-    const intent = governance.commitConsumeControl(preview);
-    await dualWriteGovernance(ws);
+    // preview/PG-audit-append/commit split for the consume (control ->
+    // intent) transition, inside the per-workspace mutex (P6-b G002 / PG-D
+    // fix). Serializing preview+PG-write+commit closes the /consume TOCTOU:
+    // without the mutex two concurrent consumes of one APPROVED control can
+    // both pass the `control.status === "APPROVED"` preview check before
+    // either commits (double CONTROL_CONSUMED); with it, the second
+    // request's preview only starts after the first's commit, so it always
+    // observes the already-CONSUMED status and fails closed.
+    const intent = await withWorkspaceMutex(ws, async () => {
+      const preview = governance.previewConsumeControl(
+        request.params.controlId,
+        binding,
+        typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined,
+      );
+      await pgFirstAuditAppend(ws, preview.draft);
+      const committed = governance.commitConsumeControl(preview);
+      await dualWriteGovernance(ws);
+      return committed;
+    });
     return reply.status(201).send(intent);
   });
 

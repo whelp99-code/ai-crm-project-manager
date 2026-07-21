@@ -175,6 +175,42 @@ dropped/failed PG audit write for these three routes. `dualWriteGovernance`
 (control/intent row mirror to `orch_governance_controls`/`orch_governance_intents`)
 still runs best-effort AFTER the commit, unchanged — it is not part of the
 audit-integrity surface D3 hardens.
+**P6-b G002 (PG-D) — architect P2 fix: per-workspace mutex closes the
+concurrent-same-workspace TOCTOU the preview->await PG write->commit split
+opened.** The `await` between preview (a `structuredClone` snapshot of
+`this.state`) and commit (`this.state = draft`) lets a second same-workspace
+request interleave: without further guarding, both requests preview from the
+SAME pre-image, both commit, and the later commit clobbers the earlier one
+in memory (a lost update on `GET /audit`/`GET /controls`), and two
+concurrent `/consume` calls on one `APPROVED` control can both pass the
+`status === "APPROVED"` preview check before either commits (double
+`CONTROL_CONSUMED` for a single-use control). PG chain integrity itself was
+never at risk — `audit_chain_heads`' `FOR UPDATE` row lock already
+serializes the PG write per workspace — but the in-memory SoR could
+transiently diverge from PG and from itself. `withWorkspaceMutex`
+(`apps/api/src/app.ts`) closes this by serializing the ENTIRE
+preview->PG-write->commit critical section per workspace: an in-process
+`Map<workspaceId, Promise-chain>` so a second same-workspace mutation's
+critical section never starts until the first's has fully settled (success
+or failure — a thrown/rejected mutation releases the lock immediately, it
+never wedges the workspace). Different workspaces get independent chains
+and never block each other (no global lock, no cross-workspace
+head-of-line blocking, no deadlock). It wraps all three governance routes
+(authorize/decide/consume) AND the four ledger routes (draft/verify/
+post/reverse), which share the identical preview/PG-write/commit shape.
+In-process only (single-instance); multi-instance ordering is already
+covered by PG's `FOR UPDATE` head lock plus the single-instance eventing
+note above. Memory mode is unaffected (the mutex still serializes the
+in-memory preview/commit pair with no `govRepo`/`ledgerRepo`, which is
+strictly safer and negligible overhead for the single-request common case).
+Falsifiably proven live against real PG by
+`apps/api/test/pg-mutex-concurrency.livepg.integration.test.ts`
+(`LIVE_PG_TEST=1`): concurrent same-workspace authorize shows no lost
+update (memory audit count == PG `audit_events` count == chain-head), a
+concurrent `/consume` pair on one control yields exactly one success, a
+concurrent `/verify` pair on one ledger entry yields exactly one success,
+and two different workspaces make concurrent progress without
+head-of-line blocking behind a slow one.
 
 Every OTHER governance-audit-bearing surface — `POST /api/notifications`,
 `POST /api/notifications/:id/transition`, and any mutation folded into

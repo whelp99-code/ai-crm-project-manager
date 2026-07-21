@@ -109,6 +109,7 @@ jobs:
             test/pg-c1-ledger.livepg.integration.test.ts \
             test/pg-c2-recon-dailygate.livepg.integration.test.ts \
             test/pg-d-audit-primary.livepg.integration.test.ts \
+            test/pg-mutex-concurrency.livepg.integration.test.ts \
             --no-file-parallelism
           pnpm --filter @ai-crm/worker exec vitest run \
             test/worker-durable.live-pg.integration.test.ts \
