@@ -7,12 +7,19 @@ on:
 
 env:
   PNPM_VERSION: "9.15.0"
-  NODE_VERSION: "22"
 
 jobs:
   test:
-    name: Package tests + web typecheck + e2e
+    # node 20 and 22 are both exercised as a cross-version signal. package.json
+    # pins engines.node to ">=22 <23"; pnpm only *warns* (does not fail) on an
+    # engine mismatch, and every step below has been verified green on node 20
+    # in addition to node 22 — see docs/ci/README.md for details/caveats.
+    name: Package tests + web typecheck + e2e (node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
 
     services:
       postgres:
@@ -41,7 +48,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: ${{ matrix.node }}
           cache: pnpm
 
       - name: Install dependencies
