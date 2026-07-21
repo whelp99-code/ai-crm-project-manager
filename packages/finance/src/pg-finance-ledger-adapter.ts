@@ -37,6 +37,7 @@
  */
 
 import type { JournalEntry, JournalEntryStatus, JournalLine } from "./ledger.js";
+import { FinanceDomainError } from "./config.js";
 
 export interface PgQueryResult<T = unknown> {
   rows: T[];
@@ -302,7 +303,11 @@ class PgLedgerRepository implements LedgerRepository {
       );
 
       if (reversedOriginal) {
-        await db.query(
+        // PG-first fail-closed hardening: assert the original POSTED row was
+        // actually matched+updated. A 0-row match (original absent in PG) must
+        // throw so the caller never advances memory to REVERSED while PG lacks
+        // the reversed original (the forbidden memory-ahead-of-PG state).
+        const reverseResult = await db.query(
           `UPDATE finance_journal_entries
              SET status = $1, reversed_by_entry_id = $2, version = $3, updated_at = now()
            WHERE id = $4 AND workspace_id = $5`,
@@ -314,6 +319,12 @@ class PgLedgerRepository implements LedgerRepository {
             reversedOriginal.workspaceId,
           ],
         );
+        if (reverseResult.rowCount !== 1) {
+          throw new FinanceDomainError(
+            "LEDGER_REVERSE_ORIGINAL_MISSING",
+            `expected to update exactly 1 POSTED original on reverse, matched ${reverseResult.rowCount ?? 0}`,
+          );
+        }
       }
     });
   }

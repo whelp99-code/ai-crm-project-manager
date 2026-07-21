@@ -115,10 +115,19 @@ export class DailyGate {
    * entirely. Replaying every historical day through `recordDay` would
    * double-backfill missing-day gaps and would trip `OUT_OF_ORDER` on the
    * first re-fed date, so hydrate MUST call this instead. `policyVersion`
-   * is never restored from here — the constructor already received the
-   * live `pack.packVersion` (§4 rule 5: a pack change resets the streak
-   * even across a restart, so the constructor's own reset-detection must
-   * run unchanged before this overwrite).
+   * is never restored from here — the constructor reconstructs it from the
+   * live `pack.packVersion`.
+   *
+   * KNOWN RESIDUAL (architect P2): a pack-version CHANGE across a restart is
+   * NOT detected here. `finance_daily_gate_state` does not persist the pack/
+   * policy version, and `restoreState` OVERWRITES streak/tier AFTER the
+   * constructor, so a constructor-time reset (§4 rule 5: pack change resets
+   * the streak) is clobbered by the persisted (old-pack) streak on hydrate.
+   * This is currently latent because `changePolicyVersion` has NO runtime
+   * callsite (packs do not change via a wired route today). Follow-up: persist
+   * `pack_version` in `finance_daily_gate_state` (new migration) and, on
+   * hydrate, reset streak=0 + demote eligible→conservative when the persisted
+   * version differs from the live `pack.packVersion` BEFORE `restoreState`.
    */
   restoreState(state: {
     streak: number;
