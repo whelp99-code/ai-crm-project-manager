@@ -168,6 +168,8 @@ apply_migrations() {
     "SELECT CASE WHEN to_regclass('public.finance_journal_entries') IS NOT NULL THEN 1 ELSE 0 END"
   backfill_if_present "0010_finance_recon_dailygate" \
     "SELECT CASE WHEN to_regclass('public.finance_daily_gate_state') IS NOT NULL THEN 1 ELSE 0 END"
+  backfill_if_present "0011_reports_model_invocations" \
+    "SELECT CASE WHEN to_regclass('public.report_snapshots') IS NOT NULL THEN 1 ELSE 0 END"
 
   apply_migration_file "0001_foundation" \
     "${MIGRATIONS_DIR}/0001_foundation.sql" || true
@@ -189,6 +191,8 @@ apply_migrations() {
     "${MIGRATIONS_DIR}/0009_finance_ledger.sql" || true
   apply_migration_file "0010_finance_recon_dailygate" \
     "${MIGRATIONS_DIR}/0010_finance_recon_dailygate.sql" || true
+  apply_migration_file "0011_reports_model_invocations" \
+    "${MIGRATIONS_DIR}/0011_reports_model_invocations.sql" || true
 }
 
 check_force_rls() {
@@ -207,12 +211,13 @@ WHERE n.nspname = 'public'
     'pm_plans', 'pm_assignments', 'pm_targets', 'pm_target_observations',
     'pm_variance_exceptions', 'delivery_projects',
     'finance_journal_entries',
-    'finance_reconciliations', 'finance_exceptions', 'finance_daily_gate_state', 'finance_day_records'
+    'finance_reconciliations', 'finance_exceptions', 'finance_daily_gate_state', 'finance_day_records',
+    'report_snapshots', 'model_invocations'
   )
 ORDER BY c.relname;
 SQL
 )"
-  local expected=$'crm_communications=true/true\ncrm_contracts=true/true\ncrm_customers=true/true\ncrm_next_actions=true/true\ncrm_operational_exceptions=true/true\ndelivery_projects=true/true\nfinance_daily_gate_state=true/true\nfinance_day_records=true/true\nfinance_exceptions=true/true\nfinance_journal_entries=true/true\nfinance_reconciliations=true/true\norch_governance_controls=true/true\norch_governance_intents=true/true\norch_job_events=true/true\norch_jobs=true/true\norch_work_items=true/true\noutbox_consumed_events=true/true\npm_assignments=true/true\npm_plans=true/true\npm_target_observations=true/true\npm_targets=true/true\npm_variance_exceptions=true/true'
+  local expected=$'crm_communications=true/true\ncrm_contracts=true/true\ncrm_customers=true/true\ncrm_next_actions=true/true\ncrm_operational_exceptions=true/true\ndelivery_projects=true/true\nfinance_daily_gate_state=true/true\nfinance_day_records=true/true\nfinance_exceptions=true/true\nfinance_journal_entries=true/true\nfinance_reconciliations=true/true\nmodel_invocations=true/true\norch_governance_controls=true/true\norch_governance_intents=true/true\norch_job_events=true/true\norch_jobs=true/true\norch_work_items=true/true\noutbox_consumed_events=true/true\npm_assignments=true/true\npm_plans=true/true\npm_target_observations=true/true\npm_targets=true/true\npm_variance_exceptions=true/true\nreport_snapshots=true/true'
   if [[ "${out}" == "${expected}" ]]; then
     record PASS "FORCE RLS flags" "relrowsecurity/relforcerowsecurity true/true on orch_*/orch_governance_*/crm_customers/outbox_consumed_events"
     log "FORCE RLS evidence:"
@@ -267,15 +272,16 @@ WHERE schemaname = 'public'
     'pm_plans', 'pm_assignments', 'pm_targets', 'pm_target_observations',
     'pm_variance_exceptions', 'delivery_projects',
     'finance_journal_entries',
-    'finance_reconciliations', 'finance_exceptions', 'finance_daily_gate_state', 'finance_day_records'
+    'finance_reconciliations', 'finance_exceptions', 'finance_daily_gate_state', 'finance_day_records',
+    'report_snapshots', 'model_invocations'
   )
   AND policyname = 'workspace_isolation';
 SQL
 )"
-  if [[ "${n}" == "22" ]]; then
-    record PASS "workspace_isolation policies" "22/22 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*"
+  if [[ "${n}" == "24" ]]; then
+    record PASS "workspace_isolation policies" "24/24 on orch_*/orch_governance_*/crm_*/outbox_consumed_events/pm_*/delivery_projects/finance_*/report_snapshots/model_invocations"
   else
-    record FAIL "workspace_isolation policies" "expected 22, got ${n}"
+    record FAIL "workspace_isolation policies" "expected 24, got ${n}"
   fi
 }
 
@@ -294,6 +300,9 @@ BEGIN
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_crm_runtime_worker') THEN
     EXECUTE 'GRANT ai_crm_runtime_worker TO CURRENT_USER';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_crm_runtime_model_gateway') THEN
+    EXECUTE 'GRANT ai_crm_runtime_model_gateway TO CURRENT_USER';
   END IF;
 END
 $$;
@@ -1042,6 +1051,152 @@ SQL
     record FAIL "p6b-g001 isolation insert/select" "unexpected counts/ids: ${out//$'\n'/; }"
   fi
 }
+# Q2 (D2) isolation proof: report_snapshots (SET ROLE ai_crm_runtime_api,
+# mirrors crm_customers) and model_invocations (SET ROLE
+# ai_crm_runtime_model_gateway — the ONLY role granted access, see
+# 0002_model_gateway_and_break_glass_roles.sql "2. Grants"; ai_crm_runtime_api
+# has NO grants on model_invocations, mirrors the outbox_consumed_events
+# block's separate-role shape above).
+run_q2_isolation() {
+  ensure_runtime_role_membership
+
+  local has_api
+  has_api="$(psql_q -c "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_crm_runtime_api' AND rolcanlogin AND NOT rolbypassrls)")"
+  if [[ "${has_api}" != "t" && "${has_api}" != "true" ]]; then
+    record SKIP "report_snapshots isolation insert/select" "ai_crm_runtime_api missing or BYPASSRLS"
+  else
+    local out
+    # shellcheck disable=SC2016
+    out="$(psql_q <<'SQL'
+BEGIN;
+RESET ROLE;
+INSERT INTO workspaces (id, name) VALUES
+  ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'smoke-ws-a'),
+  ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-ws-b')
+ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name;
+ALTER TABLE report_snapshots DISABLE TRIGGER report_snapshots_immutability;
+DELETE FROM report_snapshots WHERE id LIKE 'smoke-report-%';
+ALTER TABLE report_snapshots ENABLE TRIGGER report_snapshots_immutability;
+SET LOCAL ROLE ai_crm_runtime_api;
+SET LOCAL app.workspace_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+INSERT INTO report_snapshots (id, workspace_id, project_id, submitted_by_principal_id, submitted_at, status, snapshot, snapshot_hash)
+VALUES ('smoke-report-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'smoke-project-a', 'principal-smoke', now()::text, 'SUBMITTED', '{}'::jsonb, 'smoke-hash-a');
+SET LOCAL app.workspace_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+INSERT INTO report_snapshots (id, workspace_id, project_id, submitted_by_principal_id, submitted_at, status, snapshot, snapshot_hash)
+VALUES ('smoke-report-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-project-b', 'principal-smoke', now()::text, 'SUBMITTED', '{}'::jsonb, 'smoke-hash-b');
+SET LOCAL app.workspace_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+SELECT 'rs_a_count=' || count(*)::text FROM report_snapshots WHERE id LIKE 'smoke-report-%';
+SET LOCAL app.workspace_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+SELECT 'rs_b_count=' || count(*)::text FROM report_snapshots WHERE id LIKE 'smoke-report-%';
+SET LOCAL app.workspace_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+DO $BLK$
+BEGIN
+  BEGIN
+    INSERT INTO report_snapshots (id, workspace_id, project_id, submitted_by_principal_id, submitted_at, status, snapshot, snapshot_hash)
+    VALUES ('smoke-report-cross', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'smoke-project-cross', 'principal-smoke', now()::text, 'SUBMITTED', '{}'::jsonb, 'smoke-hash-cross');
+    RAISE EXCEPTION 'expected cross-workspace report_snapshots insert to be blocked by RLS';
+  EXCEPTION
+    WHEN insufficient_privilege THEN RAISE NOTICE 'rs_cross_insert_blocked=insufficient_privilege';
+    WHEN OTHERS THEN
+      IF SQLERRM LIKE '%policy%' OR SQLSTATE IN ('42501', 'P0001', '28000') OR SQLERRM LIKE '%row-level security%' THEN
+        RAISE NOTICE 'rs_cross_insert_blocked=%', SQLSTATE;
+      ELSIF SQLERRM = 'expected cross-workspace report_snapshots insert to be blocked by RLS' THEN
+        RAISE;
+      ELSE
+        RAISE NOTICE 'rs_cross_insert_blocked=%:%', SQLSTATE, SQLERRM;
+      END IF;
+  END;
+END
+$BLK$;
+RESET ROLE;
+ALTER TABLE report_snapshots DISABLE TRIGGER report_snapshots_immutability;
+DELETE FROM report_snapshots WHERE id LIKE 'smoke-report-%';
+ALTER TABLE report_snapshots ENABLE TRIGGER report_snapshots_immutability;
+SELECT 'rs_isolation_ok=1';
+COMMIT;
+SQL
+)" || {
+      record FAIL "report_snapshots isolation insert/select" "transaction failed; see ${RUN_LOG}"
+      out=""
+    }
+    log "report_snapshots isolation transcript:"
+    log "${out}"
+    local rs_ok=1
+    printf '%s\n' "${out}" | grep -q 'rs_a_count=1' || rs_ok=0
+    printf '%s\n' "${out}" | grep -q 'rs_b_count=1' || rs_ok=0
+    printf '%s\n' "${out}" | grep -q 'rs_isolation_ok=1' || rs_ok=0
+    if [[ "${rs_ok}" == "1" ]]; then
+      record PASS "report_snapshots isolation insert/select" "SET ROLE ai_crm_runtime_api; A/B isolated + cross-workspace insert denied; cleanup done"
+    else
+      record FAIL "report_snapshots isolation insert/select" "unexpected output: ${out//$'\n'/; }"
+    fi
+  fi
+
+  local has_mg
+  has_mg="$(psql_q -c "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_crm_runtime_model_gateway' AND rolcanlogin AND NOT rolbypassrls)")"
+  if [[ "${has_mg}" != "t" && "${has_mg}" != "true" ]]; then
+    record SKIP "model_invocations isolation insert/select" "ai_crm_runtime_model_gateway missing or BYPASSRLS"
+    return 0
+  fi
+
+  local mg_out
+  # shellcheck disable=SC2016
+  mg_out="$(psql_q <<'SQL'
+BEGIN;
+RESET ROLE;
+DELETE FROM model_invocations WHERE external_id LIKE 'smoke-invocation-%';
+SET LOCAL ROLE ai_crm_runtime_model_gateway;
+SET LOCAL app.workspace_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+INSERT INTO model_invocations (external_id, workspace_id, principal_id, registry_operation_id, action_type, model_version, prompt_digest, retention_mode, correlation_id)
+VALUES ('smoke-invocation-a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'principal-model-gateway', 'op-smoke', 'MODEL_INVOKE', 'gpt-smoke', 'smoke-digest-a', 'zero-retention', 'corr-smoke-a');
+SET LOCAL app.workspace_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+INSERT INTO model_invocations (external_id, workspace_id, principal_id, registry_operation_id, action_type, model_version, prompt_digest, retention_mode, correlation_id)
+VALUES ('smoke-invocation-b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'principal-model-gateway', 'op-smoke', 'MODEL_INVOKE', 'gpt-smoke', 'smoke-digest-b', 'zero-retention', 'corr-smoke-b');
+SET LOCAL app.workspace_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+SELECT 'mi_a_count=' || count(*)::text FROM model_invocations WHERE external_id LIKE 'smoke-invocation-%';
+SET LOCAL app.workspace_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+SELECT 'mi_b_count=' || count(*)::text FROM model_invocations WHERE external_id LIKE 'smoke-invocation-%';
+SET LOCAL app.workspace_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+DO $BLK$
+BEGIN
+  BEGIN
+    INSERT INTO model_invocations (external_id, workspace_id, principal_id, registry_operation_id, action_type, model_version, prompt_digest, retention_mode, correlation_id)
+    VALUES ('smoke-invocation-cross', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'principal-model-gateway', 'op-smoke', 'MODEL_INVOKE', 'gpt-smoke', 'smoke-digest-cross', 'zero-retention', 'corr-smoke-cross');
+    RAISE EXCEPTION 'expected cross-workspace model_invocations insert to be blocked by RLS';
+  EXCEPTION
+    WHEN insufficient_privilege THEN RAISE NOTICE 'mi_cross_insert_blocked=insufficient_privilege';
+    WHEN OTHERS THEN
+      IF SQLERRM LIKE '%policy%' OR SQLSTATE IN ('42501', 'P0001', '28000') OR SQLERRM LIKE '%row-level security%' THEN
+        RAISE NOTICE 'mi_cross_insert_blocked=%', SQLSTATE;
+      ELSIF SQLERRM = 'expected cross-workspace model_invocations insert to be blocked by RLS' THEN
+        RAISE;
+      ELSE
+        RAISE NOTICE 'mi_cross_insert_blocked=%:%', SQLSTATE, SQLERRM;
+      END IF;
+  END;
+END
+$BLK$;
+RESET ROLE;
+DELETE FROM model_invocations WHERE external_id LIKE 'smoke-invocation-%';
+SELECT 'mi_isolation_ok=1';
+COMMIT;
+SQL
+)" || {
+    record FAIL "model_invocations isolation insert/select" "transaction failed; see ${RUN_LOG}"
+    return 0
+  }
+  log "model_invocations isolation transcript:"
+  log "${mg_out}"
+  local mi_ok=1
+  printf '%s\n' "${mg_out}" | grep -q 'mi_a_count=1' || mi_ok=0
+  printf '%s\n' "${mg_out}" | grep -q 'mi_b_count=1' || mi_ok=0
+  printf '%s\n' "${mg_out}" | grep -q 'mi_isolation_ok=1' || mi_ok=0
+  if [[ "${mi_ok}" == "1" ]]; then
+    record PASS "model_invocations isolation insert/select" "SET ROLE ai_crm_runtime_model_gateway; A/B isolated + cross-workspace insert denied; cleanup done"
+  else
+    record FAIL "model_invocations isolation insert/select" "unexpected output: ${mg_out//$'\n'/; }"
+  fi
+}
 
 write_doc() {
   local overall="FAIL"
@@ -1188,6 +1343,7 @@ main() {
   run_isolation
   run_outbox_consumer_isolation
   run_p6b_g001_isolation
+  run_q2_isolation
   write_doc
 
   log "=== summary PASS=${PASS_N} FAIL=${FAIL_N} SKIP=${SKIP_N} ==="

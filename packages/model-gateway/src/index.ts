@@ -193,6 +193,20 @@ export class ModelGateway {
     this.redactor = options.redactor ?? defaultRedactor;
     this.clock = options.clock ?? Date.now;
   }
+  /**
+   * Restart-consistency hydrate-on-boot (Q2 / D2): rebuild the in-memory
+   * invocations map wholesale from persisted `ModelInvocationRecord` rows
+   * (read back from PG at process start via
+   * `ModelInvocationRepository.listAllInvocations`), so a fresh process
+   * reflects prior invocations instead of starting empty. Mirrors
+   * `CrmService.hydrateCustomers` / `ReportService.hydrateSnapshots`.
+   */
+  hydrateInvocations(invocations: readonly ModelInvocationRecord[]): void {
+    this.invocations.clear();
+    for (const invocation of invocations) {
+      this.invocations.set(invocation.id, structuredClone(invocation));
+    }
+  }
 
   async invoke<T = Record<string, unknown>>(request: ModelInvocationRequest): Promise<ModelInvocationResult<T>> {
     if (request.principalId !== this.options.servicePrincipalId) {

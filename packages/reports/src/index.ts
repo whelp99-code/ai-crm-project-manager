@@ -155,6 +155,22 @@ function assertVarianceConsistent(figure: VarianceFigure, label: string): void {
 export class ReportService {
   private readonly reports = new Map<string, FinalReport>();
   private readonly followUps = new Map<string, FollowUpAction>();
+  /**
+   * Restart-consistency hydrate-on-boot (Q2 / D2): rebuild the in-memory
+   * reports map wholesale from persisted `FinalReport` rows (read back from
+   * PG at process start via `ReportRepository.listAllReports`), so a fresh
+   * process reflects prior submitted/approved/rejected reports instead of
+   * starting empty. `snapshot`/`snapshotHash` are stored/read back
+   * verbatim — hydrate never recomputes the hash, matching submitReport's
+   * own frozen-clone storage. Follow-up actions remain in-memory only
+   * (documented residual, not in scope for this slice).
+   */
+  hydrateSnapshots(reports: readonly FinalReport[]): void {
+    this.reports.clear();
+    for (const report of reports) {
+      this.reports.set(report.id, Object.freeze(structuredClone(report)));
+    }
+  }
 
   submitReport(input: SubmitReportInput): FinalReport {
     if (this.reports.has(input.id)) {

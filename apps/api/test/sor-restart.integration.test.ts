@@ -280,7 +280,10 @@ function createSharedFakePool() {
       sql.startsWith("SELECT * FROM finance_reconciliations ORDER BY") ||
       sql.startsWith("SELECT * FROM finance_exceptions ORDER BY") ||
       sql === "SELECT * FROM finance_daily_gate_state" ||
-      sql.startsWith("SELECT * FROM finance_day_records ORDER BY")
+      sql.startsWith("SELECT * FROM finance_day_records ORDER BY") ||
+      // Q2 (D2): reports hydrate-on-boot is unconditional on `pool` (like the
+      // sub-aggregate tables above), not gated on any of orch/gov/crm.
+      sql.startsWith("SELECT * FROM report_snapshots ORDER BY")
     ) {
       return { rows: [] as T[], rowCount: 0 };
     }

@@ -68,8 +68,13 @@ import {
   ModelGatewayError,
   resolveModelClientFromEnv,
   type ModelClient,
+  type ModelInvocationRecord,
   type StructuredOutputSchema,
 } from "@ai-crm/model-gateway";
+import {
+  createPgModelInvocationRepository,
+  type ModelInvocationRepository,
+} from "@ai-crm/model-gateway/pg-model-invocation-adapter";
 import { AiOrchestrator, AiOrchestratorError } from "@ai-crm/ai-orchestrator";
 import {
   OrchestrationError,
@@ -78,7 +83,11 @@ import {
   type OrchestrationStore,
   type PgQueryable,
 } from "@ai-crm/orchestration";
-import { ReportDomainError, ReportService, type FinalReportSnapshot } from "@ai-crm/reports";
+import {
+  createPgReportsRepository,
+  type ReportRepository,
+} from "@ai-crm/reports/pg-reports-adapter";
+import { ReportDomainError, ReportService, type FinalReport, type FinalReportSnapshot } from "@ai-crm/reports";
 import { canonicalHashOf } from "@ai-crm/policy-engine";
 import {
   NaturalCommandError,
@@ -343,6 +352,29 @@ export interface CreateAppOptions {
    * bypasses RLS by design. See `docs/ops/sor-persistence.md`. Per-request
    * scoped queries always use the main `databaseUrl`/`pgPool`, never this.
    */
+  /**
+   * Optional Postgres connection string used ONLY for `model_invocations`
+   * dual-write/hydrate reads (Q2 / D2). Defaults to
+   * `process.env.MODEL_GATEWAY_DATABASE_URL` when omitted. ADR-010
+   * disjoint-principal boundary: this MUST be a DSN authenticated as (or
+   * `SET ROLE`d into) `ai_crm_runtime_model_gateway` in production —
+   * `model_invocations` write grants were deliberately moved off
+   * `ai_crm_runtime_api`/`ai_crm_runtime_worker` in
+   * `0002_model_gateway_and_break_glass_roles.sql` and must never be
+   * re-granted (see `schema.security.test.ts`). When unset, falls back to
+   * the main `databaseUrl`/`DATABASE_URL` — the documented dev behavior
+   * where the docker bootstrap `ai_crm` superuser bypasses RLS by design
+   * (mirrors `adminDatabaseUrl`'s fallback). See
+   * `packages/model-gateway/src/pg-model-invocation-adapter.ts` module doc.
+   */
+  modelGatewayDatabaseUrl?: string;
+  /**
+   * Injected minimal queryable for `model_invocations` (Q2 / D2). Takes
+   * precedence over `modelGatewayDatabaseUrl`. Same ADR-010 role contract
+   * as `modelGatewayDatabaseUrl` applies to whatever connection this
+   * queryable represents.
+   */
+  modelGatewayPool?: PgQueryable;
   adminDatabaseUrl?: string;
   /**
    * Optional shared API key for fail-closed authn. When set (or when
@@ -400,6 +432,10 @@ export interface AiCrmRuntime {
   financeReconRepo?: FinanceReconciliationRepository;
   /** PG-backed daily-gate repository (PG-C2 / P6-b G001). Absent in memory mode. */
   dailyGateRepo?: DailyGateRepository;
+  /** PG-backed final-report snapshot repository (Q2 / D2). Absent in memory mode. */
+  reportsRepo?: ReportRepository;
+  /** PG-backed model-invocation audit repository (Q2 / D2, ADR-010-scoped connection). Absent in memory mode. */
+  modelInvocationRepo?: ModelInvocationRepository;
   /**
    * Count of best-effort dual-write failures (DUALWRITE_FAILED) observed
    * since boot. Memory stays authoritative for the request path; this is
@@ -549,6 +585,16 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     (typeof process !== "undefined" && typeof process.env?.ADMIN_DATABASE_URL === "string" && process.env.ADMIN_DATABASE_URL.trim()
       ? process.env.ADMIN_DATABASE_URL.trim()
       : undefined);
+  // Model-gateway DSN (Q2 / D2, ADR-010 role separation): used ONLY for
+  // `model_invocations` reads/writes. Falls back to the main pool/DSN when
+  // unset (documented dev behavior, same fallback shape as
+  // resolvedAdminDatabaseUrl) — production MUST set this to a DSN
+  // authenticated as ai_crm_runtime_model_gateway.
+  const resolvedModelGatewayDatabaseUrl =
+    options.modelGatewayDatabaseUrl ??
+    (typeof process !== "undefined" && typeof process.env?.MODEL_GATEWAY_DATABASE_URL === "string" && process.env.MODEL_GATEWAY_DATABASE_URL.trim()
+      ? process.env.MODEL_GATEWAY_DATABASE_URL.trim()
+      : undefined);
   let pool: PgQueryable | undefined = options.pgPool;
   // Raw `pg.Pool` handle (pre-scoping-wrapper) kept only for onClose shutdown;
   // `pool` above may be `createScopedPgQueryable(rawPgPool)` once onReady runs.
@@ -557,6 +603,12 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   // is set. Used solely for hydrate-on-boot cross-workspace reads below; the
   // per-request scoped `pool` above never uses this.
   let rawAdminPgPool: RealPgPool | undefined;
+  // Separate model-gateway `pg.Pool` handle (Q2 / D2, ADR-010 role
+  // separation): opened only when a model provider is configured. Used
+  // solely for `model_invocations` reads/writes; the per-request scoped
+  // `pool` above never touches this table (see CreateAppOptions.modelGatewayDatabaseUrl doc).
+  let rawModelGatewayPgPool: RealPgPool | undefined;
+  let modelGatewayPool: PgQueryable | undefined = options.modelGatewayPool;
   let orchStore: OrchestrationStore | undefined;
   let govRepo: GovernanceRepository | undefined;
   let crmRepo: CrmRepository | undefined;
@@ -565,6 +617,8 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   let ledgerRepo: LedgerRepository | undefined;
   let financeReconRepo: FinanceReconciliationRepository | undefined;
   let dailyGateRepo: DailyGateRepository | undefined;
+  let reportsRepo: ReportRepository | undefined;
+  let modelInvocationRepo: ModelInvocationRepository | undefined;
   // Stores hydrate-on-boot reads from: admin pool when configured, else the
   // main runtime pool/store (fallback documented on CreateAppOptions.adminDatabaseUrl).
   let hydrateOrchStore: OrchestrationStore | undefined;
@@ -595,6 +649,7 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     ledgerRepo = createPgLedgerRepository(pool);
     financeReconRepo = createPgFinanceReconciliationRepository(pool);
     dailyGateRepo = createPgDailyGateRepository(pool);
+    reportsRepo = createPgReportsRepository(pool);
     persistenceMode = "pg";
     // Fallback hydrate source when no adminDatabaseUrl is configured (dev default).
     hydrateOrchStore = orchStore;
@@ -604,6 +659,14 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     hydratePmRepo = pmRepo;
     hydrateFinanceReconRepo = financeReconRepo;
     hydrateDailyGateRepo = dailyGateRepo;
+  }
+
+  // Model-gateway pool (Q2 / D2, ADR-010 role separation): independent of
+  // the main `pool` above — only opened/injected when a model provider is
+  // configured. See CreateAppOptions.modelGatewayPool/modelGatewayDatabaseUrl doc.
+  if (modelGatewayPool) {
+    modelInvocationRepo = createPgModelInvocationRepository(modelGatewayPool);
+    persistenceMode = "pg";
   }
 
   const aiCrm: AiCrmRuntime = {
@@ -621,6 +684,8 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   if (ledgerRepo) aiCrm.ledgerRepo = ledgerRepo;
   if (financeReconRepo) aiCrm.financeReconRepo = financeReconRepo;
   if (dailyGateRepo) aiCrm.dailyGateRepo = dailyGateRepo;
+  if (reportsRepo) aiCrm.reportsRepo = reportsRepo;
+  if (modelInvocationRepo) aiCrm.modelInvocationRepo = modelInvocationRepo;
   (app as FastifyInstance & { aiCrm?: AiCrmRuntime }).aiCrm = aiCrm;
   (app as FastifyInstance & { eventHub?: EventHub }).eventHub = eventHub;
   const decorateNotifyBridge = (bridge: PgNotifyBridge | undefined): void => {
@@ -699,6 +764,40 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
       aiCrm.dualWriteFailures += 1;
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[DUALWRITE_FAILED] target=crm_customers workspaceId=${customer.workspaceId} customerId=${customer.id} error=${message}`);
+    }
+  }
+  /**
+   * Dual-writes a final-report row onto `report_snapshots` (Q2 / D2).
+   * Best-effort like `dualWriteCrmCustomer` — never fails the in-flight
+   * request. `snapshot`/`snapshotHash` are passed through verbatim; the
+   * adapter never recomputes the hash.
+   */
+  async function dualWriteReportSnapshot(report: FinalReport): Promise<void> {
+    const repo = reportsRepo;
+    if (!repo) return;
+    try {
+      await repo.saveReport(report);
+    } catch (error) {
+      aiCrm.dualWriteFailures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[DUALWRITE_FAILED] target=report_snapshots workspaceId=${report.workspaceId} reportId=${report.id} error=${message}`);
+    }
+  }
+  /**
+   * Dual-writes a model-invocation record onto `model_invocations` (Q2 / D2,
+   * ADR-010-scoped connection — see `modelInvocationRepo` construction).
+   * Best-effort like `dualWriteCrmCustomer` — never fails the in-flight
+   * request.
+   */
+  async function dualWriteModelInvocation(record: ModelInvocationRecord): Promise<void> {
+    const repo = modelInvocationRepo;
+    if (!repo) return;
+    try {
+      await repo.saveInvocation(record);
+    } catch (error) {
+      aiCrm.dualWriteFailures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[DUALWRITE_FAILED] target=model_invocations workspaceId=${record.workspaceId} invocationId=${record.id} error=${message}`);
     }
   }
   /**
@@ -976,6 +1075,7 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
         ledgerRepo = createPgLedgerRepository(pool);
         financeReconRepo = createPgFinanceReconciliationRepository(pool);
         dailyGateRepo = createPgDailyGateRepository(pool);
+        reportsRepo = createPgReportsRepository(pool);
         aiCrm.persistenceMode = "pg";
         aiCrm.pool = pool;
         aiCrm.orchStore = orchStore;
@@ -986,6 +1086,7 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
         aiCrm.ledgerRepo = ledgerRepo;
         aiCrm.financeReconRepo = financeReconRepo;
         aiCrm.dailyGateRepo = dailyGateRepo;
+        aiCrm.reportsRepo = reportsRepo;
         const notifyEnabled = options.pgNotify !== false;
         const ClientCtor = pgMod.Client ?? pgMod.default?.Client;
         if (notifyEnabled && ClientCtor && pool) {
@@ -1061,6 +1162,42 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(
           `ADMIN_DATABASE_URL/adminDatabaseUrl is set but the admin Postgres pool could not be created: ${message}`,
+        );
+      }
+    }
+    // Model-gateway pool (Q2 / D2, ADR-010 role separation): opened only
+    // when a model provider is configured AND the app is running in PG
+    // mode. MUST be authenticated as ai_crm_runtime_model_gateway in
+    // production (see CreateAppOptions.modelGatewayDatabaseUrl doc) — dev
+    // fallback below reuses resolvedDatabaseUrl (documented dev behavior,
+    // same fallback shape as the admin pool above). Wrapped with
+    // createScopedPgQueryable so per-workspace reads honor FORCE RLS;
+    // hydrate's listAllInvocations() still reads unscoped (see
+    // pg-model-invocation-adapter.ts class doc, mirrors listAllCustomers).
+    const effectiveModelGatewayDatabaseUrl = resolvedModelGatewayDatabaseUrl ?? resolvedDatabaseUrl;
+    if (!modelGatewayPool && resolvedModelClient && effectiveModelGatewayDatabaseUrl) {
+      try {
+        const pgModuleName = "pg";
+        const pgMod = (await import(pgModuleName)) as {
+          default?: { Pool: new (cfg: { connectionString: string }) => RealPgPool };
+          Pool?: new (cfg: { connectionString: string }) => RealPgPool;
+        };
+        const PoolCtor = pgMod.Pool ?? pgMod.default?.Pool;
+        if (!PoolCtor) {
+          throw new Error("pg module loaded but Pool export was missing");
+        }
+        const createdModelGateway = new PoolCtor({ connectionString: effectiveModelGatewayDatabaseUrl });
+        // Fail-closed connectivity check, same as the main/admin pools.
+        await createdModelGateway.query("select 1 as ok");
+        rawModelGatewayPgPool = createdModelGateway;
+        modelGatewayPool = createScopedPgQueryable(createdModelGateway);
+        modelInvocationRepo = createPgModelInvocationRepository(modelGatewayPool);
+        aiCrm.persistenceMode = "pg";
+        aiCrm.modelInvocationRepo = modelInvocationRepo;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `MODEL_GATEWAY_DATABASE_URL/modelGatewayDatabaseUrl is set but the model-gateway Postgres pool could not be created: ${message}`,
         );
       }
     }
@@ -1206,6 +1343,31 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
         throw new Error(`ledger hydrate-on-boot failed; restart-consistent SoR could not be established: ${message}`);
       }
     }
+    // Reports hydrate-on-boot (Q2 / D2): independent of the orch/gov/crm
+    // condition above — only needs `reportsRepo`. `snapshot`/`snapshotHash`
+    // round-trip verbatim (see ReportRepository doc); hydrate never
+    // recomputes the hash.
+    if (reportsRepo) {
+      try {
+        const allReports = await reportsRepo.listAllReports();
+        reports.hydrateSnapshots(allReports);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`reports hydrate-on-boot failed; restart-consistent SoR could not be established: ${message}`);
+      }
+    }
+    // Model-invocation hydrate-on-boot (Q2 / D2, ADR-010-scoped connection):
+    // independent — only needs `modelInvocationRepo` + a configured
+    // `modelGateway` instance.
+    if (modelInvocationRepo && modelGateway) {
+      try {
+        const allInvocations = await modelInvocationRepo.listAllInvocations();
+        modelGateway.hydrateInvocations(allInvocations);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`model-invocation hydrate-on-boot failed; restart-consistent SoR could not be established: ${message}`);
+      }
+    }
   });
 
   app.addHook("onClose", async () => {
@@ -1222,6 +1384,13 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     if (rawAdminPgPool && typeof rawAdminPgPool.end === "function") {
       try {
         await rawAdminPgPool.end();
+      } catch {
+        // ignore pool shutdown errors
+      }
+    }
+    if (rawModelGatewayPgPool && typeof rawModelGatewayPgPool.end === "function" && !options.modelGatewayPool) {
+      try {
+        await rawModelGatewayPgPool.end();
       } catch {
         // ignore pool shutdown errors
       }
@@ -2189,6 +2358,7 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
       correlationId: text(body, "correlationId"),
       requestedRetention: body.requestedRetention === "retain" ? "retain" : "zero-retention",
     });
+    await dualWriteModelInvocation(result.invocation);
     return reply.status(201).send(result);
   });
 
@@ -2291,14 +2461,16 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
   app.post("/api/reports", async (request, reply) => {
     const ws = workspace(request);
     const body = objectBody(request.body);
-    return reply.status(201).send(reports.submitReport({
+    const result = reports.submitReport({
       id: text(body, "id"),
       workspaceId: ws,
       projectId: text(body, "projectId"),
       submittedByPrincipalId: text(body, "submittedByPrincipalId"),
       submittedAt: text(body, "submittedAt"),
       snapshot: objectBody(body.snapshot) as unknown as FinalReportSnapshot,
-    }));
+    });
+    await dualWriteReportSnapshot(result);
+    return reply.status(201).send(result);
   });
 
   app.get("/api/reports", async (request) => reports.listReports(workspace(request)));
@@ -2314,13 +2486,17 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
   app.post<{ Params: { reportId: string } }>("/api/reports/:reportId/approve", async (request) => {
     const ws = workspace(request);
     const body = objectBody(request.body);
-    return reports.approveReport(ws, request.params.reportId, text(body, "principalId"), text(body, "decidedAt"));
+    const result = reports.approveReport(ws, request.params.reportId, text(body, "principalId"), text(body, "decidedAt"));
+    await dualWriteReportSnapshot(result);
+    return result;
   });
 
   app.post<{ Params: { reportId: string } }>("/api/reports/:reportId/reject", async (request) => {
     const ws = workspace(request);
     const body = objectBody(request.body);
-    return reports.rejectReport(ws, request.params.reportId, text(body, "principalId"), text(body, "decidedAt"), text(body, "reason"));
+    const result = reports.rejectReport(ws, request.params.reportId, text(body, "principalId"), text(body, "decidedAt"), text(body, "reason"));
+    await dualWriteReportSnapshot(result);
+    return result;
   });
 
   app.post<{ Params: { reportId: string } }>("/api/reports/:reportId/follow-ups", async (request, reply) => {
