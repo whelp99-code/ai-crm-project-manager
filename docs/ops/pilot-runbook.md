@@ -96,7 +96,11 @@ credential**.
 # packages/persistence/scripts/pg-rls-smoke.sh and (structurally) by check #2
 # of packages/persistence/scripts/pilot-preflight.sh.
 DATABASE_URL=postgres://ai_crm_runtime_api:CHANGE_ME@CHANGE_ME_HOST:5432/ai_crm
-
+# --- Production API authentication: createApp() throws
+# [AUTH_REQUIRED_IN_PROD] when NODE_ENV=production and neither key is set,
+# unless ALLOW_INSECURE_PROD=1 is an audited insecure bring-up escape hatch.
+AUTH_API_KEY=CHANGE_ME
+# API_AUTH_TOKEN=CHANGE_ME
 # --- Admin pool: a SEPARATE, dedicated cross-workspace-capable (BYPASSRLS)
 # role, used ONLY for hydrate-on-boot (listAllControls/listAllIntents/
 # listJobSnapshots/listAllReports/listAllEntries/listAllInvocations) and
@@ -106,13 +110,15 @@ DATABASE_URL=postgres://ai_crm_runtime_api:CHANGE_ME@CHANGE_ME_HOST:5432/ai_crm
 # this explicitly to a dedicated role, not rely on that fallback.
 ADMIN_DATABASE_URL=postgres://CHANGE_ME_ADMIN_ROLE:CHANGE_ME@CHANGE_ME_HOST:5432/ai_crm
 
-# --- Model-gateway pool (ADR-010 disjoint-principal boundary, Q2/D2): MUST
-# point at ai_crm_runtime_model_gateway and MUST be a DISTINCT DSN from
-# DATABASE_URL above. createApp() is fail-closed on this in production
+# --- Model-gateway pool (ADR-010 disjoint-principal boundary, Q2/D2): when
+# MODEL_PROVIDER is azure or openai_compatible, MUST point at
+# ai_crm_runtime_model_gateway and MUST be a DISTINCT DSN from DATABASE_URL
+# above. createApp() is fail-closed on this in production
 # (MODEL_GATEWAY_DSN_REQUIRED_IN_PROD): with NODE_ENV=production and a model
 # provider configured, boot refuses to start unless this is set to a DSN
 # distinct from DATABASE_URL (ALLOW_INSECURE_PROD=1 is an audited escape
-# hatch only, not a pilot default).
+# hatch only, not a pilot default). With MODEL_PROVIDER unset/mock/none, the
+# offline model path does not require this DSN.
 MODEL_GATEWAY_DATABASE_URL=postgres://ai_crm_runtime_model_gateway:CHANGE_ME@CHANGE_ME_HOST:5432/ai_crm
 
 # --- apps/worker's own DATABASE_URL: point at ai_crm_runtime_worker
@@ -132,10 +138,16 @@ Checklist before go-live:
       cross-workspace role — not left to fall back to `DATABASE_URL`.
 - [ ] `apps/worker`'s `DATABASE_URL` points at `ai_crm_runtime_worker`
       (NOBYPASSRLS), and its `ADMIN_DATABASE_URL` is set explicitly.
-- [ ] `MODEL_GATEWAY_DATABASE_URL` is set and is a **different** DSN string
+- [ ] When `MODEL_PROVIDER` is `azure` or `openai_compatible`,
+      `MODEL_GATEWAY_DATABASE_URL` is set and is a **different** DSN string
       from `DATABASE_URL` (the preflight script checks string inequality,
-      not merely "is set").
-- [ ] None of the four DSNs above are left as the shipped dev value
+      not merely "is set"); it is not required for the offline
+      unset/`mock`/`none` model path.
+- [ ] `AUTH_API_KEY` or `API_AUTH_TOKEN` is set to a non-placeholder secret;
+      otherwise production `createApp()` throws `AUTH_REQUIRED_IN_PROD` unless
+      `ALLOW_INSECURE_PROD=1` is explicitly approved for an audited insecure
+      bring-up.
+- [ ] None of the configured DSNs above are left as the shipped dev value
       (`postgres://ai_crm:ai_crm_dev@localhost:5432/ai_crm`).
 
 ---
@@ -260,16 +272,21 @@ packages/persistence/scripts/pilot-preflight.sh
 It checks, against the calling shell's env and the live Postgres
 `DATABASE_URL` points at:
 
-1. `DATABASE_URL` / `ADMIN_DATABASE_URL` / `MODEL_GATEWAY_DATABASE_URL` /
-   an auth-key var / `MODEL_PROVIDER` (+ `AZURE_OPENAI_*` if a provider is
-   set) are present and not left as `CHANGE_ME` placeholders.
-2. **Connects live** and asserts `ai_crm_runtime_api`'s `rolbypassrls` is
-   `false` (proves the NOBYPASSRLS contract holds for the role name itself),
-   and separately asserts `DATABASE_URL`'s own `current_user` also has
-   `rolbypassrls = false` (proves the DSN actually in use isn't a
+1. `DATABASE_URL` / `ADMIN_DATABASE_URL` / an auth-key var /
+   `MODEL_PROVIDER` (+ `AZURE_OPENAI_*` if a provider is set) are present and
+   not left as `CHANGE_ME` placeholders. `MODEL_GATEWAY_DATABASE_URL` is
+   required and checked for distinctness only when `MODEL_PROVIDER` is
+   `azure` or `openai_compatible`; the offline unset/`mock`/`none` path is
+   explicitly SKIPped.
+2. **Connects live** (and requires `psql` on `PATH`) and asserts
+   `ai_crm_runtime_api`'s `rolbypassrls OR rolsuper` is `false` (proves the
+   NOBYPASSRLS, non-superuser contract holds for the role name itself), and
+   separately asserts `DATABASE_URL`'s own `current_user` also has
+   `rolbypassrls OR rolsuper = false` (proves the DSN actually in use isn't a
    superuser/admin role, which the role-name check alone cannot catch).
-3. `MODEL_GATEWAY_DATABASE_URL` is a different DSN string from `DATABASE_URL`
-   (ADR-010 disjoint-principal boundary).
+3. When a real model provider is configured,
+   `MODEL_GATEWAY_DATABASE_URL` is a different non-placeholder DSN string from
+   `DATABASE_URL` (ADR-010 disjoint-principal boundary).
 4. Grafana admin password env var, if present in the shell, is not the
    literal default `admin` (SKIPped, not fabricated, when no such var is in
    the shell's env — the script never queries Grafana's API to guess this).
@@ -279,8 +296,8 @@ It checks, against the calling shell's env and the live Postgres
    alone).
 6. Prints the single-instance operator acknowledgment from section (a).
 
-It prints `PREFLIGHT: n PASS, m FAIL, k WARN` and **exits 1 if any check
-FAILed**. Run it in every environment before bringing up a pilot instance,
+It prints `PREFLIGHT: n PASS, m FAIL, k WARN, s SKIP`, followed by warning
+details and the skipped-check count, and **exits 1 if any check FAILed**.
 including dev — **against local dev it is EXPECTED to FAIL/WARN** (dev
 deliberately uses the docker `ai_crm` superuser DSN for all three roles, the
 drill webhook-catcher, and Grafana `admin`/`admin`). A clean run (0 FAIL)

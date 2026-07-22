@@ -53,7 +53,7 @@ is_placeholder() {
 
 echo "=== pilot-preflight: 1) required env present + non-placeholder ==="
 
-for var in DATABASE_URL ADMIN_DATABASE_URL MODEL_GATEWAY_DATABASE_URL; do
+for var in DATABASE_URL ADMIN_DATABASE_URL; do
   val="${!var:-}"
   if is_placeholder "${val}"; then
     fail "${var} is unset or still a CHANGE_ME placeholder — see docs/ops/runtime-dsn.md"
@@ -63,7 +63,7 @@ for var in DATABASE_URL ADMIN_DATABASE_URL MODEL_GATEWAY_DATABASE_URL; do
 done
 
 if is_placeholder "${AUTH_API_KEY:-}" && is_placeholder "${API_AUTH_TOKEN:-}"; then
-  fail "neither AUTH_API_KEY nor API_AUTH_TOKEN is set (or both are CHANGE_ME) — createApp fails closed to dev-mode auth, see docs/ops/authn.md"
+  fail "neither AUTH_API_KEY nor API_AUTH_TOKEN is set (or both are CHANGE_ME) — production createApp throws AUTH_REQUIRED_IN_PROD unless ALLOW_INSECURE_PROD=1 is explicitly audited; see docs/ops/authn.md"
 else
   pass "AUTH_API_KEY or API_AUTH_TOKEN is set to a non-placeholder value"
 fi
@@ -100,36 +100,36 @@ RUNTIME_ROLE="ai_crm_runtime_api"
 PSQL_DSN="${DATABASE_URL:-postgres://ai_crm:ai_crm_dev@localhost:5432/ai_crm}"
 
 if command -v psql >/dev/null 2>&1; then
-  ROLBYPASSRLS="$(psql "${PSQL_DSN}" -v ON_ERROR_STOP=1 -X -q -t -A \
-    -c "SELECT rolbypassrls FROM pg_roles WHERE rolname = '${RUNTIME_ROLE}'" 2>&1)"
+  ROLE_CAN_BYPASS_RLS="$(psql "${PSQL_DSN}" -v ON_ERROR_STOP=1 -X -q -t -A \
+    -c "SELECT rolbypassrls OR rolsuper FROM pg_roles WHERE rolname = '${RUNTIME_ROLE}'" 2>&1)"
   PSQL_STATUS=$?
   if [[ ${PSQL_STATUS} -ne 0 ]]; then
-    fail "could not connect/query via psql against DATABASE_URL to inspect role '${RUNTIME_ROLE}': ${ROLBYPASSRLS}"
-  elif [[ -z "${ROLBYPASSRLS}" ]]; then
+    fail "could not connect/query via psql against DATABASE_URL to inspect role '${RUNTIME_ROLE}': ${ROLE_CAN_BYPASS_RLS}"
+  elif [[ -z "${ROLE_CAN_BYPASS_RLS}" ]]; then
     fail "role '${RUNTIME_ROLE}' does not exist on this database — DATABASE_URL should point at it (see docs/ops/runtime-dsn.md)"
-  elif [[ "${ROLBYPASSRLS}" == "f" ]]; then
-    pass "role '${RUNTIME_ROLE}' has rolbypassrls=false (NOBYPASSRLS, correct)"
+  elif [[ "${ROLE_CAN_BYPASS_RLS}" == "f" ]]; then
+    pass "role '${RUNTIME_ROLE}' has rolbypassrls=false and rolsuper=false (NOBYPASSRLS, non-superuser, correct)"
   else
-    fail "role '${RUNTIME_ROLE}' has rolbypassrls=true — this role BYPASSES RLS and must never be the runtime role"
+    fail "role '${RUNTIME_ROLE}' has rolbypassrls=true or rolsuper=true — this role can bypass RLS and must never be the runtime role"
   fi
 
   # Also check whether DATABASE_URL's *own* connection role bypasses RLS —
   # this is what actually protects a live request, distinct from the named
   # role's catalog attribute above (an operator could point DATABASE_URL at
   # the superuser while ai_crm_runtime_api itself is correctly NOBYPASSRLS).
-  CURRENT_BYPASS="$(psql "${PSQL_DSN}" -v ON_ERROR_STOP=1 -X -q -t -A \
-    -c "SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user" 2>&1)"
+  CURRENT_CAN_BYPASS_RLS="$(psql "${PSQL_DSN}" -v ON_ERROR_STOP=1 -X -q -t -A \
+    -c "SELECT rolbypassrls OR rolsuper FROM pg_roles WHERE rolname = current_user" 2>&1)"
   if [[ $? -ne 0 ]]; then
-    fail "could not determine current_user's rolbypassrls via DATABASE_URL: ${CURRENT_BYPASS}"
-  elif [[ "${CURRENT_BYPASS}" == "t" ]]; then
-    fail "DATABASE_URL's own connection role bypasses RLS (rolbypassrls=true) — DATABASE_URL must point at ${RUNTIME_ROLE} (NOBYPASSRLS), not an admin/superuser role"
-  elif [[ "${CURRENT_BYPASS}" == "f" ]]; then
-    pass "DATABASE_URL's own connection role has rolbypassrls=false (NOBYPASSRLS, correct)"
+    fail "could not determine current_user's RLS-bypass/superuser posture via DATABASE_URL: ${CURRENT_CAN_BYPASS_RLS}"
+  elif [[ "${CURRENT_CAN_BYPASS_RLS}" == "t" ]]; then
+    fail "DATABASE_URL's own connection role has rolbypassrls=true or rolsuper=true — DATABASE_URL must point at ${RUNTIME_ROLE} (NOBYPASSRLS, non-superuser), not an admin/superuser role"
+  elif [[ "${CURRENT_CAN_BYPASS_RLS}" == "f" ]]; then
+    pass "DATABASE_URL's own connection role has rolbypassrls=false and rolsuper=false (NOBYPASSRLS, non-superuser, correct)"
   else
-    fail "could not read DATABASE_URL's current_user rolbypassrls value (got '${CURRENT_BYPASS}')"
+    fail "could not read DATABASE_URL's current_user RLS-bypass/superuser value (got '${CURRENT_CAN_BYPASS_RLS}')"
   fi
 else
-  skip "psql not found on PATH — cannot verify rolbypassrls live; install postgresql-client or run with psql on PATH"
+  fail "psql is required on PATH to verify the load-bearing database role check; install postgresql-client and rerun preflight"
 fi
 
 echo
@@ -137,12 +137,14 @@ echo "=== pilot-preflight: 3) MODEL_GATEWAY_DATABASE_URL distinct from DATABASE_
 
 MG_URL="${MODEL_GATEWAY_DATABASE_URL:-}"
 DB_URL="${DATABASE_URL:-}"
-if [[ -z "${MG_URL}" ]]; then
-  fail "MODEL_GATEWAY_DATABASE_URL is unset — falls back to DATABASE_URL, which the prod guard (MODEL_GATEWAY_DSN_REQUIRED_IN_PROD) rejects unless ALLOW_INSECURE_PROD=1 is explicitly set"
+if [[ -z "${MODEL_PROVIDER_VAL}" || "${MODEL_PROVIDER_VAL}" == "mock" || "${MODEL_PROVIDER_VAL}" == "none" ]]; then
+  skip "MODEL_PROVIDER unset/mock/none — offline model path, MODEL_GATEWAY_DATABASE_URL is not required or checked for distinctness"
+elif is_placeholder "${MG_URL}"; then
+  fail "MODEL_PROVIDER=${MODEL_PROVIDER_VAL} requires MODEL_GATEWAY_DATABASE_URL set to a non-placeholder DSN distinct from DATABASE_URL"
 elif [[ "${MG_URL}" == "${DB_URL}" ]]; then
-  fail "MODEL_GATEWAY_DATABASE_URL equals DATABASE_URL — ADR-010 requires a disjoint principal; this collapses the write-boundary (see docs/adr/010-model-gateway.md)"
+  fail "MODEL_PROVIDER=${MODEL_PROVIDER_VAL} but MODEL_GATEWAY_DATABASE_URL equals DATABASE_URL — ADR-010 requires a disjoint principal (see docs/adr/010-model-gateway.md)"
 else
-  pass "MODEL_GATEWAY_DATABASE_URL is distinct from DATABASE_URL"
+  pass "MODEL_GATEWAY_DATABASE_URL is set to a non-placeholder DSN distinct from DATABASE_URL"
 fi
 
 echo
@@ -192,7 +194,17 @@ EOF
 pass "single-instance constraint printed for operator acknowledgment"
 
 echo
-echo "PREFLIGHT: ${PASS_N} PASS, ${FAIL_N} FAIL, ${WARN_N} WARN (${SKIP_N} SKIP)"
+echo "PREFLIGHT: ${PASS_N} PASS, ${FAIL_N} FAIL, ${WARN_N} WARN, ${SKIP_N} SKIP"
+
+if [[ ${WARN_N} -gt 0 ]]; then
+  echo
+  echo "WARNINGS:"
+  for line in "${WARN_LINES[@]}"; do
+    printf '  - %s\n' "${line}"
+  done
+fi
+
+echo "SKIPPED CHECKS: ${SKIP_N}"
 
 if [[ ${FAIL_N} -gt 0 ]]; then
   echo

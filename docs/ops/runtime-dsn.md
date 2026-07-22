@@ -72,13 +72,11 @@ is running in a documented dev-mode gap:
    all `/api/agent/*` routes fail closed (401 `UNAUTHENTICATED`) without a
    matching `x-api-key`/`Authorization: Bearer` — see `docs/ops/authn.md`.
    **When `NODE_ENV=production` and no key is configured**, `createApp`
-   still boots in dev header-principal mode (`aiCrm.authMode === "dev"`) so
-   it never breaks existing non-prod callers/tests that construct
-   `createApp()` with no auth options — but it logs a structured
-   `console.warn("[AUTH_DISABLED_IN_PROD] ...")` on boot so this
-   misconfiguration is observable in logs/alerts rather than silent. Treat
-   that warning as a deploy-blocking signal in production, not a soft
-   suggestion.
+   throws `[AUTH_REQUIRED_IN_PROD]` and refuses to start unauthenticated.
+   `ALLOW_INSECURE_PROD=1` is only an explicit, audited insecure bring-up
+   escape hatch; it permits the documented dev header-principal mode and emits
+   `[AUTH_DISABLED_IN_PROD]`. Treat either a missing key or that escape hatch
+   as a deploy-blocking production condition, not a soft suggestion.
 4. **`DEV_UNSIGNED_FINANCE_PACK` is NOT set**, and no unsigned
    `financePack`/`allowUnsignedFinancePack: true` is passed to `createApp`.
    Without a signed finance pack, `/api/finance/*` routes stay fail-closed
@@ -87,13 +85,14 @@ is running in a documented dev-mode gap:
    this posture unless a signed pack is supplied.
 
 Tests: `apps/api/test/prod-auth.integration.test.ts` asserts (1) `authMode`
-resolves to `"apikey"` and 401 without a key when `authApiKey` is
-configured under `NODE_ENV=production`; (2) `authMode` stays `"dev"` and the
-`[AUTH_DISABLED_IN_PROD]` warning fires when no key is configured under
-`NODE_ENV=production` (and does NOT fire outside production, or when a key
-is configured); (3) finance routes stay 503 `FINANCE_PACK_UNSET` under
-`NODE_ENV=production` with no signed pack. `apps/api/test/authn.integration.test.ts`
-and `apps/api/test/s3-finance.integration.test.ts` cover the underlying
+resolves to `"apikey"` and 401 without a key when `authApiKey` is configured
+under `NODE_ENV=production`; (2) `createApp()` throws
+`[AUTH_REQUIRED_IN_PROD]` when no key is configured under
+`NODE_ENV=production`; (3) the audited `ALLOW_INSECURE_PROD` escape hatch
+keeps `authMode` `"dev"` and emits `[AUTH_DISABLED_IN_PROD]`; and (4) finance
+routes stay 503 `FINANCE_PACK_UNSET` under `NODE_ENV=production` with no
+signed pack. `apps/api/test/authn.integration.test.ts` and
+`apps/api/test/s3-finance.integration.test.ts` cover the underlying
 non-prod-framed behavior these tests build on.
 
 ## Web app envs
