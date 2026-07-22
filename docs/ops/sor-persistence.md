@@ -113,6 +113,63 @@ docker `ai_crm` bootstrap superuser bypasses RLS by design. This fallback
 keeps existing dev/pilot/test behavior unchanged; no production deployment
 should rely on it once a real `ai_crm_runtime_api`-equivalent, non-superuser
 application role is in front of Postgres.
+## Reports/ledger/model-invocation hydrate-on-boot also use the admin pool (Q2 architect P2-1)
+
+`listAllReports()` (reports), `listAllEntries()` (ledger), and
+`listAllInvocations()` (model-invocation) are the same shape of problem as
+`listAllControls()`/`listAllIntents()`/`listJobSnapshots()` above: unscoped,
+cross-workspace reads with no single workspace to `SET LOCAL app.workspace_id`
+to. Before this fix they always ran on the per-request runtime pool/store
+(`reportsRepo`/`ledgerRepo`/`modelInvocationRepo`, backed by
+`ai_crm_runtime_api`/`ai_crm_runtime_worker`/`ai_crm_runtime_model_gateway`
+respectively — all `NOBYPASSRLS` by design). In dev/CI that's masked by the
+docker bootstrap superuser (same reason the controls/intents/job-snapshot
+hydrate worked before G-01 MEDIUM 4), but a role-separated production deploy
+running those roles for real would hit the fail-closed
+`app_current_workspace_id()` RAISE on hydrate and abort boot (`onReady`
+rethrows every hydrate error, per the fail-closed contract above).
+
+**Fix:** `onReady` now prefers `hydrateReportsRepo`/`hydrateLedgerRepo`/
+`hydrateModelInvocationRepo` — sourced from the same `adminDatabaseUrl`
+`pg.Pool` as the orch/gov/crm hydrate reads above — falling back to the
+per-request repo only when `adminDatabaseUrl` is unset (the same documented
+dev fallback shape). No new admin connection is opened for this; it reuses
+the single admin pool already opened for controls/intents/job-snapshot
+hydrate.
+
+**ADR-010 nuance for model-invocation:** the disjoint-principal boundary
+(`model_invocations` WRITES only through `ai_crm_runtime_model_gateway`,
+never re-granted to api/worker) is about writes and is untouched here — see
+`docs/adr/010-model-gateway.md` and `docs/security/rls-role-model.md`. The
+hydrate-on-boot `listAllInvocations()` call is a READ, and an unscoped,
+cross-workspace read at that; ADR-010 does not require it to run under the
+model-gateway role specifically, only that it never uses a role that can
+write `model_invocations` outside the gateway. Routing this one read through
+the admin/cross-workspace pool (same pool used for reports/ledger/controls)
+satisfies both: it never touches `model_invocations` WRITE grants, and it
+avoids requiring the model-gateway role itself to also be
+cross-workspace-capable (`ai_crm_runtime_model_gateway` stays `NOBYPASSRLS`
+and workspace-scoped for its own per-request inserts, unchanged).
+
+**Boot-time assertion (fails loudly, not silently):** there is no separate
+synchronous "is this pool cross-workspace-capable?" check beyond the
+existing `select 1 as ok` connectivity probe on `adminDatabaseUrl` (see
+above) — that would only prove the DSN can connect, not that its role
+bypasses RLS. The real assertion is structural: `hydrateReportsRepo`/
+`hydrateLedgerRepo`/`hydrateModelInvocationRepo`'s unscoped reads run
+`SELECT ... FROM report_snapshots|finance_journal_entries|model_invocations`
+with no `app.workspace_id` GUC set. Under FORCE RLS + `NOBYPASSRLS`, that
+either returns zero rows (silently wrong — but ruled out because the
+underlying `workspace_isolation` policy's `USING` clause calls
+`app_current_workspace_id()`, which itself `RAISE`s when the GUC is unset)
+or raises. Either way, `onReady`'s per-hydrate try/catch (ledger/reports/
+model-invocation each have their own, independent of the orch/gov/crm block)
+rethrows as `Error("... hydrate-on-boot failed; restart-consistent SoR
+could not be established: ...")`, which aborts `app.ready()` — a misconfigured
+admin role (wrong DSN, `NOBYPASSRLS` role, missing grants) fails boot
+loudly with that message, it can never silently start serving
+stale/empty state.
+
 
 ## PG-primary scoped governance reads (N-08 / D4)
 
@@ -583,3 +640,39 @@ parse failure such as a missing/duplicate/renumbered row) when it does not.
 ### Audit dual-write delivery semantics (N-08)
 
 The request-path audit dual-write is **at-least-once**: the per-workspace flush cursor advances only on a resolved PG write, so a post-COMMIT ack loss can re-append the same logical events under new PG `audit_chain_heads` sequences (duplicate *valid* rows under fresh monotonic sequence numbers, never corruption or gaps). This is acceptable for the tamper-evident chain-head continuity D3 relies on; a future exactly-once path would need a dedup key on `(workspace_id, in_memory_event_id)`.
+### ADR-010 connection-boundary boot guard (Q2 architect P3-1)
+
+`MODEL_GATEWAY_DATABASE_URL`/`options.modelGatewayDatabaseUrl` falls back to
+the main `DATABASE_URL`/`databaseUrl` when unset (documented dev/CI
+behavior, same fallback shape as `ADMIN_DATABASE_URL`) — see
+`CreateAppOptions.modelGatewayDatabaseUrl` doc and
+`docs/adr/010-model-gateway.md`. That fallback is convenient for local/CI
+bring-up but, left unchecked, would let a production deploy silently run
+`model_invocations` writes through the SAME DSN/principal as the api/worker
+pool — collapsing the ADR-010 disjoint-principal boundary the migration
+history (`0002_model_gateway_and_break_glass_roles.sql`'s REVOKE +
+model-gateway-only GRANT, asserted by
+`schema.security.test.ts`'s globbed no-re-grant check) exists to enforce.
+
+`createApp` now refuses to boot when **all** of the following hold:
+`NODE_ENV==='production'`, a model provider is configured
+(`options.modelClient`/`resolveModelClientFromEnv()`), `resolvedDatabaseUrl`
+is set (this instance actually persists to PG — a pure memory-mode/test
+bring-up with a model client but no `DATABASE_URL` never touches
+`model_invocations`, so there is nothing to collapse), and
+`MODEL_GATEWAY_DATABASE_URL` is either unset or identical to
+`DATABASE_URL`. It throws
+`[MODEL_GATEWAY_DSN_REQUIRED_IN_PROD]` synchronously at construction — the
+same fail-closed-at-construction shape as the pre-existing
+`[AUTH_REQUIRED_IN_PROD]` guard (`docs/ops/runtime-dsn.md`) — with an
+`ALLOW_INSECURE_PROD=1` escape hatch for an explicit, audited same-DSN
+bring-up (mirrors `allowInsecureProd`/`ALLOW_INSECURE_PROD` exactly; when
+set, it boots with a `[MODEL_GATEWAY_DSN_COLLAPSED_IN_PROD]` warning
+instead of throwing). Dev/CI (`NODE_ENV!=='production'`) keeps the
+documented same-DSN fallback unconditionally — no behavior change there.
+
+Set `MODEL_GATEWAY_DATABASE_URL` in production to a DSN authenticated as
+(or `SET ROLE`d into) `ai_crm_runtime_model_gateway`, distinct from the
+`DATABASE_URL` used by `ai_crm_runtime_api`/`ai_crm_runtime_worker` — see
+`.env.example` and `docs/security/rls-role-model.md`.
+

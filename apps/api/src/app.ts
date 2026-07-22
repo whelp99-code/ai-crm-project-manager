@@ -595,6 +595,39 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     (typeof process !== "undefined" && typeof process.env?.MODEL_GATEWAY_DATABASE_URL === "string" && process.env.MODEL_GATEWAY_DATABASE_URL.trim()
       ? process.env.MODEL_GATEWAY_DATABASE_URL.trim()
       : undefined);
+  // ADR-010 connection-boundary guard (P3-1): production must never silently
+  // collapse the model-gateway DSN onto the shared DATABASE_URL. Scoped to
+  // when a model provider is configured AND `resolvedDatabaseUrl` is set —
+  // i.e. only when this instance would actually persist to PG (pure
+  // memory-mode/test bring-ups with a model client but no DATABASE_URL never
+  // touch model_invocations, so there is no boundary to collapse). When
+  // NODE_ENV==='production' and MODEL_GATEWAY_DATABASE_URL is unset OR
+  // identical to DATABASE_URL, model_invocations writes would run under the
+  // same principal as the api/worker pool, defeating the ADR-010
+  // disjoint-principal boundary. Fail-closed at construction, mirroring the
+  // AUTH_REQUIRED_IN_PROD guard above (same ALLOW_INSECURE_PROD escape).
+  // Dev/CI (non-prod) keeps the documented same-DSN fallback unconditionally.
+  // See docs/ops/sor-persistence.md (ADR-010).
+  if (
+    isProdEnv &&
+    resolvedModelClient &&
+    resolvedDatabaseUrl &&
+    (!resolvedModelGatewayDatabaseUrl || resolvedModelGatewayDatabaseUrl === resolvedDatabaseUrl)
+  ) {
+    if (!allowInsecureProd) {
+      throw new Error(
+        "[MODEL_GATEWAY_DSN_REQUIRED_IN_PROD] NODE_ENV=production but MODEL_GATEWAY_DATABASE_URL is unset or equals " +
+          "DATABASE_URL; refusing to start with a collapsed ADR-010 connection boundary. Configure a distinct " +
+          "MODEL_GATEWAY_DATABASE_URL authenticated as ai_crm_runtime_model_gateway, or set ALLOW_INSECURE_PROD=1 " +
+          "for an audited same-DSN bring-up.",
+      );
+    }
+    console.warn(
+      "[MODEL_GATEWAY_DSN_COLLAPSED_IN_PROD] NODE_ENV=production with MODEL_GATEWAY_DATABASE_URL unset/==DATABASE_URL " +
+        "but ALLOW_INSECURE_PROD is set; model_invocations writes will share the api/worker DSN, collapsing the " +
+        "ADR-010 role boundary. This is an audited insecure bring-up.",
+    );
+  }
   let pool: PgQueryable | undefined = options.pgPool;
   // Raw `pg.Pool` handle (pre-scoping-wrapper) kept only for onClose shutdown;
   // `pool` above may be `createScopedPgQueryable(rawPgPool)` once onReady runs.
@@ -628,6 +661,21 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   let hydratePmRepo: PmRepository | undefined;
   let hydrateFinanceReconRepo: FinanceReconciliationRepository | undefined;
   let hydrateDailyGateRepo: DailyGateRepository | undefined;
+  // Reports/ledger hydrate sources (P2-1): admin pool when configured, else
+  // the main runtime pool/store, mirroring the orch/gov/crm hydrate fallback
+  // above. Routing these through the admin/cross-workspace pool avoids the
+  // fail-closed `app_current_workspace_id()` RAISE that a NOBYPASSRLS runtime
+  // role would hit on the unscoped `listAllReports()`/`listAllEntries()` reads.
+  let hydrateReportsRepo: ReportRepository | undefined;
+  let hydrateLedgerRepo: LedgerRepository | undefined;
+  // Model-invocation hydrate source (P2-1, ADR-010 nuance): the per-request
+  // `modelGatewayPool` stays on the ai_crm_runtime_model_gateway role for
+  // WRITES (ADR-010 boundary, unchanged). The unscoped `listAllInvocations()`
+  // hydrate READ, however, is cross-workspace and would trip the same
+  // fail-closed RAISE under NOBYPASSRLS, so it is routed through the
+  // admin/cross-workspace pool when configured — never re-granted to
+  // api/worker, and model_invocations writes never use this pool.
+  let hydrateModelInvocationRepo: ModelInvocationRepository | undefined;
   // Cross-process eventing (N-09 / D6): opened in onReady only when a real
   // `databaseUrl`/`DATABASE_URL` pool is configured and `options.pgNotify`
   // is not explicitly `false`. See pg-notify.ts module doc comment.
@@ -659,6 +707,8 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     hydratePmRepo = pmRepo;
     hydrateFinanceReconRepo = financeReconRepo;
     hydrateDailyGateRepo = dailyGateRepo;
+    hydrateReportsRepo = reportsRepo;
+    hydrateLedgerRepo = ledgerRepo;
   }
 
   // Model-gateway pool (Q2 / D2, ADR-010 role separation): independent of
@@ -667,6 +717,9 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   if (modelGatewayPool) {
     modelInvocationRepo = createPgModelInvocationRepository(modelGatewayPool);
     persistenceMode = "pg";
+    // Fallback hydrate source when no adminDatabaseUrl is configured (dev
+    // default) — mirrors the `if (pool)` fallback above.
+    hydrateModelInvocationRepo = modelInvocationRepo;
   }
 
   const aiCrm: AiCrmRuntime = {
@@ -1123,13 +1176,23 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
       }
     }
 
-    // Admin pool (G-01 MEDIUM 4 role separation): opened only when
+    // Admin pool (G-01 MEDIUM 4 role separation; P2-1 extends this to
+    // reports/ledger/model-invocation hydrate reads): opened only when
     // resolvedAdminDatabaseUrl is configured, used ONLY for the
     // cross-workspace hydrate reads below. Per-request scoping keeps using
     // the main `pool` above; this pool is never wrapped with
     // createScopedPgQueryable because listAllControls/listAllIntents/
-    // listJobSnapshots() are intentionally unscoped (they read across every
-    // workspace and are expected to run under an admin-capable role).
+    // listJobSnapshots()/listAllReports()/listAllEntries()/listAllInvocations()
+    // are intentionally unscoped (they read across every workspace and are
+    // expected to run under an admin-capable role). Boot-time assertion:
+    // `await createdAdmin.query("select 1 as ok")` below fails loudly at
+    // construction if the DSN cannot even connect; if the configured role can
+    // connect but is NOT cross-workspace-capable (still subject to FORCE
+    // RLS/NOBYPASSRLS), the unscoped hydrate reads themselves trip the
+    // fail-closed `app_current_workspace_id()` RAISE and the onReady hydrate
+    // try/catch below rethrows as a boot-aborting Error — so a misconfigured
+    // admin role is never silently masked, only a correctly bypass-capable
+    // role lets boot proceed. See docs/ops/sor-persistence.md.
     if (resolvedAdminDatabaseUrl) {
       try {
         const pgModuleName = "pg";
@@ -1158,6 +1221,12 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
         hydratePmRepo = createPgPmRepository(adminQueryable);
         hydrateFinanceReconRepo = createPgFinanceReconciliationRepository(adminQueryable);
         hydrateDailyGateRepo = createPgDailyGateRepository(adminQueryable);
+        hydrateReportsRepo = createPgReportsRepository(adminQueryable);
+        hydrateLedgerRepo = createPgLedgerRepository(adminQueryable);
+        // ADR-010 nuance: this is the hydrate-on-boot READ only. model_invocations
+        // WRITES always go through the separate modelGatewayPool/ai_crm_runtime_model_gateway
+        // role below — never through adminQueryable.
+        hydrateModelInvocationRepo = createPgModelInvocationRepository(adminQueryable);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(
@@ -1330,38 +1399,53 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
         throw new Error(`hydrate-on-boot failed; restart-consistent SoR could not be established: ${message}`);
       }
     }
-    // Ledger hydrate-on-boot (PG-C1 / F6, PG-first fail-closed): independent
+    // Ledger hydrate-on-boot (PG-C1 / F6, PG-first fail-closed; P2-1 routes
+    // this through the admin/cross-workspace pool when configured): independent
     // of the orch/gov/crm hydrate condition above since the ledger requires
     // only `ledgerRepo` + a configured `financePack`/`ledger` instance, not
-    // the orchestration/governance repos.
+    // the orchestration/governance repos. Prefers hydrateLedgerRepo (admin
+    // pool) over the per-request NOBYPASSRLS-scoped ledgerRepo so a
+    // role-separated production deploy does not fail-closed-abort on the
+    // unscoped `listAllEntries()` read — see CreateAppOptions.adminDatabaseUrl doc.
     if (ledgerRepo && ledger) {
+      const hLedgerRepo = hydrateLedgerRepo ?? ledgerRepo;
       try {
-        const entries = await ledgerRepo.listAllEntries();
+        const entries = await hLedgerRepo.listAllEntries();
         ledger.hydrateJournalEntries(entries);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(`ledger hydrate-on-boot failed; restart-consistent SoR could not be established: ${message}`);
       }
     }
-    // Reports hydrate-on-boot (Q2 / D2): independent of the orch/gov/crm
-    // condition above — only needs `reportsRepo`. `snapshot`/`snapshotHash`
-    // round-trip verbatim (see ReportRepository doc); hydrate never
-    // recomputes the hash.
+    // Reports hydrate-on-boot (Q2 / D2; P2-1 routes this through the
+    // admin/cross-workspace pool when configured): independent of the
+    // orch/gov/crm condition above — only needs `reportsRepo`. `snapshot`/
+    // `snapshotHash` round-trip verbatim (see ReportRepository doc); hydrate
+    // never recomputes the hash. Prefers hydrateReportsRepo (admin pool) over
+    // the per-request NOBYPASSRLS-scoped reportsRepo — see CreateAppOptions.adminDatabaseUrl doc.
     if (reportsRepo) {
+      const hReportsRepo = hydrateReportsRepo ?? reportsRepo;
       try {
-        const allReports = await reportsRepo.listAllReports();
+        const allReports = await hReportsRepo.listAllReports();
         reports.hydrateSnapshots(allReports);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(`reports hydrate-on-boot failed; restart-consistent SoR could not be established: ${message}`);
       }
     }
-    // Model-invocation hydrate-on-boot (Q2 / D2, ADR-010-scoped connection):
-    // independent — only needs `modelInvocationRepo` + a configured
-    // `modelGateway` instance.
+    // Model-invocation hydrate-on-boot (Q2 / D2, ADR-010-scoped connection;
+    // P2-1 nuance): independent — only needs `modelInvocationRepo` + a
+    // configured `modelGateway` instance. The unscoped `listAllInvocations()`
+    // hydrate READ prefers hydrateModelInvocationRepo (admin/cross-workspace
+    // pool) over the per-request modelInvocationRepo — the latter is scoped to
+    // the ai_crm_runtime_model_gateway role, which is NOT cross-workspace-capable
+    // by ADR-010 design, so falling back to it in a role-separated production
+    // deploy would fail-closed-abort onReady. model_invocations WRITES are
+    // unaffected and always go through modelInvocationRepo/modelGatewayPool.
     if (modelInvocationRepo && modelGateway) {
+      const hModelInvocationRepo = hydrateModelInvocationRepo ?? modelInvocationRepo;
       try {
-        const allInvocations = await modelInvocationRepo.listAllInvocations();
+        const allInvocations = await hModelInvocationRepo.listAllInvocations();
         modelGateway.hydrateInvocations(allInvocations);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

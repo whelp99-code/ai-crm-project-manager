@@ -475,6 +475,21 @@ export const importRows = pgTable(
 // Model invocations (non-effect model-gateway audit boundary)
 // ---------------------------------------------------------------------------
 
+/**
+ * Column shapes match 0011_reports_model_invocations.sql's ALTERs, not
+ * 0001_foundation.sql's original speculative shape (P2-2 drift fix):
+ *  - `externalId` is the new lookup key (ModelGateway's own opaque
+ *    `ModelInvocationRecord.id`), unique + NOT NULL.
+ *  - `actionType` is new, NOT NULL, defaults to 'MODEL_INVOKE'.
+ *  - `principalId`/`correlationId` are opaque text (0011 dropped the
+ *    `principals` FK and widened uuid -> text — the gateway's service
+ *    principal and caller-supplied correlation id are never `principals` rows).
+ *  - `modelName` is nullable (0011 dropped NOT NULL; ModelInvocationRecord
+ *    carries no field distinct from `modelVersion`).
+ * Ownership/RLS/grants are untouched by 0011 (ADR-010 boundary preserved
+ * verbatim — model_invocations write grants stay ai_crm_runtime_model_gateway
+ * ONLY, never re-granted to api/worker; see schema.security.test.ts).
+ */
 export const modelInvocations = pgTable(
   "model_invocations",
   {
@@ -482,11 +497,11 @@ export const modelInvocations = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id),
-    principalId: uuid("principal_id")
-      .notNull()
-      .references(() => principals.id),
+    externalId: text("external_id").notNull(),
+    principalId: text("principal_id").notNull(),
     registryOperationId: text("registry_operation_id").notNull(),
-    modelName: text("model_name").notNull(),
+    actionType: text("action_type").notNull().default("MODEL_INVOKE"),
+    modelName: text("model_name"),
     modelVersion: text("model_version"),
     promptVersion: text("prompt_version"),
     structuredOutputSchemaVersion: text("structured_output_schema_version"),
@@ -494,11 +509,51 @@ export const modelInvocations = pgTable(
     responseDigest: text("response_digest"),
     retentionMode: text("retention_mode").notNull().default("zero_retention"),
     latencyMs: integer("latency_ms"),
-    correlationId: uuid("correlation_id").notNull(),
+    correlationId: text("correlation_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     workspaceIdx: index("model_invocations_workspace_idx").on(table.workspaceId),
+    externalIdUnique: uniqueIndex("model_invocations_external_id_key").on(table.externalId),
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Report snapshots (Q2 / D2) — see 0011_reports_model_invocations.sql
+// ---------------------------------------------------------------------------
+
+/**
+ * Immutable final-report snapshots (ReportService's SoR). `snapshot`/
+ * `snapshotHash` and every identity/submission column are frozen after
+ * INSERT by the 0011 `report_snapshots_immutability` trigger; only the
+ * decision lifecycle (`status`/`decidedByPrincipalId`/`decidedAt`/
+ * `rejectionReason`) plus `version`/`updatedAt` legitimately mutate. Unlike
+ * `modelInvocations`, no ADR-010 boundary applies — api/worker both get
+ * ordinary read-write grants (mirrors `crm_customers`).
+ */
+export const reportSnapshots = pgTable(
+  "report_snapshots",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
+    projectId: text("project_id").notNull(),
+    submittedByPrincipalId: text("submitted_by_principal_id").notNull(),
+    submittedAt: text("submitted_at").notNull(),
+    status: text("status").notNull(),
+    snapshot: jsonb("snapshot").notNull(),
+    snapshotHash: text("snapshot_hash").notNull(),
+    decidedByPrincipalId: text("decided_by_principal_id"),
+    decidedAt: text("decided_at"),
+    rejectionReason: text("rejection_reason"),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceIdx: index("report_snapshots_workspace_idx").on(table.workspaceId),
+    statusCheck: check("report_snapshots_status_check", sql`${table.status} IN ('SUBMITTED', 'APPROVED', 'REJECTED')`),
   }),
 );
 

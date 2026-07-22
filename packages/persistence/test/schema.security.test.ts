@@ -21,6 +21,7 @@ import {
   outboxEvents,
   policyDecisions,
   principals,
+  reportSnapshots,
   users,
   workspaces,
 } from "../src/schema.js";
@@ -80,10 +81,14 @@ const GOVERNANCE_SNAPSHOT_WORKSPACE_BOUND_TABLES = [
   orchGovernanceIntents,
 ] as const;
 
+/** Tables declared and FORCE-RLS'd in 0011_reports_model_invocations.sql. */
+const REPORTS_MODEL_INVOCATIONS_WORKSPACE_BOUND_TABLES = [reportSnapshots] as const;
+
 const WORKSPACE_BOUND_TABLES = [
   ...FOUNDATION_WORKSPACE_BOUND_TABLES,
   ...ORCH_WORKSPACE_BOUND_TABLES,
   ...GOVERNANCE_SNAPSHOT_WORKSPACE_BOUND_TABLES,
+  ...REPORTS_MODEL_INVOCATIONS_WORKSPACE_BOUND_TABLES,
 ] as const;
 
 const FOUNDATION_WORKSPACE_BOUND_TABLE_NAMES = FOUNDATION_WORKSPACE_BOUND_TABLES.map((table) =>
@@ -151,6 +156,7 @@ describe("table contracts", () => {
         "import_rows",
         "notifications",
         "outbox_events",
+        "report_snapshots",
       ]),
     );
   });
