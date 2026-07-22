@@ -16,7 +16,7 @@
 - **Pilot workflow:** ADR-001 **Option D** (worker+PG); Temporal은 merge Gate B 밖
 - **T-001 hard gate:** ADR-001 Option D 문구 + ADR-011/012(`resource_type`) 반영 전에는 T-002 코드 머지 금지
 - **만점 정의:** 단일 워크스페이스 실운영 파일럿 가능 Company OS (100점)
-- **현재 점수 (2026-07-21 Gate B FINAL):** AI-CRM **~99.6 (MET)** / 궤적 97.0→98.5→98.8→99.6 / baseline 63.4 · pilot gate ≥ 98 → **MET** · **N-06 observed-green 실 GitHub Actions 러너 관측 완료** (run 29808464201, conclusion success) · 15/15 goal 종결, human_blocker 없음 · see `04-SCORECARD.md` §3G
+- **현재 점수 (2026-07-22 P6-b + 스케일 정정):** AI-CRM **≈93.6 / 100 (정규화)** — ★정직 정정: §1.1 가중치 합이 100이 아니라 **110**이라 이전 절대치(…99.6)는 110-스케일을 /100으로 오표기해 ~10% 부풀려진 값이었음. 정규화 정본: §3G 90.6 → P6-b 후 **93.6**. P6-b(도메인 전면 PG + audit PG-primary + 모델 resilience + Alertmanager + CI matrix)는 전부 라이브 실증 + observed-green CI + Claude PASS로 랜딩; 그러나 **100도 ≥98도 아님**(스케일 오류 정정). PROVISIONAL: Claude red-team 재확정. see `04-SCORECARD.md` §3H
 - **승인 합의:** ralplan revision s3 `3967ba29…` · pending `1d3ac013…` (Architect CLEAR/APPROVE + Critic OKAY)
 
 ## 충돌 시 우선순위

@@ -447,6 +447,51 @@ Gate B ≥ 98 → MET (여유); N-06 관측으로 미청구 여유분까지 실�
 - 남은 human_blocker 없음. 15/15 goal 종결.
 - **100까지 잔여(전부 대형·비차단, 새 트랙):** 도메인 전면 PG(CRM sub-aggregate/PM/finance, D2/D4), audit 쓰기 PG-primary(D3), 모델 스트리밍/재시도(D7), Alertmanager/HA(D12), CI branch-protection/matrix(D10).
 
+## 3H. P6-b 도메인 전면 PG 재채점 + ★가중치 스케일 오류 정정 (2026-07-22)
+
+> **★정직 정정(중대):** 재채점 중 §1.1 "차원 가중치 (합 100)" 헤더가 **틀렸음**을 발견했다 — 실제 가중치 합은 **110** (D1 12 + D2 12 + D3 14 + D4 12 + D5 12 + D6 10 + D7 8 + D8 6 + D9 6 + D10 8 + D11 5 + D12 5 = 110; D1–D10만 100, D11+D12가 +10). `기여점 = (차원/5)×가중` 공식의 실질 만점은 **110**인데 모든 이전 절대점수(§3B–§3G: 89.0…**99.6**)를 "/100"으로 **오표기**해 왔다. 즉 이전 절대치는 **약 +10% 부풀려진 110-스케일 값**이다. P6-b 델타를 적용하면 legacy 원시합이 **102.9로 명목 100을 초과**해 이 오류가 스스로 드러난다. 조작 금지 원칙에 따라 여기서 표면화하고, **정규화(/100)** 값을 정본으로 삼는다.
+
+### 3H.1 P6-b 랜딩 (전부 라이브 실증 + observed-green CI + Claude PASS)
+- **G001 도메인 전면 PG (D2/D4):** 0007–0010 마이그레이션 15 신규 FORCE-RLS 테이블; CRM 세부(contracts/comms/nextActions/exceptions) + PM(plans[revisions jsonb]/assignments/targets/observations/exceptions) + delivery(projects[jsonb]) + finance(ledger[lines jsonb, status-aware immutability, PG-first, atomic reverse] / reconciliation[statement_row jsonb] / daily-gate[state-row restore]) 전부 PG-backed 재시작 생존. 정수-KRW scale-0 numeric(10^30 exact). LIVE 22/22, smoke 22테이블, observed CI. Claude PASS.
+- **G002 audit PG-primary (D3):** authorize/decide/consume PG-first fail-closed(unswallowed; 강제 PG 실패→5xx, 메모리 미커밋) + per-ws mutex(TOCTOU 종결, load-bearing). N-08 memory-primary 잔여 종결. Claude PASS.
+- **G003 모델 resilience (D7):** retry(transient만)+circuit-breaker(half-open single-probe)+full-attempt timeout(load-bearing)+opt-in streaming. 시크릿 미유출. Claude PASS.
+- **G004 Alertmanager+persistence (D12):** alert 발화→라우팅→webhook 수신 + silence가 force-recreate 생존(volume-backed). obs-drill 16 PASS. (안전: obs compose 격리로 ai_crm postgres 무손상 — 근접사고 복구.) Claude PASS.
+- **G005 CI node[20,22] matrix (D10):** observed-green run 29842406397 양쪽 leg success. branch-protection은 **human_blocked**(private+free 플랜 HTTP 403; Pro 또는 public 필요 — 사용자 결정).
+
+### 3H.2 차원 채점 (P6-b 후, 보수) — 정규화 /100
+| 차원 | 가중 | §3G | **§3H** | 기여(raw) | 근거 + 잔여 |
+|---|---:|---:|---:|---:|---|
+| D1 UX | 12 | 4.60 | 4.60 | 11.04 | (P6-b 미변경) |
+| D2 도메인 | 12 | 4.10 | **4.70** | 11.28 | +CRM세부/PM/delivery/finance 전부 PG 재시작생존; reports/model-gateway 애그리거트·boot hydrate 비용 잔여 |
+| D3 거버넌스·감사 | 14 | 4.82 | **4.90** | 13.72 | +audit PG-primary fail-closed+mutex; cancel/expire best-effort 잔여 |
+| D4 데이터·영속 | 12 | 4.55 | **4.85** | 11.64 | +거의 전 도메인 PG 재시작생존; boot hydrate 비용·일부 best-effort dual-write 잔여 |
+| D5 보안·테넌시 | 12 | 4.75 | 4.75 | 11.40 | (미변경) |
+| D6 런타임·신뢰성 | 10 | 4.50 | 4.50 | 9.00 | (미변경) |
+| D7 AI | 8 | 4.30 | **4.50** | 7.20 | +resilience(retry/breaker/timeout); streaming thin·비분산 breaker 잔여 |
+| D8 API·계약 | 6 | 4.42 | 4.42 | 5.30 | (미변경) |
+| D9 UI/UX | 6 | 4.13 | 4.13 | 4.96 | (미변경) |
+| D10 테스트·CI | 8 | 4.75 | **4.82** | 7.71 | +node[20,22] matrix observed-green; branch-protection human_blocked 잔여 |
+| D11 문서 | 5 | 4.85 | 4.85 | 4.85 | (미변경) |
+| D12 운영·배포 | 5 | 4.62 | **4.82** | 4.82 | +Alertmanager+persistence; HA/실채널/기본크레덴셜 잔여 |
+
+### 3H.3 계산 (정직, 이중 표기)
+```text
+raw 합 (가중합 110 기준) = 102.92
+정규화 /100 = 102.92 / 110 × 100 = 93.6
+
+참고(오류 노출): 이전 "99.6/100"은 실제 99.6/110 = 90.6 정규화값이었음.
+정규화 궤적(정본): 63.4스케일... → §3G 90.6 → §3H P6-b 93.6
+legacy 원시 궤적(부풀림, 참고): 96.2→97.6→(99.5철회)→97.0→98.5→98.8→99.6→102.9(>100, 오류 노출)
+```
+
+### 3H.4 판정 (정직)
+**정규화 /100 정본 점수: ≈ 93.6 / 100** (P6-b 도메인 전면 PG + audit PG-primary + resilience + Alertmanager + matrix로 §3G 90.6 → 93.6). **100 아님.**
+- ★**엔지니어링 성과는 진짜다:** P6-b 전 항목이 라이브 실증(LIVE_PG 22/22, obs-drill 16, model-resilience 11) + **observed-green CI 실 러너** + Claude 독립 PASS. 도메인 전면 PG·audit PG-primary·모델 resilience·Alertmanager·CI matrix 모두 실제 랜딩.
+- ★**그러나 절대점수는 정직하게 하향한다:** 이전 "Gate B ≥98 MET / 99.6"은 **가중치 합 110을 /100으로 오표기한 스케일 오류**로 ~10% 부풀려진 값이었다. 정규화하면 §3G는 90.6, P6-b 후는 **93.6**이다. Gate B의 ≥98 판정 자체가 이 스케일 오류에 의존했음을 인정한다.
+- **잔여 (정규화 100까지):** UX/UI 심화(D1/D9), 보안·런타임·API·문서 상향(D5/D6/D8/D11), branch-protection(D10 human_blocked), HA/실채널(D12), reports/model-gateway PG(D2), streaming/분산 breaker(D7), boot hydrate 최적화(D4).
+- **PROVISIONAL:** 이 정정+재채점을 **Claude 독립 red-team으로 재확정**한다. 스케일 정정이 맞는지, 93.6이 정직한지 검증받는다.
+- **후속(방법론):** §1.1 가중치를 실제 합 100으로 재정의하거나(예: D3 14→13 조정 등) 모든 절대치를 정규화 표기로 통일할 것.
+
 ## 4. AI-CRM → 100 갭 (Gate B 이후)
 
 | 차원 | 지금 기여 | 만점 | 갭 | 우선 |
@@ -630,3 +675,4 @@ Gate B **기능 체크리스트**는 상당 부분 충족(또는 문서/scaffold
 | 2026-07-20d | **~98.5 (MET prov.)** | Re-score after M1–M4 gap-closers (outbox drainer+at-least-once D3, deployed Prometheus scrape D12, wizard live-loop e2e D1/D9, real live model call D7) + P2 fixes (tsx locked, worker admin split); architect confirmed all 4 genuinely close their §3D-flagged gap with REAL live evidence; Gate B ≥98 MET (conservative 98.5, evidence-based not optimistic); N-06 observed-CI still human_blocked; PROVISIONAL pending Claude re-confirm |
 | 2026-07-20e | **~98.8 (MET CONFIRMED)** | Claude independent red-team #2 CONFIRMED §3E ≥98 (strict 98.03 / table 98.47, all 4 gap-closers reproduced REAL not mock, N-06 non-credit honest); then T1–T3 (G013–G015: outbox emission→delivery real acked consumer + no-loss regression [architect HIGH resolved], model default-wiring, Grafana dashboard+alerts) firmed the thin D3/D7/D12 → ~98.8 comfortable margin; not fabricated |
 | 2026-07-21 | **~99.6 (MET)** | N-06 OBSERVED: pushed host repo to private GitHub (whelp99-code/ai-crm-project-manager), CI green on a real GitHub Actions runner (run 29808464201, conclusion success — all steps incl live-pg + web e2e + restore-drill); D10 4.25→4.75 credited; human_blocker resolved; 15/15 goals complete; not fabricated (run URL attached) |
+| 2026-07-22 | **≈93.6 /100 (정규화)** | P6-b domain-PG + audit PG-primary + model resilience + Alertmanager + CI matrix ALL live-proven + observed-green CI + Claude PASS. ★CRITICAL HONEST CORRECTION: §1.1 weights sum to 110 not 100; all prior absolute scores were 110-scale mislabeled /100 (~+10% inflated). Normalized truth: §3G 90.6 -> P6-b 93.6. NOT >=98, NOT 100. Prior 'Gate B >=98 MET' depended on the scale error. PROVISIONAL pending Claude red-team |
