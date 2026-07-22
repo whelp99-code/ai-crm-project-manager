@@ -512,6 +512,60 @@ legacy 원시 궤적(부풀림, 참고): 96.2→97.6→(99.5철회)→97.0→98.
 - **엔지니어링 성과(진짜):** P6-b 도메인 전면 PG + audit PG-primary + 모델 resilience + Alertmanager + CI matrix 전부 라이브 실증 + observed-green 실 러너 CI + Claude 독립 재현.
 - **점수 정직성:** 이전 "Gate B ≥98 MET / 99.6"은 가중합 110을 /100으로 오표기한 스케일 오류에 의존; 정직 정규화는 **≈93**. Claude: "점수를 ~10%p 낮추는 방향의 자기신고 — 유리하게 조작할 동기가 있는 지점에서 스스로 표면화한 것은 정직성의 강한 증거."
 - **후속:** 채점 스크립트에 `가중 합 == 선언 만점` 어서션 추가; §1.1/§footer 정정 완료(이번 커밋).
+## 3I. Q1–Q3 continued-development re-score
+
+> **정직 고지:** 이 재채점의 기준점은 낙관적 §3H 표(93.6)가 아니라 Claude 보수 정본 **§3H.5 = raw 102.182 (표시 102.18) / 110 × 100 = 92.9**이다. 가중치 합은 **110**이며, `packages/persistence/scripts/scorecard-weight-check.mjs`가 이제 선언값과 실제 합이 모두 110인지 CI에서 fail-closed로 검사한다. 아래 Q1–Q3 신규 증거만 한 번씩 반영했으며, 기존 RLS/ADR 보존에는 중복 크레딧을 주지 않았다.
+| 분기 | 검증된 신규 증거 | 테스트·관측 아티팩트 |
+|---|---|---|
+| Q1 | reconciliation + daily-gate route가 `withWorkspaceMutex` 안에서 preview → atomic PG write → commit의 PG-first fail-closed 경로가 됨; 강제 second-write failure에서 두 테이블 0 rows 및 memory 미커밋을 증명. 이 두 money-adjacent 경로의 best-effort 잔여를 해소. | finance **44**; api **160 + 35 skip**; LIVE q1 **6/6**; smoke **PASS=21**; [run 29890276261](https://github.com/whelp99-code/ai-crm-project-manager/actions/runs/29890276261) — SHA `887976d9bf08a3814aa7ec6627267f254cf445a0`, node 20/22 `Package tests + web typecheck + e2e` 모두 success (weight-sum guard success 포함). |
+| Q2 | `report_snapshots` immutable snapshot/hash-verbatim 및 restart survival + FORCE RLS. `ai_crm_runtime_model_gateway` 전용 pool은 **의도되고 구성된** 경계이며 ADR-010 no-regrant/static role boundary는 증명됨. 개발 live test는 bootstrap superuser DSN 위의 별도 pool object를 사용할 수 있으므로, 실제 운영 현재 사용자(`current_user`)가 이 production principal임을 라이브로 증명한 것은 아니다; 그 identity 검증은 잔여다. | reports **22**; model-gateway **8**; api **160 + 37 skip**; LIVE q2 **2/2**; smoke **PASS=24**; [run 29891389673](https://github.com/whelp99-code/ai-crm-project-manager/actions/runs/29891389673) — SHA `6c47543c5a56196880fc7a7869c82852f8b95a5d`, node 20/22 success; [run 29892282513](https://github.com/whelp99-code/ai-crm-project-manager/actions/runs/29892282513) — SHA `d8ff679d70b86e12a8c114fe82c50ca176e933ae`, node 20/22 success; Claude **PASS**; schema.security **83/83**. |
+| Q3 | single-instance pilot-runbook + pilot-preflight가 runtime DSN이 BYPASSRLS/SUPERUSER가 아님을 검증하고, psql 부재는 block하며, live model은 distinct gateway DSN을 요구. 비밀값을 만들지 않으며 real alert channel/Grafana rotation/operator secrets는 미배선·not production-ready라고 명시. | dev preflight **exit 1** (정직한 차단); architect **CLEAR/APPROVE** (all P2/P3); Claude **PASS**; [run 29898496729](https://github.com/whelp99-code/ai-crm-project-manager/actions/runs/29898496729) — SHA `459a4fbb5cb32df50bb7c097db1bcb5fc90c8af9`, node 20/22 `Package tests + web typecheck + e2e` 모두 success. |
+
+### 3I.2 차원 재채점 (보수; raw는 `(score / 5) × weight`)
+
+| 차원 | §3H.5 기준 점수 | §3I 점수 | raw 기여 | Δ raw | 근거 / 잔여 |
+|---|---:|---:|---:|---:|---|
+| D1 제품 범위·시나리오 완결 | 4.60 | 4.60 | 11.04 | +0.00 | §3H.5 이후 범위·완주 UX 증거 없음; 비개발자 UX/onboarding 잔여. |
+| D2 도메인 모델 깊이 | 4.60 | 4.60 | 11.04 | +0.00 | Q2 persistence coverage는 D4에만 반영한다. 신규 domain rules/lifecycle/vertical depth는 없고, reports/model feature depth는 잔여다. |
+| D3 거버넌스·정책·감사 | 4.85 | 4.85 | 13.58 | +0.00 | §3H.5 unchanged: Q1 atomicity는 D4에만 반영; cancel/expire 등 durable audit 경로는 여전히 best-effort. |
+| D4 데이터·영속·일관성 | 4.75 | 4.82 | 11.57 | +0.17 | 정확 기여는 **11.568**(표시 11.57)이다. Q1 두 money-adjacent route의 atomic fail-closed·forced rollback, Q2 reports/model persistence와 prod-correct hydrate를 반영. boot-hydrate architecture 및 audit/cancel/expire/other write best-effort 잔여. |
+| D5 보안·테넌시·경계 | 4.75 | 4.75 | 11.40 | +0.00 | ADR-010/RLS와 re-grant 금지는 기존 불변식의 보존이며 신규 점수 아님; 실제 production runtime principal의 `current_user` identity 라이브 검증은 잔여. |
+| D6 실행 런타임·신뢰성 | 4.50 | 4.50 | 9.00 | +0.00 | §3H.5 unchanged: multi-instance distributed mutex/breaker/eventing 없음. |
+| D7 AI 통제 경로 | 4.50 | 4.50 | 7.20 | +0.00 | Q2 DSN guard는 persistence/security 경계 증거이지 AI control depth 증가가 아님; distributed breaker와 offline operator setup 잔여. |
+| D8 API·계약 | 4.42 | 4.42 | 5.30 | +0.00 | §3H.5 unchanged: Q1 route hardening은 API contract breadth 증가를 증명하지 않음; versioning/rate-limit enforcement 잔여. |
+| D9 UI/UX 완성 | 4.13 | 4.13 | 4.96 | +0.00 | §3H.5 unchanged: UX/UI 완주·운영 화면 증거 없음. |
+| D10 테스트·CI 품질 | 4.82 | 4.82 | 7.71 | +0.00 | 추가 observed CI는 증거 신뢰도를 보강하지만 이미 matrix credit된 차원의 점수 중복 증가 아님; branch protection은 human-blocked. |
+| D11 문서·결정 정합 | 4.85 | 4.90 | 4.90 | +0.05 | Q1 CI-enforced weight guard와 Q3의 한 곳에 모은 정직한 pilot runbook/preflight를 소폭 반영; operator 실행/sign-off 증거는 잔여. |
+| D12 운영·배포 준비 | 4.70 | 4.70 | 4.70 | +0.00 | Q3 docs/preflight는 D11에만 반영한다. real Alertmanager receiver, rotated Grafana credentials, HA, operator secret wiring은 없다. |
+| **합계** | **102.18 (정확 102.182)** | — | **102.40 (정확 102.400)** | **+0.22 (정확 +0.218)** | D4와 D11만 신규 반영; display-rounded baseline과 정확 산술을 구분. |
+
+### 3I.3 정확한 계산과 판정
+
+```text
+raw (exact) =
+  11.040 + 11.040 + 13.580 + 11.568 + 11.400 + 9.000 +
+  7.200 + 5.304 + 4.956 + 7.712 + 4.900 + 4.700
+  = 102.400 / 110
+
+normalized = 102.400 / 110 × 100 = 93.0909... = 93.1 / 100
+baseline (exact) = 102.182 raw (displayed 102.18)
+delta = +0.218 raw = +0.198 normalized points (displayed +0.22 raw / +0.20 normalized)
+```
+
+**판정: 3I 정규화 점수는 93.1 / 100이다. ≥98이 아니며, 100도 아니다.** Architect 101은 D2/D12 cross-credit을 거부했고 D4/D11만 반영했다. 목표값을 만들기 위한 점수 조정은 하지 않았다.
+
+정규화 100까지의 정직한 잔여: D2 report/model feature depth; UX/UI; D5 실제 production runtime-principal `current_user` 라이브 검증; multi-instance distributed mutex/breaker/eventing; D8 versioning/rate-limit enforcement; D11 operator 실행/sign-off 증거; D12 HA; real Alertmanager receiver와 rotated Grafana credentials; branch protection (human-blocked); audit/cancel/expire/other write의 남은 best-effort; boot-hydrate architecture; operator/model secrets.
+
+**FINAL 93.1 — Claude red-team #4 PASS:** 실제 `claude-haiku-4.5` 독립 호출이 D1–D12와 산술을 재계산하여 exact raw **102.400**, normalized **93.0909**를 확인했다. D4 `4.75→4.82`와 D11 `4.85→4.90`만 방어 가능하다고 채택했고, D2/D12 무증가·D5/D10 무중복 크레딧·잔여 목록의 완전성을 확인했다. category leakage, target-seeking, 조작된 ≥98/100은 없다고 판정했다. 비차단 권고는 Q1 forced second-write failure assertion의 직접 링크를 더 붙이는 것뿐이며 점수 이의는 아니다.
+**범위:** §3I은 §3H.5를 Q1–Q3 증거 범위에서만 supersede하며, 기존 이력은 재작성하지 않는다.
+
+### 3I.4 독립 검증 봉인
+
+- **Architect 101:** 초안 93.2의 D2/D12 cross-credit을 거부하고 D4/D11만 채택하여 93.1로 하향; 산술·잔여·CI provenance 보강 후 수정사항 반영.
+- **Claude red-team #4:** `claude-haiku-4.5` 실제 모델 게이트웨이 독립 검증 **PASS**. 채택 점수 `D1 4.60, D2 4.60, D3 4.85, D4 4.82, D5 4.75, D6 4.50, D7 4.50, D8 4.42, D9 4.13, D10 4.82, D11 4.90, D12 4.70`; exact raw `102.400`; normalized `93.0909`.
+- **방법론 guard:** `scorecard-weight-check.mjs`가 선언 최대와 D1–D12 실제 가중합의 동일성(`110 == 110`)을 CI에서 fail-closed로 검사한다.
+- **정본 판정:** **93.1 / 100 — ≥98 아님, 100 아님.**
+
 
 ## 4. AI-CRM → 100 갭 (Gate B 이후)
 
@@ -697,3 +751,4 @@ Gate B **기능 체크리스트**는 상당 부분 충족(또는 문서/scaffold
 | 2026-07-20e | **~98.8 (MET CONFIRMED)** | Claude independent red-team #2 CONFIRMED §3E ≥98 (strict 98.03 / table 98.47, all 4 gap-closers reproduced REAL not mock, N-06 non-credit honest); then T1–T3 (G013–G015: outbox emission→delivery real acked consumer + no-loss regression [architect HIGH resolved], model default-wiring, Grafana dashboard+alerts) firmed the thin D3/D7/D12 → ~98.8 comfortable margin; not fabricated |
 | 2026-07-21 | **~99.6 (MET)** | N-06 OBSERVED: pushed host repo to private GitHub (whelp99-code/ai-crm-project-manager), CI green on a real GitHub Actions runner (run 29808464201, conclusion success — all steps incl live-pg + web e2e + restore-drill); D10 4.25→4.75 credited; human_blocker resolved; 15/15 goals complete; not fabricated (run URL attached) |
 | 2026-07-22 | **≈93 /100 (정규화; 92.9–93.6)** | P6-b domain-PG + audit PG-primary + model resilience + Alertmanager + CI matrix ALL live-proven + observed-green CI + Claude PASS. ★CRITICAL HONEST CORRECTION: §1.1 weights sum to 110 not 100; all prior absolute scores were 110-scale mislabeled /100 (~+10% inflated). Normalized truth: §3G 90.6 -> P6-b 93.6. NOT >=98, NOT 100. Prior 'Gate B >=98 MET' depended on the scale error. Claude red-team #3 CONFIRMED (scale error real, correction right, its own #2 invalidated); conservative 92.9; §1.1 header+footer mislabels fixed |
+| 2026-07-22 | **93.1 /100 (정규화; FINAL, Claude PASS)** | §3I architect-corrected Q1–Q3 evidence-only re-score; exact §3H.5 baseline raw 102.182 (표시 102.18) → exact raw 102.400/110, normalized 93.0909… = 93.1. Architect rejected D2/D12 cross-credit; only D4 (+0.168 raw, 표시 +0.17) and D11 (+0.05) credited. Q1 atomic reconciliation/daily-gate; Q2 reports/model persistence (production-principal identity proof remains residual); Q3 honest pilot runbook/preflight. Claude red-team #4 (`claude-haiku-4.5`) independently recalculated D1–D12 and returned PASS: no category leakage, target-seeking, or fabricated ≥98/100. §3H.5 is superseded **only for Q1–Q3 evidence**; NOT ≥98, NOT 100. |
