@@ -77,6 +77,9 @@ jobs:
       - name: Test @ai-crm/worker
         run: pnpm --filter @ai-crm/worker test
 
+      - name: Scorecard §1.1 weight-sum guard (04-SCORECARD.md drift check)
+        run: node packages/persistence/scripts/scorecard-weight-check.mjs
+
       - name: Typecheck @ai-crm/web
         run: pnpm --filter @ai-crm/web exec tsc --noEmit
 

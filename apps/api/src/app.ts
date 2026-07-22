@@ -1940,8 +1940,11 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
         ...(typeof body.exceptionId === "string" ? { exceptionId: body.exceptionId } : {}),
       });
       if (financeReconRepo) {
-        await financeReconRepo.saveReconciliation(reconciliation);
-        if (exception) await financeReconRepo.saveException(exception);
+        // Atomic pair (P2 fix): reconciliation + its (VARIANCE-only)
+        // exception commit inside ONE withWorkspaceScope transaction, so a
+        // mid-way PG failure never leaves a reconciliation row without its
+        // exception (or vice versa) — see saveReconciliationWithException doc.
+        await financeReconRepo.saveReconciliationWithException(reconciliation, exception);
       }
       return recon.commitReconcile(reconciliation, exception);
     });
@@ -1995,12 +1998,13 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
         ...(body.backfilled === true ? { backfilled: true } : {}),
       });
       if (dailyGateRepo) {
-        await dailyGateRepo.appendDayRecord(ws, preview.finalRecord);
-        // Save machine state on EVERY recordDay (streak/lastDateEpoch always
-        // change), not just on a tier transition — a missed save between two
-        // transitions would otherwise make restoreState() stale by however
-        // many days elapsed since the last tier flip.
-        await dailyGateRepo.saveDailyGateState(ws, preview.state);
+        // Atomic pair (P2 fix): day record + resulting machine state (streak/
+        // tier/lastDateEpoch always change on recordDay) commit inside ONE
+        // withWorkspaceScope transaction — see appendDayRecordWithState doc.
+        // A mid-way PG failure never leaves a day record without its state
+        // update (or vice versa), which would otherwise diverge the
+        // DailyGate machine state from its own recorded history on restart.
+        await dailyGateRepo.appendDayRecordWithState(ws, preview.finalRecord, preview.state);
       }
       return gate.commitRecordDay(preview);
     });

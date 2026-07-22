@@ -66,7 +66,17 @@ const WS_FAIL_RECON = "b2222222-2222-2222-2222-222222222222";
 const WS_FAIL_DAY = "b3333333-3333-3333-3333-333333333333";
 const WS_CONCURRENT = "b4444444-4444-4444-4444-444444444444";
 const WS_CROSS_UNTOUCHED = "b5555555-5555-5555-5555-555555555555";
-const ALL_WS = [WS_HAPPY, WS_FAIL_RECON, WS_FAIL_DAY, WS_CONCURRENT, WS_CROSS_UNTOUCHED];
+const WS_FAIL_RECON_SECOND = "b6666666-6666-6666-6666-666666666666";
+const WS_FAIL_DAY_SECOND = "b7777777-7777-7777-7777-777777777777";
+const ALL_WS = [
+  WS_HAPPY,
+  WS_FAIL_RECON,
+  WS_FAIL_DAY,
+  WS_CONCURRENT,
+  WS_CROSS_UNTOUCHED,
+  WS_FAIL_RECON_SECOND,
+  WS_FAIL_DAY_SECOND,
+];
 
 const FINANCE_PACK: FinancePackConfig = {
   packVersion: 1,
@@ -520,6 +530,138 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
         const stateRow = await pool.query(`SELECT streak, tier FROM finance_daily_gate_state WHERE workspace_id = $1`, [WS_CONCURRENT]);
         expect((stateRow.rows[0] as { streak: number }).streak).toBe(dates.length);
         expect((stateRow.rows[0] as { tier: string }).tier).toBe("eligible");
+      } finally {
+        await pool.end();
+      }
+    },
+    60_000,
+  );
+  it(
+    "atomic rollback (P2 fix, load-bearing): a forced PG exception-INSERT failure (the SECOND write of the reconcile pair) still rolls back the ALREADY-SUCCEEDED reconciliation INSERT inside the SAME transaction -> 5xx, 0 rows in BOTH finance_reconciliations and finance_exceptions, memory (open exceptions) uncommitted. Fails against the pre-fix two-transaction code, where the reconciliation row would survive.",
+    async () => {
+      const { Pool } = (await import("pg")) as typeof import("pg");
+      const pool = new Pool({ connectionString: DATABASE_URL });
+      try {
+        const app = await bootApp({
+          pgPool: scopedQueryableFromPool(pool, {
+            failInsertForWorkspace: { workspaceId: WS_FAIL_RECON_SECOND, tableRegex: /INSERT\s+INTO\s+finance_exceptions/i },
+          }),
+          financePack: FINANCE_PACK,
+        });
+        expect((app as FastifyInstance & { aiCrm?: { persistenceMode: string } }).aiCrm?.persistenceMode).toBe("pg");
+
+        const beforeExceptions = await app.inject({
+          method: "GET",
+          url: "/api/finance/exceptions",
+          headers: { "x-workspace-id": WS_FAIL_RECON_SECOND },
+        });
+        expect((beforeExceptions.json() as unknown[]).length).toBe(0);
+
+        const doomed = await app.inject({
+          method: "POST",
+          url: "/api/finance/reconciliations",
+          headers: { "x-workspace-id": WS_FAIL_RECON_SECOND },
+          payload: {
+            id: "recon-second-write-doomed-1",
+            statementRow: { account: "1000", postedAt: "2026-03-06T09:00:00+09:00", amountKrw: "9000", rowFingerprint: "fp-second-write-doomed-1" },
+            ledgerAmountKrw: "8000",
+            reconciledByPrincipalId: "recon-operator-second-write",
+            reconciledAt: "2026-03-06T10:00:00.000Z",
+            exceptionId: "exc-second-write-doomed-1",
+          },
+        });
+        expect(doomed.statusCode).toBeGreaterThanOrEqual(500);
+        expect(doomed.statusCode).toBeLessThan(600);
+
+        // Memory MUST NOT advance: commitReconcile never ran.
+        const afterExceptions = await app.inject({
+          method: "GET",
+          url: "/api/finance/exceptions",
+          headers: { "x-workspace-id": WS_FAIL_RECON_SECOND },
+        });
+        expect((afterExceptions.json() as unknown[]).length).toBe(0);
+
+        // The load-bearing assertion: the reconciliation INSERT (the FIRST
+        // write) succeeded on the wire before the exception INSERT threw,
+        // but because both run on the SAME withWorkspaceScope transaction,
+        // the ROLLBACK undoes it too — 0 rows in BOTH tables, not just the
+        // exception table.
+        const reconRow = await pool.query(
+          `SELECT count(*)::int AS n FROM finance_reconciliations WHERE workspace_id = $1`,
+          [WS_FAIL_RECON_SECOND],
+        );
+        expect((reconRow.rows[0] as { n: number }).n).toBe(0);
+        const excRow = await pool.query(
+          `SELECT count(*)::int AS n FROM finance_exceptions WHERE workspace_id = $1`,
+          [WS_FAIL_RECON_SECOND],
+        );
+        expect((excRow.rows[0] as { n: number }).n).toBe(0);
+      } finally {
+        await pool.end();
+      }
+    },
+    60_000,
+  );
+
+  it(
+    "atomic rollback (P2 fix, load-bearing): a forced PG daily-gate-state-UPSERT failure (the SECOND write of the record-day pair) still rolls back the ALREADY-SUCCEEDED day-record INSERT inside the SAME transaction -> 5xx, 0 rows in BOTH finance_day_records and finance_daily_gate_state, memory (streak) uncommitted. Fails against the pre-fix two-transaction code, where the day-record row would survive.",
+    async () => {
+      const { Pool } = (await import("pg")) as typeof import("pg");
+      const pool = new Pool({ connectionString: DATABASE_URL });
+      try {
+        const app = await bootApp({
+          pgPool: scopedQueryableFromPool(pool, {
+            failInsertForWorkspace: { workspaceId: WS_FAIL_DAY_SECOND, tableRegex: /INSERT\s+INTO\s+finance_daily_gate_state/i },
+          }),
+          financePack: FINANCE_PACK,
+        });
+        expect((app as FastifyInstance & { aiCrm?: { persistenceMode: string } }).aiCrm?.persistenceMode).toBe("pg");
+
+        const beforeGate = await app.inject({
+          method: "GET",
+          url: "/api/finance/daily-gate",
+          headers: { "x-workspace-id": WS_FAIL_DAY_SECOND },
+        });
+        expect((beforeGate.json() as { streak: number }).streak).toBe(0);
+
+        const doomed = await app.inject({
+          method: "POST",
+          url: "/api/finance/daily-gate/days",
+          headers: { "x-workspace-id": WS_FAIL_DAY_SECOND },
+          payload: {
+            date: "2026-04-02",
+            importsCompleted: true,
+            entriesBalanced: true,
+            openFinanceExceptions: 0,
+            receivedAt: "2026-04-02T09:00:00+09:00",
+          },
+        });
+        expect(doomed.statusCode).toBeGreaterThanOrEqual(500);
+        expect(doomed.statusCode).toBeLessThan(600);
+
+        // Memory MUST NOT advance: commitRecordDay never ran.
+        const afterGate = await app.inject({
+          method: "GET",
+          url: "/api/finance/daily-gate",
+          headers: { "x-workspace-id": WS_FAIL_DAY_SECOND },
+        });
+        expect((afterGate.json() as { streak: number }).streak).toBe(0);
+
+        // The load-bearing assertion: the day-record INSERT (the FIRST
+        // write) succeeded on the wire before the state UPSERT threw, but
+        // because both run on the SAME withWorkspaceScope transaction, the
+        // ROLLBACK undoes it too — 0 rows in BOTH tables, not just the
+        // state table.
+        const dayRow = await pool.query(
+          `SELECT count(*)::int AS n FROM finance_day_records WHERE workspace_id = $1`,
+          [WS_FAIL_DAY_SECOND],
+        );
+        expect((dayRow.rows[0] as { n: number }).n).toBe(0);
+        const stateRow = await pool.query(
+          `SELECT count(*)::int AS n FROM finance_daily_gate_state WHERE workspace_id = $1`,
+          [WS_FAIL_DAY_SECOND],
+        );
+        expect((stateRow.rows[0] as { n: number }).n).toBe(0);
       } finally {
         await pool.end();
       }

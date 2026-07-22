@@ -52,15 +52,24 @@ const nextHeadingMatch = text.slice(sectionStart + 1).match(/\n#{2,3}\s/);
 const sectionEnd = nextHeadingMatch ? sectionStart + 1 + nextHeadingMatch.index : text.length;
 const section = text.slice(sectionStart, sectionEnd);
 
-// --- 2. Extract the declared max from the §1.1 header line itself. The
-// header states the weight sum in bold, e.g. "실제 합 **110**" (post-fix) or
-// "가중치 (합 100)" (the original, now-corrected, buggy form) — accept either
-// "합 100" / "합 **100**" / "합 <N>" shape, taking the FIRST bold or bare
-// integer immediately following "합". ---
+// --- 2. Extract the declared max from the §1.1 header line itself. Binds
+// to the CANONICAL value only — either the explicit "실제 합" (actual sum)
+// label (e.g. "실제 합 **110**" / "실제 합 110") or, failing that, a bolded
+// "합 **N**" figure — NEVER the first bare "합 N" occurrence. A header can
+// legitimately contain an earlier explanatory aside quoting a wrong
+// historical figure (e.g. "...원래 "합 100"이라 오표기됐으나... 실제 합
+// **110**..."); matching the first "합 N" blindly would silently pick up
+// that aside's "100" instead of the canonical "110" and false-fail this
+// guard against a correct table. See git history / §3H for the exact
+// "110 vs declared 100" incident this class of bug caused.
+// ---
 const headerLine = section.slice(0, section.indexOf("\n") === -1 ? section.length : section.indexOf("\n"));
-const declaredMatch = headerLine.match(/합\s*\**\s*(\d+)/);
+const declaredMatch =
+  headerLine.match(/실제\s*합\s*\**\s*(\d+)/) ?? headerLine.match(/합\s*\*\*(\d+)\*\*/);
 if (!declaredMatch) {
-  fail(`could not find a declared "합 <N>" (sum N) figure in the §1.1 header line: ${JSON.stringify(headerLine)}`);
+  fail(
+    `could not find a canonical "실제 합 <N>" or bolded "합 **<N>**" (sum N) figure in the §1.1 header line: ${JSON.stringify(headerLine)}`,
+  );
 }
 const declaredMax = Number(declaredMatch[1]);
 

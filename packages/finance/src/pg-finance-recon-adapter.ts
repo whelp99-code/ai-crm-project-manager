@@ -106,6 +106,18 @@ export interface FinanceExceptionRow {
 export interface FinanceReconciliationRepository {
   saveReconciliation(reconciliation: Reconciliation): Promise<void>;
   saveException(exception: FinanceException): Promise<void>;
+  /**
+   * Atomic two-row reconcile commit (mirrors `LedgerRepository.postEntryAtomic`):
+   * UPSERTs `reconciliation` and, when `exception` is supplied (a VARIANCE
+   * reconcile that opens a new exception), UPSERTs it too — both inside ONE
+   * `withWorkspaceScope` transaction, so a mid-way failure (e.g. the
+   * exception INSERT throwing) rolls back the reconciliation row as well.
+   * Prevents the "reconciliation persisted, exception lost" partial-commit
+   * window that a restart would otherwise silently paper over (hydrate
+   * re-adds the fingerprint to `reconciledFingerprints` while
+   * `openExceptions` returns `[]` for the missing exception).
+   */
+  saveReconciliationWithException(reconciliation: Reconciliation, exception?: FinanceException): Promise<void>;
   getReconciliationsForWorkspace(workspaceId: string): Promise<Reconciliation[]>;
   getExceptionsForWorkspace(workspaceId: string): Promise<FinanceException[]>;
   /** Hydrate-on-boot admin path: every persisted row across all workspaces. */
@@ -164,6 +176,12 @@ export class InMemoryFinanceReconciliationRepository implements FinanceReconcili
   async saveException(exception: FinanceException): Promise<void> {
     this.exceptions.set(`${exception.workspaceId}\0${exception.id}`, structuredClone(exception));
   }
+  async saveReconciliationWithException(reconciliation: Reconciliation, exception?: FinanceException): Promise<void> {
+    this.reconciliations.set(`${reconciliation.workspaceId}\0${reconciliation.id}`, structuredClone(reconciliation));
+    if (exception) {
+      this.exceptions.set(`${exception.workspaceId}\0${exception.id}`, structuredClone(exception));
+    }
+  }
 
   async getReconciliationsForWorkspace(workspaceId: string): Promise<Reconciliation[]> {
     return [...this.reconciliations.values()]
@@ -205,70 +223,89 @@ class PgFinanceReconciliationRepository implements FinanceReconciliationReposito
     return fn(this.db);
   }
 
+  private async insertReconciliation(db: PgQueryable, reconciliation: Reconciliation): Promise<void> {
+    await db.query(
+      `INSERT INTO finance_reconciliations (
+         id, workspace_id, statement_row, ledger_amount_krw, variance_krw,
+         status, reconciled_by_principal_id, reconciled_at, exception_id, version
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1)
+       ON CONFLICT (id) DO UPDATE SET
+         statement_row = EXCLUDED.statement_row,
+         ledger_amount_krw = EXCLUDED.ledger_amount_krw,
+         variance_krw = EXCLUDED.variance_krw,
+         status = EXCLUDED.status,
+         reconciled_by_principal_id = EXCLUDED.reconciled_by_principal_id,
+         reconciled_at = EXCLUDED.reconciled_at,
+         exception_id = EXCLUDED.exception_id,
+         version = finance_reconciliations.version + 1,
+         updated_at = now()`,
+      [
+        reconciliation.id,
+        reconciliation.workspaceId,
+        JSON.stringify(reconciliation.statementRow),
+        reconciliation.ledgerAmountKrw,
+        reconciliation.varianceKrw,
+        reconciliation.status,
+        reconciliation.reconciledByPrincipalId,
+        reconciliation.reconciledAt,
+        reconciliation.exceptionId ?? null,
+      ],
+    );
+  }
+
   async saveReconciliation(reconciliation: Reconciliation): Promise<void> {
-    await this.scoped(reconciliation.workspaceId, (db) =>
-      db.query(
-        `INSERT INTO finance_reconciliations (
-           id, workspace_id, statement_row, ledger_amount_krw, variance_krw,
-           status, reconciled_by_principal_id, reconciled_at, exception_id, version
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1)
-         ON CONFLICT (id) DO UPDATE SET
-           statement_row = EXCLUDED.statement_row,
-           ledger_amount_krw = EXCLUDED.ledger_amount_krw,
-           variance_krw = EXCLUDED.variance_krw,
-           status = EXCLUDED.status,
-           reconciled_by_principal_id = EXCLUDED.reconciled_by_principal_id,
-           reconciled_at = EXCLUDED.reconciled_at,
-           exception_id = EXCLUDED.exception_id,
-           version = finance_reconciliations.version + 1,
-           updated_at = now()`,
-        [
-          reconciliation.id,
-          reconciliation.workspaceId,
-          JSON.stringify(reconciliation.statementRow),
-          reconciliation.ledgerAmountKrw,
-          reconciliation.varianceKrw,
-          reconciliation.status,
-          reconciliation.reconciledByPrincipalId,
-          reconciliation.reconciledAt,
-          reconciliation.exceptionId ?? null,
-        ],
-      ),
+    await this.scoped(reconciliation.workspaceId, (db) => this.insertReconciliation(db, reconciliation));
+  }
+
+  private async insertException(db: PgQueryable, exception: FinanceException): Promise<void> {
+    await db.query(
+      `INSERT INTO finance_exceptions (
+         id, workspace_id, kind, reconciliation_id, variance_krw, status,
+         opened_at, resolved_by_principal_id, resolved_at, resolution_note, version
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1)
+       ON CONFLICT (id) DO UPDATE SET
+         kind = EXCLUDED.kind,
+         reconciliation_id = EXCLUDED.reconciliation_id,
+         variance_krw = EXCLUDED.variance_krw,
+         status = EXCLUDED.status,
+         opened_at = EXCLUDED.opened_at,
+         resolved_by_principal_id = EXCLUDED.resolved_by_principal_id,
+         resolved_at = EXCLUDED.resolved_at,
+         resolution_note = EXCLUDED.resolution_note,
+         version = finance_exceptions.version + 1,
+         updated_at = now()`,
+      [
+        exception.id,
+        exception.workspaceId,
+        exception.kind,
+        exception.reconciliationId,
+        exception.varianceKrw,
+        exception.status,
+        exception.openedAt,
+        exception.resolvedByPrincipalId ?? null,
+        exception.resolvedAt ?? null,
+        exception.resolutionNote ?? null,
+      ],
     );
   }
 
   async saveException(exception: FinanceException): Promise<void> {
-    await this.scoped(exception.workspaceId, (db) =>
-      db.query(
-        `INSERT INTO finance_exceptions (
-           id, workspace_id, kind, reconciliation_id, variance_krw, status,
-           opened_at, resolved_by_principal_id, resolved_at, resolution_note, version
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1)
-         ON CONFLICT (id) DO UPDATE SET
-           kind = EXCLUDED.kind,
-           reconciliation_id = EXCLUDED.reconciliation_id,
-           variance_krw = EXCLUDED.variance_krw,
-           status = EXCLUDED.status,
-           opened_at = EXCLUDED.opened_at,
-           resolved_by_principal_id = EXCLUDED.resolved_by_principal_id,
-           resolved_at = EXCLUDED.resolved_at,
-           resolution_note = EXCLUDED.resolution_note,
-           version = finance_exceptions.version + 1,
-           updated_at = now()`,
-        [
-          exception.id,
-          exception.workspaceId,
-          exception.kind,
-          exception.reconciliationId,
-          exception.varianceKrw,
-          exception.status,
-          exception.openedAt,
-          exception.resolvedByPrincipalId ?? null,
-          exception.resolvedAt ?? null,
-          exception.resolutionNote ?? null,
-        ],
-      ),
-    );
+    await this.scoped(exception.workspaceId, (db) => this.insertException(db, exception));
+  }
+
+  /**
+   * Atomic two-row reconcile commit — see `FinanceReconciliationRepository`
+   * doc. Both writes run on the SAME scoped connection/transaction (one
+   * `withWorkspaceScope` call), so a failure on either statement rolls back
+   * both.
+   */
+  async saveReconciliationWithException(reconciliation: Reconciliation, exception?: FinanceException): Promise<void> {
+    await this.scoped(reconciliation.workspaceId, async (db) => {
+      await this.insertReconciliation(db, reconciliation);
+      if (exception) {
+        await this.insertException(db, exception);
+      }
+    });
   }
 
   async getReconciliationsForWorkspace(workspaceId: string): Promise<Reconciliation[]> {
@@ -348,6 +385,17 @@ export interface DailyGateRepository {
   saveDailyGateState(workspaceId: string, state: DailyGateStateInput): Promise<void>;
   getDailyGateState(workspaceId: string): Promise<DailyGateStateInput | undefined>;
   appendDayRecord(workspaceId: string, record: AppendDayRecordInput): Promise<void>;
+  /**
+   * Atomic two-row record-day commit (mirrors `LedgerRepository.postEntryAtomic`
+   * / `FinanceReconciliationRepository.saveReconciliationWithException`):
+   * INSERTs `record` and UPSERTs the resulting machine `state` — both inside
+   * ONE `withWorkspaceScope` transaction, so a mid-way failure (e.g. the
+   * state UPSERT throwing) rolls back the day-record row as well. Prevents
+   * a day record persisting without its streak/tier state update (or vice
+   * versa), which would otherwise diverge the DailyGate machine state from
+   * its own recorded history after a restart.
+   */
+  appendDayRecordWithState(workspaceId: string, record: AppendDayRecordInput, state: DailyGateStateInput): Promise<void>;
   listDayRecords(workspaceId: string): Promise<DayRecord[]>;
   /** Hydrate-on-boot admin path: every persisted state row across all workspaces. */
   listAllDailyGateStates(): Promise<Array<{ workspaceId: string } & DailyGateStateInput>>;
@@ -399,6 +447,14 @@ export class InMemoryDailyGateRepository implements DailyGateRepository {
       ...(record.reason !== undefined ? { reason: record.reason } : {}),
     });
   }
+  async appendDayRecordWithState(
+    workspaceId: string,
+    record: AppendDayRecordInput,
+    state: DailyGateStateInput,
+  ): Promise<void> {
+    await this.appendDayRecord(workspaceId, record);
+    await this.saveDailyGateState(workspaceId, state);
+  }
 
   async listDayRecords(workspaceId: string): Promise<DayRecord[]> {
     return [...this.dayRecords.entries()]
@@ -445,10 +501,9 @@ class PgDailyGateRepository implements DailyGateRepository {
     return fn(this.db);
   }
 
-  async saveDailyGateState(workspaceId: string, state: DailyGateStateInput): Promise<void> {
-    await this.scoped(workspaceId, (db) =>
-      db.query(
-        `INSERT INTO finance_daily_gate_state (workspace_id, streak, tier, last_date_epoch, activated_matrix_version, version)
+  private async upsertDailyGateState(db: PgQueryable, workspaceId: string, state: DailyGateStateInput): Promise<void> {
+    await db.query(
+      `INSERT INTO finance_daily_gate_state (workspace_id, streak, tier, last_date_epoch, activated_matrix_version, version)
          VALUES ($1,$2,$3,$4,$5,1)
          ON CONFLICT (workspace_id) DO UPDATE SET
            streak = EXCLUDED.streak,
@@ -457,15 +512,18 @@ class PgDailyGateRepository implements DailyGateRepository {
            activated_matrix_version = EXCLUDED.activated_matrix_version,
            version = finance_daily_gate_state.version + 1,
            updated_at = now()`,
-        [
-          workspaceId,
-          state.streak,
-          state.tier,
-          state.lastDateEpoch ?? null,
-          state.activatedMatrixVersion ?? null,
-        ],
-      ),
+      [
+        workspaceId,
+        state.streak,
+        state.tier,
+        state.lastDateEpoch ?? null,
+        state.activatedMatrixVersion ?? null,
+      ],
     );
+  }
+
+  async saveDailyGateState(workspaceId: string, state: DailyGateStateInput): Promise<void> {
+    await this.scoped(workspaceId, (db) => this.upsertDailyGateState(db, workspaceId, state));
   }
 
   async getDailyGateState(workspaceId: string): Promise<DailyGateStateInput | undefined> {
@@ -476,15 +534,34 @@ class PgDailyGateRepository implements DailyGateRepository {
     return row ? mapDailyGateStateRow(row) : undefined;
   }
 
-  async appendDayRecord(workspaceId: string, record: AppendDayRecordInput): Promise<void> {
-    await this.scoped(workspaceId, (db) =>
-      db.query(
-        `INSERT INTO finance_day_records (workspace_id, date, qualifying, reason, streak_after, tier_after)
+  private async insertDayRecord(db: PgQueryable, workspaceId: string, record: AppendDayRecordInput): Promise<void> {
+    await db.query(
+      `INSERT INTO finance_day_records (workspace_id, date, qualifying, reason, streak_after, tier_after)
          VALUES ($1,$2,$3,$4,$5,$6)
          ON CONFLICT (workspace_id, date) DO NOTHING`,
-        [workspaceId, record.date, record.qualifying, record.reason ?? null, record.streakAfter, record.tierAfter],
-      ),
+      [workspaceId, record.date, record.qualifying, record.reason ?? null, record.streakAfter, record.tierAfter],
     );
+  }
+
+  async appendDayRecord(workspaceId: string, record: AppendDayRecordInput): Promise<void> {
+    await this.scoped(workspaceId, (db) => this.insertDayRecord(db, workspaceId, record));
+  }
+
+  /**
+   * Atomic two-row record-day commit — see `DailyGateRepository` doc. Both
+   * writes run on the SAME scoped connection/transaction (one
+   * `withWorkspaceScope` call), so a failure on either statement rolls back
+   * both.
+   */
+  async appendDayRecordWithState(
+    workspaceId: string,
+    record: AppendDayRecordInput,
+    state: DailyGateStateInput,
+  ): Promise<void> {
+    await this.scoped(workspaceId, async (db) => {
+      await this.insertDayRecord(db, workspaceId, record);
+      await this.upsertDailyGateState(db, workspaceId, state);
+    });
   }
 
   async listDayRecords(workspaceId: string): Promise<DayRecord[]> {
