@@ -85,3 +85,36 @@ DATABASE_URL=postgres://ai_crm:ai_crm_dev@localhost:5432/ai_crm LIVE_PG_TEST=1 \
   that role is missing those specific checks report `SKIP`, not `PASS`, while
   the FORCE RLS/policy/function checks still run and can still fail the
   script.
+
+
+## D10: node build matrix + branch protection (P6-b PG-G)
+
+### node build matrix (DONE, observed-green)
+`.github/workflows/ci.yml` runs the `test` job as a matrix over **node [20, 22]** on `ubuntu-latest` with `fail-fast: false`, so every push gets a cross-node-version signal (offline suites + web tsc + playwright e2e + pg-rls-smoke + live-pg gated + restore-drill on each leg). Observed-green on the real GitHub Actions runner:
+- Run `29842406397` — conclusion **success**, both legs green:
+  - `Package tests + web typecheck + e2e (node 20)` — success
+  - `Package tests + web typecheck + e2e (node 22)` — success
+- URL: https://github.com/whelp99-code/ai-crm-project-manager/actions/runs/29842406397
+
+### branch protection required status check (HUMAN-BLOCKED — GitHub plan)
+Configuring a required-status-check on `master` (so a PR cannot merge unless both matrix legs pass) is **blocked by a GitHub platform limitation**, not by this repo:
+
+```
+PUT /repos/whelp99-code/ai-crm-project-manager/branches/master/protection
+-> HTTP 403 "Upgrade to GitHub Pro or make this repository public to enable this feature."
+```
+
+The repo is **private** on the **free** plan; branch protection (classic) and rulesets are Pro-gated for private repos. This is a **user decision** (the agent kept the repo private to protect the code and will not change visibility or purchase a plan unilaterally). To enable it, the user must EITHER:
+1. Upgrade the GitHub account to **Pro** (keeps the repo private), OR
+2. Make the repo **public** (branch protection then works on the free plan — exposes the code).
+
+Once enabled, set it with:
+```bash
+gh api -X PUT repos/whelp99-code/ai-crm-project-manager/branches/master/protection \
+  -f 'required_status_checks[strict]=true' \
+  -f 'required_status_checks[contexts][]=Package tests + web typecheck + e2e (node 20)' \
+  -f 'required_status_checks[contexts][]=Package tests + web typecheck + e2e (node 22)' \
+  -f 'enforce_admins=false' -f 'required_pull_request_reviews=' -f 'restrictions='
+```
+
+**Honest status:** the node matrix (the substantive D10 lift) is delivered + observed-green; the required-status-check *enforcement* is human-blocked on the GitHub plan/visibility decision.
