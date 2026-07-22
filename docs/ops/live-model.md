@@ -1,5 +1,8 @@
 # Live model call (D7): real Azure OpenAI ModelClient
 
+See `docs/ops/pilot-runbook.md` section (d) for the pilot secret-management
+checklist (env-only, never commit, rotate) that applies these vars.
+
 Closes the "zero live model calls, mock only" gap. Every existing test in
 this repo (offline default) still injects a deterministic mock `ModelClient`
 into `createApp({ modelClient })`, or sets no client/provider at all — this

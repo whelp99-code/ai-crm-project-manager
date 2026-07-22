@@ -1,5 +1,9 @@
 # Observability — Prometheus scrape, alert rules, and Grafana dashboard (D12)
 
+See `docs/ops/pilot-runbook.md` section (c) for the honest pilot-hardening
+requirement to replace the shipped drill webhook-catcher receiver and rotate
+Grafana's default `admin`/`admin` credentials before any real pilot.
+
 ## Status before this change
 
 `GET /metrics` (and `GET /metrics/prometheus`, Prometheus text exposition —

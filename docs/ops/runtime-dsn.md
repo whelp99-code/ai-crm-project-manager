@@ -1,5 +1,9 @@
 # Runtime-role DSN, admin DSN split, and production auth/finance requirements (G-05)
 
+See `docs/ops/pilot-runbook.md` section (b) for the exact, copy-paste pilot
+env block (with `CHANGE_ME` placeholders) that applies this DSN split, plus
+`packages/persistence/scripts/pilot-preflight.sh`, which verifies it live.
+
 This doc is the operator-facing summary of "what DSN goes where, and what
 must be configured before `apps/api` runs in production." It ties together
 three already-implemented contracts:
