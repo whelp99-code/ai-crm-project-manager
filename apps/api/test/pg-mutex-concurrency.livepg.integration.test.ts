@@ -112,14 +112,20 @@ async function bootApp(options: CreateAppOptions): Promise<FastifyInstance> {
  * same way `apps/api/src/app.ts`'s `createScopedPgQueryable` does — mirrors
  * `pg-d-audit-primary.livepg.integration.test.ts`'s `scopedQueryableFromPool`.
  *
- * `delayMsForWorkspace`, when set, sleeps BEFORE every statement scoped to
- * that exact workspace id (inside the transaction, so it holds up only that
- * workspace's PG write) — used to prove the per-workspace mutex never
- * blocks an unrelated workspace's request behind a slow one.
+ * `writeGateForWorkspace`, when set, stops the matching workspace after its
+ * transaction scope is established but before its scoped PG work starts. It
+ * lets the cross-workspace test prove ordering without relying on elapsed
+ * wall-clock time.
  */
 function scopedQueryableFromPool(
   pool: import("pg").Pool,
-  options?: { delayMsForWorkspace?: { workspaceId: string; delayMs: number } },
+  options?: {
+    writeGateForWorkspace?: {
+      workspaceId: string;
+      entered: () => void;
+      release: Promise<void>;
+    };
+  },
 ): PgQueryable {
   return {
     async query<T = unknown>(text: string, params?: unknown[]) {
@@ -131,8 +137,10 @@ function scopedQueryableFromPool(
       try {
         await client.query("BEGIN");
         await client.query("SELECT set_config('app.workspace_id', $1, true)", [workspaceId]);
-        if (options?.delayMsForWorkspace?.workspaceId === workspaceId) {
-          await new Promise((resolve) => setTimeout(resolve, options.delayMsForWorkspace!.delayMs));
+        const writeGate = options?.writeGateForWorkspace;
+        if (writeGate?.workspaceId === workspaceId) {
+          writeGate.entered();
+          await writeGate.release;
         }
         const scoped: PgQueryable = {
           async query<T2 = unknown>(text: string, params?: unknown[]) {
@@ -486,16 +494,28 @@ describe.skipIf(!LIVE)("PG mutex concurrency (P6-b G002 / PG-D architect P2 fix)
     async () => {
       const { Pool } = (await import("pg")) as typeof import("pg");
       const pool = new Pool({ connectionString: DATABASE_URL });
+      let signalSlowEntered!: () => void;
+      const slowEntered = new Promise<void>((resolve) => {
+        signalSlowEntered = resolve;
+      });
+      let releaseSlow!: () => void;
+      const slowWriteRelease = new Promise<void>((resolve) => {
+        releaseSlow = resolve;
+      });
+      let slowCompleted = false;
+      let slowPromise: Promise<{ statusCode: number }> | undefined;
       try {
-        const SLOW_DELAY_MS = 500;
         const app = await bootApp({
           pgPool: scopedQueryableFromPool(pool, {
-            delayMsForWorkspace: { workspaceId: WS_CROSS_SLOW, delayMs: SLOW_DELAY_MS },
+            writeGateForWorkspace: {
+              workspaceId: WS_CROSS_SLOW,
+              entered: signalSlowEntered,
+              release: slowWriteRelease,
+            },
           }),
         });
 
-        const startedAt = Date.now();
-        const slowPromise = app.inject({
+        slowPromise = app.inject({
           method: "POST",
           url: "/api/governance/authorize",
           headers: { "x-workspace-id": WS_CROSS_SLOW },
@@ -506,7 +526,11 @@ describe.skipIf(!LIVE)("PG mutex concurrency (P6-b G002 / PG-D architect P2 fix)
             payload: { message: "hi" },
             requesterPrincipalId: OPERATOR,
           },
+        }).finally(() => {
+          slowCompleted = true;
         });
+        await slowEntered;
+
         const fastResponse = await app.inject({
           method: "POST",
           url: "/api/governance/authorize",
@@ -519,18 +543,19 @@ describe.skipIf(!LIVE)("PG mutex concurrency (P6-b G002 / PG-D architect P2 fix)
             requesterPrincipalId: OPERATOR,
           },
         });
-        const fastElapsedMs = Date.now() - startedAt;
 
         expect(fastResponse.statusCode).toBe(201);
-        // The unrelated workspace's request completed well before the slow
-        // workspace's artificial PG-write delay would allow — a global lock
-        // would have serialized it behind the slow request and pushed this
-        // past SLOW_DELAY_MS.
-        expect(fastElapsedMs).toBeLessThan(SLOW_DELAY_MS);
-
-        const slowResponse = await slowPromise;
-        expect(slowResponse.statusCode).toBe(201);
+        // The fast request completed while the slow workspace remained held at
+        // its PG-write gate. A global mutex would have blocked it behind slow.
+        expect(slowCompleted).toBe(false);
       } finally {
+        // Always unblock and drain the held request before closing the pool,
+        // including when a preceding assertion fails.
+        releaseSlow();
+        if (slowPromise) {
+          const slowResponse = await slowPromise;
+          expect(slowResponse.statusCode).toBe(201);
+        }
         await pool.end();
       }
     },
