@@ -12,7 +12,7 @@
 
 ## 1. 채점 모델
 
-### 1.1 차원 가중치 (합 100)
+### 1.1 차원 가중치 (실제 합 **110** — ★정정: 헤더가 원래 "합 100"이라 오표기됐으나 D1–D12 가중 합은 110이다; §3H 참조. 절대 총점은 정규화 `Σ기여점 / 110 × 100`으로 읽어야 한다)
 
 | ID | 차원 | 가중 |
 |---|---|---:|
@@ -31,7 +31,7 @@
 
 차원 점수 0–5.  
 `기여점 = (차원/5) × 가중`.  
-`총점 = Σ 기여점` (0–100).
+`총점 = Σ 기여점` (raw 0–**110**). ★정정: 가중 합이 110이므로 raw Σ의 범위는 0–110이다. **정본 절대점수는 정규화 `Σ / 110 × 100` (0–100)**로 읽는다 (§3H).
 
 ### 1.2 만점(100) 조건
 
@@ -492,6 +492,27 @@ legacy 원시 궤적(부풀림, 참고): 96.2→97.6→(99.5철회)→97.0→98.
 - **PROVISIONAL:** 이 정정+재채점을 **Claude 독립 red-team으로 재확정**한다. 스케일 정정이 맞는지, 93.6이 정직한지 검증받는다.
 - **후속(방법론):** §1.1 가중치를 실제 합 100으로 재정의하거나(예: D3 14→13 조정 등) 모든 절대치를 정규화 표기로 통일할 것.
 
+### 3H.5 Claude 독립 red-team #3 확정 (정본)
+
+**Claude 판정: 스케일 오류 실재 확인, 정정이 옳다.** Claude 직접 재현: LIVE_PG 6파일 16 passed(mutex per-workspace 실증), smoke PASS=21(policies 22/22), model-resilience 11 passed, observed CI run 29842406397 node[20,22] matrix success. 핵심 확인 4가지:
+1. **가중 합 = 110** (D1–D10=100, D11+D12=+10). 문서 오류 2곳 박제 확인(§1.1 헤더 + `총점 Σ(0–100)` footer) → **정정 완료**.
+2. **정규화 검산 일치**: raw 102.92 / 110 × 100 = 93.57.
+3. **역대 ≥98 MET는 전부 이 오류 의존** — 정규화 시 어느 시점도 ≥98 도달한 적 없음: §3B 89.0→**80.9**, §3D 99.5→**90.5**, §3E 98.5→**89.5**, §3G 99.6→**90.5**. Claude는 **자신의 red-team #2 '≥98 MET 지지' 판정도 이 오류로 무효**임을 인정(Σ만 검산·분모 미의심).
+4. **P6-b 엔지니어링은 실재** — 위 라이브 재현으로 확인. "점수는 부풀려졌으나 엔지니어링은 진짜"라는 이중 서술 정확.
+
+**약한 낙관 정정(Claude 보수 채택):** D2 4.70→**4.60**(도메인 '깊이'이지 영속 커버리지 아님; reports/model-gateway 미포함), D3 4.90→**4.85**(outbox emission-only 잔여), D4 4.85→**4.75**(best-effort dual-write·boot hydrate 잔여), D12 4.82→**4.70**(HA·실채널·기본크레덴셜 없음). D7 4.50·D10 4.82는 정당(유지).
+
+```text
+보수 raw = 11.04+11.04+13.58+11.40+11.40+9.00+7.20+5.30+4.96+7.71+4.85+4.70 = 102.18
+보수 정규화 /100 = 102.18 / 110 × 100 = 92.9
+```
+
+### ★정본 판정 (Claude #3 확정)
+**정규화 절대점수 ≈ 93 / 100 (보수 92.9 – 표값 93.6).** — **≥98 아님, 100 아님. 정규화하면 이 프로젝트는 어느 시점에도 ≥98에 도달한 적이 없다.**
+- **엔지니어링 성과(진짜):** P6-b 도메인 전면 PG + audit PG-primary + 모델 resilience + Alertmanager + CI matrix 전부 라이브 실증 + observed-green 실 러너 CI + Claude 독립 재현.
+- **점수 정직성:** 이전 "Gate B ≥98 MET / 99.6"은 가중합 110을 /100으로 오표기한 스케일 오류에 의존; 정직 정규화는 **≈93**. Claude: "점수를 ~10%p 낮추는 방향의 자기신고 — 유리하게 조작할 동기가 있는 지점에서 스스로 표면화한 것은 정직성의 강한 증거."
+- **후속:** 채점 스크립트에 `가중 합 == 선언 만점` 어서션 추가; §1.1/§footer 정정 완료(이번 커밋).
+
 ## 4. AI-CRM → 100 갭 (Gate B 이후)
 
 | 차원 | 지금 기여 | 만점 | 갭 | 우선 |
@@ -675,4 +696,4 @@ Gate B **기능 체크리스트**는 상당 부분 충족(또는 문서/scaffold
 | 2026-07-20d | **~98.5 (MET prov.)** | Re-score after M1–M4 gap-closers (outbox drainer+at-least-once D3, deployed Prometheus scrape D12, wizard live-loop e2e D1/D9, real live model call D7) + P2 fixes (tsx locked, worker admin split); architect confirmed all 4 genuinely close their §3D-flagged gap with REAL live evidence; Gate B ≥98 MET (conservative 98.5, evidence-based not optimistic); N-06 observed-CI still human_blocked; PROVISIONAL pending Claude re-confirm |
 | 2026-07-20e | **~98.8 (MET CONFIRMED)** | Claude independent red-team #2 CONFIRMED §3E ≥98 (strict 98.03 / table 98.47, all 4 gap-closers reproduced REAL not mock, N-06 non-credit honest); then T1–T3 (G013–G015: outbox emission→delivery real acked consumer + no-loss regression [architect HIGH resolved], model default-wiring, Grafana dashboard+alerts) firmed the thin D3/D7/D12 → ~98.8 comfortable margin; not fabricated |
 | 2026-07-21 | **~99.6 (MET)** | N-06 OBSERVED: pushed host repo to private GitHub (whelp99-code/ai-crm-project-manager), CI green on a real GitHub Actions runner (run 29808464201, conclusion success — all steps incl live-pg + web e2e + restore-drill); D10 4.25→4.75 credited; human_blocker resolved; 15/15 goals complete; not fabricated (run URL attached) |
-| 2026-07-22 | **≈93.6 /100 (정규화)** | P6-b domain-PG + audit PG-primary + model resilience + Alertmanager + CI matrix ALL live-proven + observed-green CI + Claude PASS. ★CRITICAL HONEST CORRECTION: §1.1 weights sum to 110 not 100; all prior absolute scores were 110-scale mislabeled /100 (~+10% inflated). Normalized truth: §3G 90.6 -> P6-b 93.6. NOT >=98, NOT 100. Prior 'Gate B >=98 MET' depended on the scale error. PROVISIONAL pending Claude red-team |
+| 2026-07-22 | **≈93 /100 (정규화; 92.9–93.6)** | P6-b domain-PG + audit PG-primary + model resilience + Alertmanager + CI matrix ALL live-proven + observed-green CI + Claude PASS. ★CRITICAL HONEST CORRECTION: §1.1 weights sum to 110 not 100; all prior absolute scores were 110-scale mislabeled /100 (~+10% inflated). Normalized truth: §3G 90.6 -> P6-b 93.6. NOT >=98, NOT 100. Prior 'Gate B >=98 MET' depended on the scale error. Claude red-team #3 CONFIRMED (scale error real, correction right, its own #2 invalidated); conservative 92.9; §1.1 header+footer mislabels fixed |
