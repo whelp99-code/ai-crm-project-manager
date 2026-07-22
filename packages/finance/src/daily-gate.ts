@@ -183,15 +183,58 @@ export class DailyGate {
       .map((record) => structuredClone(record));
   }
 
-  recordDay(day: DayInput): DayRecord {
+  /**
+   * PG-FIRST fail-closed dual-write hook: computes the full result of
+   * recording `day` — including any gap-filled "missing" day records —
+   * WITHOUT mutating `streak`/`tier`/`lastDateEpoch`/`activatedMatrixVersion`/
+   * `records`. The caller persists the returned `finalRecord` (+ `state`) to
+   * PG, then calls `commitRecordDay` with the SAME preview object — mirrors
+   * `LedgerService.previewDraft`/`commitDraft` (packages/finance/src/ledger.ts).
+   */
+  previewRecordDay(day: DayInput): {
+    records: DayRecord[];
+    finalRecord: DayRecord;
+    state: { streak: number; tier: FinanceTier; lastDateEpoch: number | undefined; activatedMatrixVersion: number | undefined };
+  } {
     this.assertDayInput(day);
     const newEpoch = epochDay(day.date);
-    if (this.lastDateEpoch !== undefined) {
-      if (newEpoch <= this.lastDateEpoch) {
+
+    let streak = this.streak;
+    let tier = this.tier;
+    let lastDateEpoch = this.lastDateEpoch;
+    const activatedMatrixVersion = this.activatedMatrixVersion;
+    const records: DayRecord[] = [];
+
+    const apply = (date: string, qualifying: boolean, reason?: string): DayRecord => {
+      if (qualifying) {
+        streak += 1;
+      } else {
+        // §4 rule 4: a reset removes earned eligibility. Restoring it requires a
+        // fresh full streak (a controller-approved re-evaluation), never a patch.
+        streak = 0;
+        if (tier === "eligible") tier = "conservative";
+      }
+      if (streak >= this.config.requiredConsecutiveDays && tier === "conservative") {
+        tier = "eligible";
+      }
+      const record: DayRecord = {
+        date,
+        qualifying,
+        streakAfter: streak,
+        tierAfter: tier,
+        ...(reason !== undefined ? { reason } : {}),
+      };
+      records.push(record);
+      lastDateEpoch = epochDay(date);
+      return record;
+    };
+
+    if (lastDateEpoch !== undefined) {
+      if (newEpoch <= lastDateEpoch) {
         throw new FinanceDomainError("OUT_OF_ORDER", `day ${day.date} must be strictly after the last recorded day`);
       }
-      for (let e = this.lastDateEpoch + 1; e < newEpoch; e += 1) {
-        this.applyDay(epochDayToDateString(e), false, "missing");
+      for (let e = lastDateEpoch + 1; e < newEpoch; e += 1) {
+        apply(epochDayToDateString(e), false, "missing");
       }
     }
     const late = isLate(day.date, this.config, day.receivedAt);
@@ -210,8 +253,24 @@ export class DailyGate {
     } else {
       qualifying = true;
     }
-    const record = this.applyDay(day.date, qualifying, reason);
-    return structuredClone(record);
+    const finalRecord = apply(day.date, qualifying, reason);
+    return { records, finalRecord, state: { streak, tier, lastDateEpoch, activatedMatrixVersion } };
+  }
+
+  /** PG-FIRST fail-closed dual-write hook: commits an already-validated (`previewRecordDay`) result. */
+  commitRecordDay(preview: ReturnType<DailyGate["previewRecordDay"]>): DayRecord {
+    this.streak = preview.state.streak;
+    this.tier = preview.state.tier;
+    this.lastDateEpoch = preview.state.lastDateEpoch;
+    this.activatedMatrixVersion = preview.state.activatedMatrixVersion;
+    for (const record of preview.records) {
+      this.records.set(record.date, structuredClone(record));
+    }
+    return structuredClone(preview.finalRecord);
+  }
+
+  recordDay(day: DayInput): DayRecord {
+    return this.commitRecordDay(this.previewRecordDay(day));
   }
 
   changePolicyVersion(newVersion: number): void {
@@ -226,7 +285,15 @@ export class DailyGate {
     if (this.tier === "eligible") this.tier = "conservative";
   }
 
-  activateRiskTier(approvedMatrixVersion: number, approverPrincipalId: string): void {
+  /**
+   * PG-FIRST fail-closed dual-write hook: validates the risk-tier activation
+   * and returns the resulting machine state WITHOUT mutating `tier`/
+   * `activatedMatrixVersion`. See `previewRecordDay` doc.
+   */
+  previewActivateRiskTier(
+    approvedMatrixVersion: number,
+    approverPrincipalId: string,
+  ): { streak: number; tier: FinanceTier; lastDateEpoch: number | undefined; activatedMatrixVersion: number | undefined } {
     if (this.tier !== "eligible") {
       const activated = this.activatedMatrixVersion !== undefined ? `, matrix version ${this.activatedMatrixVersion} already active` : "";
       throw new FinanceDomainError(
@@ -240,8 +307,19 @@ export class DailyGate {
     if (!approverPrincipalId.trim()) {
       throw new FinanceDomainError("INVALID_INPUT", "approverPrincipalId is required");
     }
-    this.tier = "risk_tiered";
-    this.activatedMatrixVersion = approvedMatrixVersion;
+    return { streak: this.streak, tier: "risk_tiered", lastDateEpoch: this.lastDateEpoch, activatedMatrixVersion: approvedMatrixVersion };
+  }
+
+  /** PG-FIRST fail-closed dual-write hook: commits an already-validated (`previewActivateRiskTier`) state. */
+  commitActivateRiskTier(state: ReturnType<DailyGate["previewActivateRiskTier"]>): void {
+    this.streak = state.streak;
+    this.tier = state.tier;
+    this.lastDateEpoch = state.lastDateEpoch;
+    this.activatedMatrixVersion = state.activatedMatrixVersion;
+  }
+
+  activateRiskTier(approvedMatrixVersion: number, approverPrincipalId: string): void {
+    this.commitActivateRiskTier(this.previewActivateRiskTier(approvedMatrixVersion, approverPrincipalId));
   }
 
   historicalCorrection(date: string, note: string): { date: string; note: string; correctedAt: true } {
@@ -275,27 +353,4 @@ export class DailyGate {
     }
   }
 
-  private applyDay(date: string, qualifying: boolean, reason?: string): DayRecord {
-    if (qualifying) {
-      this.streak += 1;
-    } else {
-      // §4 rule 4: a reset removes earned eligibility. Restoring it requires a
-      // fresh full streak (a controller-approved re-evaluation), never a patch.
-      this.streak = 0;
-      if (this.tier === "eligible") this.tier = "conservative";
-    }
-    if (this.streak >= this.config.requiredConsecutiveDays && this.tier === "conservative") {
-      this.tier = "eligible";
-    }
-    const record: DayRecord = {
-      date,
-      qualifying,
-      streakAfter: this.streak,
-      tierAfter: this.tier,
-      ...(reason !== undefined ? { reason } : {}),
-    };
-    this.records.set(date, record);
-    this.lastDateEpoch = epochDay(date);
-    return record;
-  }
 }

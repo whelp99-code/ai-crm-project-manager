@@ -408,9 +408,15 @@ NOT dual-written/hydrate-replayed yet:
 - **Project Manager (PM) domain**: `PmService` (`packages/domain/src/pm.ts`)
   and `DeliveryService` (`packages/domain/src/delivery.ts`) remain in-memory
   only — no PG repo for plans/tasks/projects/deliverables.
-- **Finance domain**: `LedgerService` / `ReconciliationService`
-  (`packages/finance`) remain in-memory only — no PG repo for the ledger,
-  statements, or reconciliation state.
+- **Finance domain (ledger)**: `LedgerService` writes are PG-first
+  fail-closed (`pg-finance-ledger-adapter.ts`, P6-b G001 / PG-C1) — see the
+  ledger routes in `apps/api/src/app.ts`.
+- **Finance domain (reconciliation + daily-gate)**: `ReconciliationService`
+  (reconcile/resolve-exception) and `DailyGate` (record-day/
+  activate-risk-tier) writes are PG-first fail-closed as of Continued-dev
+  Q1 (D3/D4) — see the "Q1: reconciliation + daily-gate PG-primary
+  fail-closed" section below. PG repos exist
+  (`pg-finance-recon-adapter.ts`, migration `0010`).
 - `outbox_events` (event delivery queue) is written but not read back —
   publication remains a worker-owned concern, not request-path SoR state.
 - `notifications` (delivery-side state, not authorization/orchestration SoR)
@@ -482,6 +488,97 @@ Hydrate enumerates workspaces to audit-rehydrate from `listAllControls()` + `lis
   cross-workspace denied both at the HTTP layer and via a raw `SET ROLE
   ai_crm_runtime_api` session against `crm_customers`. Skipped (not failed)
   when `LIVE_PG_TEST` is unset.
+- `LIVE_PG_TEST=1 pnpm --filter @ai-crm/api exec vitest run
+  test/q1-recon-pgfirst.livepg.integration.test.ts` (Continued-dev Q1
+  D3/D4) — four acceptance tests against the same real docker Postgres: (1)
+  happy path — reconcile (variance -> exception) + resolve-exception +
+  record-day + activate-risk-tier all write real PG rows (`finance_
+  reconciliations`/`finance_exceptions`/`finance_daily_gate_state`/
+  `finance_day_records`) and the in-memory state (`GET /api/finance/...`)
+  reflects the SAME committed mutation; (2) fail-closed — a `pgPool`
+  injected to throw on `INSERT INTO finance_reconciliations` makes `POST
+  /api/finance/reconciliations` return 5xx AND leaves the in-memory open-
+  exceptions list uncommitted AND 0 PG rows in both tables — memory can
+  never lead PG; (3) fail-closed + cross-workspace — the same proof for
+  `INSERT INTO finance_day_records` on `POST /api/finance/daily-gate/days`,
+  plus proving an unrelated workspace's day-record call on the SAME app
+  instance is unaffected (the injected failure is scoped, not global); (4)
+  concurrency — N concurrent same-workspace `record-day` calls with
+  sequential dates all commit exactly once each under `withWorkspaceMutex`
+  (no lost update, final streak/PG row count == N). Skipped (not failed)
+  when `LIVE_PG_TEST` is unset.
+
+## Q1: reconciliation + daily-gate PG-primary fail-closed (D3/D4)
+
+Architect P3 (on the PG-D review) flagged that `ReconciliationService`/
+`DailyGate` writes were memory-first best-effort dual-write (the same
+swallowed-try/catch + `dualWriteFailures` counter shape `dualWriteAudit`
+still uses) even though PG repos already existed
+(`pg-finance-recon-adapter.ts`, PG-C2/G001) — a dropped PG write on
+`POST /api/finance/reconciliations`, `POST
+/api/finance/exceptions/:id/resolve`, `POST /api/finance/daily-gate/days`,
+or `POST /api/finance/daily-gate/activate-risk-tier` could silently lose an
+OPEN reconciliation exception (+ its `reconciledFingerprints` dedup entry)
+or a day record on the next restart, exactly the residual the ledger
+PG-first (PG-C1) and audit PG-first (PG-D/D3) work already closed for
+their own surfaces.
+
+Continued-dev Q1 closes this the same way, by giving
+`ReconciliationService`/`DailyGate` a **preview/commit split** — mirroring
+`LedgerService.previewDraft`/`commitDraft`
+(`packages/finance/src/ledger.ts`):
+
+- `ReconciliationService.previewReconcile(input)` validates and builds the
+  `Reconciliation` (+ variance-only `FinanceException`) pair WITHOUT
+  mutating `reconciliations`/`exceptions`/`reconciledFingerprints`;
+  `commitReconcile(reconciliation, exception?)` commits the SAME
+  already-validated pair. `previewResolveException`/`commitResolveException`
+  is the same split for exception resolution.
+- `DailyGate.previewRecordDay(day)` computes the full result of recording
+  `day` — including any gap-filled "missing" day records — WITHOUT
+  mutating `streak`/`tier`/`lastDateEpoch`/`activatedMatrixVersion`/
+  `records`; `commitRecordDay(preview)` commits it.
+  `previewActivateRiskTier`/`commitActivateRiskTier` is the same split for
+  risk-tier activation.
+
+The four `apps/api/src/app.ts` routes now run preview -> `await` the PG
+write (`financeReconRepo`/`dailyGateRepo`) -> commit, all inside the
+EXISTING per-workspace `withWorkspaceMutex` (the same mutex the ledger and
+governance routes use) — so a PG failure throws (5xx) BEFORE memory
+commits, AND the whole critical section stays concurrency-safe (no TOCTOU)
+for free. In memory mode (no pool), the PG write is a no-op and `commit*`
+still runs — behavior is byte-identical to before Q1, and all 44
+pre-existing `@ai-crm/finance` unit tests plus the memory-mode
+`@ai-crm/api` integration tests stay green unmodified.
+
+Falsifiably proven live against real PG by
+`apps/api/test/q1-recon-pgfirst.livepg.integration.test.ts` (see "Live
+verification" above): a forced PG INSERT failure on
+`finance_reconciliations`/`finance_day_records` aborts the route with 5xx,
+leaves the in-memory open-exceptions list / day-gate streak exactly as it
+was before the call, and leaves 0 rows in PG — memory can never lead PG for
+these writes, same falsifiable shape as the PG-D audit fail-closed proof.
+
+## Methodology: scorecard weight-sum guard
+
+`packages/persistence/scripts/scorecard-weight-check.mjs` (dependency-free
+node script) guards against the exact error class documented in
+`docs/planning/merge-corp-shell/04-SCORECARD.md` §3H: the §1.1
+dimension-weight table's D1..D12 weights summed to 110 while the section
+header claimed "합 100" (sum 100), silently inflating every absolute score
+derived from `기여점 = (차원/5) × 가중` by ~10% until Claude red-team #3
+caught it. The script parses the §1.1 weight table, sums the per-dimension
+weights, and asserts the sum matches the declared max stated in the §1.1
+header — READ-ONLY, it never touches the scorecard's dimension scores or
+history. Run it with:
+
+```sh
+node packages/persistence/scripts/scorecard-weight-check.mjs
+```
+
+Exits 0 with a `PASS` line (showing every `D<n>=<weight>` it parsed) when
+the sum matches; exits 1 with a diagnostic (fail-closed, including on a
+parse failure such as a missing/duplicate/renumbered row) when it does not.
 
 ### Audit dual-write delivery semantics (N-08)
 

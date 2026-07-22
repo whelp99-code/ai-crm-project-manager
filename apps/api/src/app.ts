@@ -1922,27 +1922,29 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     const ws = workspace(request);
     const body = objectBody(request.body);
     const statementRow = objectBody(body.statementRow) as unknown as StatementRowRef;
-    const result = recon.reconcile({
-      id: text(body, "id"),
-      workspaceId: ws,
-      statementRow,
-      ledgerAmountKrw: text(body, "ledgerAmountKrw"),
-      reconciledByPrincipalId: text(body, "reconciledByPrincipalId"),
-      reconciledAt: text(body, "reconciledAt"),
-      ...(typeof body.exceptionId === "string" ? { exceptionId: body.exceptionId } : {}),
-    });
-    if (financeReconRepo) {
-      try {
-        await financeReconRepo.saveReconciliation(result);
-        if (result.exceptionId) {
-          const exception = recon.openExceptions(ws).find((e) => e.id === result.exceptionId);
-          if (exception) await financeReconRepo.saveException(exception);
-        }
-      } catch (error) {
-        aiCrm.dualWriteFailures += 1;
-        app.log.error({ error }, "finance reconciliation dual-write failed");
+    // PG-FIRST fail-closed (Q1/D3): compute the validated reconciliation +
+    // (variance-only) exception WITHOUT touching memory, persist to PG
+    // first (a PG failure throws/5xx BEFORE memory diverges), then commit
+    // the SAME already-validated pair to memory — inside the per-workspace
+    // mutex (P6-b G002 / PG-D fix) so a concurrent same-workspace mutation
+    // can never preview from a pre-image this request already committed
+    // past. Mirrors the ledger draft route above.
+    const result = await withWorkspaceMutex(ws, async () => {
+      const { reconciliation, exception } = recon.previewReconcile({
+        id: text(body, "id"),
+        workspaceId: ws,
+        statementRow,
+        ledgerAmountKrw: text(body, "ledgerAmountKrw"),
+        reconciledByPrincipalId: text(body, "reconciledByPrincipalId"),
+        reconciledAt: text(body, "reconciledAt"),
+        ...(typeof body.exceptionId === "string" ? { exceptionId: body.exceptionId } : {}),
+      });
+      if (financeReconRepo) {
+        await financeReconRepo.saveReconciliation(reconciliation);
+        if (exception) await financeReconRepo.saveException(exception);
       }
-    }
+      return recon.commitReconcile(reconciliation, exception);
+    });
     return reply.status(201).send(result);
   });
 
@@ -1950,21 +1952,21 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     const { reconciliation: recon } = requireFinance();
     const ws = workspace(request);
     const body = objectBody(request.body);
-    const resolved = recon.resolveException(
-      ws,
-      request.params.exceptionId,
-      text(body, "resolvedByPrincipalId"),
-      text(body, "resolvedAt"),
-      text(body, "resolutionNote"),
-    );
-    if (financeReconRepo) {
-      try {
-        await financeReconRepo.saveException(resolved);
-      } catch (error) {
-        aiCrm.dualWriteFailures += 1;
-        app.log.error({ error }, "finance exception dual-write failed");
+    // PG-FIRST fail-closed (Q1/D3): same preview->PG-write->commit split,
+    // inside the per-workspace mutex, as the reconciliation route above.
+    const resolved = await withWorkspaceMutex(ws, async () => {
+      const preview = recon.previewResolveException(
+        ws,
+        request.params.exceptionId,
+        text(body, "resolvedByPrincipalId"),
+        text(body, "resolvedAt"),
+        text(body, "resolutionNote"),
+      );
+      if (financeReconRepo) {
+        await financeReconRepo.saveException(preview);
       }
-    }
+      return recon.commitResolveException(preview);
+    });
     return resolved;
   });
 
@@ -1977,27 +1979,31 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     const ws = workspace(request);
     const body = objectBody(request.body);
     const gate = dailyGate(ws);
-    const record = gate.recordDay({
-      date: text(body, "date"),
-      importsCompleted: body.importsCompleted === true,
-      entriesBalanced: body.entriesBalanced === true,
-      openFinanceExceptions: numberValue(body, "openFinanceExceptions"),
-      receivedAt: text(body, "receivedAt"),
-      ...(body.backfilled === true ? { backfilled: true } : {}),
-    });
-    if (dailyGateRepo) {
-      try {
-        await dailyGateRepo.appendDayRecord(ws, record);
+    // PG-FIRST fail-closed (Q1/D3): compute the validated day record (+ any
+    // gap-filled "missing" days) and the resulting machine state WITHOUT
+    // touching memory, persist to PG first (a PG failure throws/5xx BEFORE
+    // memory diverges), then commit the SAME already-validated result to
+    // memory — inside the per-workspace mutex. Mirrors the ledger draft
+    // route above.
+    const record = await withWorkspaceMutex(ws, async () => {
+      const preview = gate.previewRecordDay({
+        date: text(body, "date"),
+        importsCompleted: body.importsCompleted === true,
+        entriesBalanced: body.entriesBalanced === true,
+        openFinanceExceptions: numberValue(body, "openFinanceExceptions"),
+        receivedAt: text(body, "receivedAt"),
+        ...(body.backfilled === true ? { backfilled: true } : {}),
+      });
+      if (dailyGateRepo) {
+        await dailyGateRepo.appendDayRecord(ws, preview.finalRecord);
         // Save machine state on EVERY recordDay (streak/lastDateEpoch always
         // change), not just on a tier transition — a missed save between two
         // transitions would otherwise make restoreState() stale by however
         // many days elapsed since the last tier flip.
-        await dailyGateRepo.saveDailyGateState(ws, gate.snapshotState());
-      } catch (error) {
-        aiCrm.dualWriteFailures += 1;
-        app.log.error({ error }, "daily-gate dual-write failed");
+        await dailyGateRepo.saveDailyGateState(ws, preview.state);
       }
-    }
+      return gate.commitRecordDay(preview);
+    });
     return reply.status(201).send(record);
   });
 
@@ -2005,16 +2011,17 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     const ws = workspace(request);
     const body = objectBody(request.body);
     const gate = dailyGate(ws);
-    gate.activateRiskTier(numberValue(body, "approvedMatrixVersion"), text(body, "approverPrincipalId"));
-    if (dailyGateRepo) {
-      try {
-        await dailyGateRepo.saveDailyGateState(ws, gate.snapshotState());
-      } catch (error) {
-        aiCrm.dualWriteFailures += 1;
-        app.log.error({ error }, "daily-gate risk-tier-activation dual-write failed");
+    // PG-FIRST fail-closed (Q1/D3): same preview->PG-write->commit split,
+    // inside the per-workspace mutex, as the daily-gate route above.
+    const status = await withWorkspaceMutex(ws, async () => {
+      const state = gate.previewActivateRiskTier(numberValue(body, "approvedMatrixVersion"), text(body, "approverPrincipalId"));
+      if (dailyGateRepo) {
+        await dailyGateRepo.saveDailyGateState(ws, state);
       }
-    }
-    return gate.status();
+      gate.commitActivateRiskTier(state);
+      return gate.status();
+    });
+    return status;
   });
 
   app.get("/api/finance/daily-gate", async (request) => dailyGate(workspace(request)).status());
