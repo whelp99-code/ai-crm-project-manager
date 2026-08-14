@@ -31,7 +31,12 @@ jobs:
           mapfile -t patches < <(find .github/cwos-patches -maxdepth 1 -type f -name '*.patch' | sort)
           if [ "${#parts[@]}" -gt 0 ]; then
             test "${#patches[@]}" -eq 0
-            cat "${parts[@]}" | base64 --decode | gzip --decompress > /tmp/cwos-patch/reviewed.patch
+            cat "${parts[@]}" > /tmp/cwos-patch/reviewed.patch.gz.b64
+            echo "f31a3975dc7df3b42a2cbfab963c7c748d43111deaabf6fc8a74e22e5b8e5d5b  /tmp/cwos-patch/reviewed.patch.gz.b64" | sha256sum --check --strict
+            base64 --decode /tmp/cwos-patch/reviewed.patch.gz.b64 > /tmp/cwos-patch/reviewed.patch.gz
+            echo "09e3a9e90cb16742956bd799c09168a6f609ed83eb78c4a9ec89aa5ad63323ec  /tmp/cwos-patch/reviewed.patch.gz" | sha256sum --check --strict
+            gzip --decompress --stdout /tmp/cwos-patch/reviewed.patch.gz > /tmp/cwos-patch/reviewed.patch
+            echo "1af0036b5c56bb9e30e982d1252da66e34e0d2b6bd3d1f67ce95352d063be823  /tmp/cwos-patch/reviewed.patch" | sha256sum --check --strict
             patch_file=/tmp/cwos-patch/reviewed.patch
           else
             test "${#patches[@]}" -eq 1
