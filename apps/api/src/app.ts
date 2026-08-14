@@ -562,7 +562,7 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   const naturalCommands = new NaturalCommandService({
     orchestration,
     governance,
-    modelGateway,
+    ...(modelGateway ? { modelGateway } : {}),
     modelServicePrincipalId,
     pm,
   });
@@ -1354,7 +1354,12 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
           }
           for (const state of allGateStates) {
             const restored = new DailyGate(financePack, state.workspaceId, financePack.packVersion);
-            restored.restoreState(state);
+            restored.restoreState({
+              streak: state.streak,
+              tier: state.tier,
+              ...(state.lastDateEpoch !== undefined ? { lastDateEpoch: state.lastDateEpoch } : {}),
+              ...(state.activatedMatrixVersion !== undefined ? { activatedMatrixVersion: state.activatedMatrixVersion } : {}),
+            });
             restored.hydrateDayRecords(dayRecordsByWorkspace.get(state.workspaceId) ?? []);
             dailyGates.set(state.workspaceId, restored);
           }

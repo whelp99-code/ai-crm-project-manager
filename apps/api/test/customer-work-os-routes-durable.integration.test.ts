@@ -36,7 +36,11 @@ class FakeApprovals implements GovernanceApprovalResolver {
 
 async function createApp(store: InMemoryCustomerWorkOsSnapshotStore, approvals?: GovernanceApprovalResolver) {
   const app = Fastify();
-  await registerDurableCustomerWorkOsRoutes(app, { store, approvals, now: () => "2026-08-14T00:00:00.000Z" });
+  await registerDurableCustomerWorkOsRoutes(app, {
+    store,
+    ...(approvals ? { approvals } : {}),
+    now: () => "2026-08-14T00:00:00.000Z",
+  });
   await app.ready();
   return app;
 }

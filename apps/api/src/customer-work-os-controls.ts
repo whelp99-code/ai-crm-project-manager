@@ -101,7 +101,8 @@ export class InMemoryCustomerWorkOsControlService implements CustomerWorkOsContr
   ) {}
 
   async request(input: ControlRequester): Promise<CustomerWorkOsControl> {
-    const expectedHash = controlRequestHash({ ...input, requestHash: undefined as never });
+    const { requestHash: _requestHash, ...requestFields } = input;
+    const expectedHash = controlRequestHash(requestFields);
     if (input.requestHash !== expectedHash) throw new CustomerWorkOsError("REQUEST_HASH_MISMATCH", "control request hash does not match request fields");
     const policy = customerWorkOsControlPolicy(input.action);
     const requester = this.principals.get(input.requesterPrincipalId);
@@ -313,7 +314,8 @@ export class PgCustomerWorkOsControlService implements CustomerWorkOsControlServ
   constructor(private readonly pool: SqlPool, private readonly now: () => string = () => new Date().toISOString()) {}
 
   async request(input: ControlRequester): Promise<CustomerWorkOsControl> {
-    const expectedHash = controlRequestHash({ ...input, requestHash: undefined as never });
+    const { requestHash: _requestHash, ...requestFields } = input;
+    const expectedHash = controlRequestHash(requestFields);
     if (input.requestHash !== expectedHash) throw new CustomerWorkOsError("REQUEST_HASH_MISMATCH", "control request hash does not match request fields");
     const policy = customerWorkOsControlPolicy(input.action);
     const createdAt = this.now();

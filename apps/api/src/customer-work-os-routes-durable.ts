@@ -118,7 +118,7 @@ export async function registerDurableCustomerWorkOsRoutes(
   options: DurableCustomerWorkOsRouteOptions = {},
 ): Promise<CustomerWorkOsRuntimeManager> {
   const infrastructure = options.store ? undefined : await createPgCustomerWorkOsInfrastructureFromEnvironment();
-  const store = options.store ?? infrastructure?.store ?? new InMemoryCustomerWorkOsSnapshotStore();
+  const store: CustomerWorkOsSnapshotStore = options.store ?? infrastructure?.store ?? new InMemoryCustomerWorkOsSnapshotStore();
   const approvals = options.approvals ?? infrastructure?.approvals;
   const environmentIdentity = options.identityResolver || !infrastructure
     ? undefined
