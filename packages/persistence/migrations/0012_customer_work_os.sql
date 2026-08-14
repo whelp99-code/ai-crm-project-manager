@@ -67,14 +67,12 @@ CREATE TABLE cwos_engagement_parties (
   delivery_responsibility boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (workspace_id, id),
-  UNIQUE NULLS NOT DISTINCT (workspace_id, engagement_id, role, is_primary) DEFERRABLE INITIALLY IMMEDIATE,
   FOREIGN KEY (workspace_id, engagement_id) REFERENCES cwos_engagements(workspace_id, id),
   FOREIGN KEY (workspace_id, account_id) REFERENCES cwos_accounts(workspace_id, id)
 );
 
--- PostgreSQL UNIQUE NULLS NOT DISTINCT above cannot encode "one primary only" while allowing
--- multiple non-primary rows, so replace it with a partial unique index.
-ALTER TABLE cwos_engagement_parties DROP CONSTRAINT cwos_engagement_parties_workspace_id_engagement_id_role_is_primary_key;
+-- One primary account is allowed for each role on an engagement while any
+-- number of non-primary parties may participate in the same role.
 CREATE UNIQUE INDEX cwos_engagement_parties_one_primary_role_idx
   ON cwos_engagement_parties(workspace_id, engagement_id, role)
   WHERE is_primary;
