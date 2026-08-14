@@ -4,9 +4,12 @@ on:
   push:
     branches:
       - "feat/customer-work-os-v1*"
+      - "release/customer-work-os-v1-stabilization"
   pull_request:
     paths:
       - "packages/domain/**"
+      - "apps/**"
+      - "packages/**"
       - "docs/customer-work-os/**"
       - ".github/workflows/customer-work-os.yml"
 
@@ -40,5 +43,7 @@ jobs:
         run: pnpm --filter @ai-crm/domain typecheck
       - name: Domain tests
         run: pnpm --filter @ai-crm/domain test
-      - name: Full workspace regression
-        run: pnpm check
+      - name: Workspace typecheck
+        run: pnpm run typecheck
+      - name: Workspace tests
+        run: pnpm run test
