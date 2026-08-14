@@ -3,7 +3,6 @@ name: Customer Work OS Release Gate
 on:
   push:
     branches:
-      - feat/customer-work-os-v1-full
       - release/customer-work-os-v1-stabilization
   pull_request:
     paths:
@@ -15,7 +14,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: cwos-release-${{ github.ref }}
@@ -27,7 +26,6 @@ env:
 
 jobs:
   node-regression:
-    if: ${{ !contains(github.event.head_commit.message || '', 'chore(cwos): update release gate report') }}
     name: Node ${{ matrix.node }} full regression
     runs-on: ubuntu-latest
     strategy:
@@ -36,8 +34,6 @@ jobs:
         node: [20, 22]
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -46,27 +42,19 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: pnpm
       - name: Install exact dependency graph
-        run: pnpm install --frozen-lockfile 2>&1 | tee node-${{ matrix.node }}-install.log
+        run: pnpm install --frozen-lockfile
       - name: Typecheck and all Vitest suites
-        run: pnpm check 2>&1 | tee node-${{ matrix.node }}-check.log
+        run: pnpm check
       - name: Package builds
-        run: pnpm -r --if-present run build 2>&1 | tee node-${{ matrix.node }}-build.log
+        run: pnpm -r --if-present run build
       - name: Package lint
-        run: pnpm -r --if-present run lint 2>&1 | tee node-${{ matrix.node }}-lint.log
+        run: pnpm -r --if-present run lint
       - name: Security suites
-        run: pnpm -r --if-present run test:security 2>&1 | tee node-${{ matrix.node }}-security.log
+        run: pnpm -r --if-present run test:security
       - name: Integration suites
-        run: pnpm -r --if-present run test:integration 2>&1 | tee node-${{ matrix.node }}-integration.log
-      - name: Upload regression evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: node-${{ matrix.node }}-evidence
-          path: node-${{ matrix.node }}-*.log
-          if-no-files-found: error
+        run: pnpm -r --if-present run test:integration
 
   postgres-adversarial:
-    if: ${{ !contains(github.event.head_commit.message || '', 'chore(cwos): update release gate report') }}
     name: PostgreSQL 16 migration, RLS, finance and restore
     runs-on: ubuntu-latest
     services:
@@ -98,44 +86,33 @@ jobs:
           node-version: 22
           cache: pnpm
       - name: Install
-        run: pnpm install --frozen-lockfile 2>&1 | tee pg-install.log
+        run: pnpm install --frozen-lockfile
       - name: Apply every migration in lexical order
         shell: bash
         run: |
           set -euo pipefail
-          : > pg-migrations.log
           for migration in $(find packages/persistence/migrations -maxdepth 1 -type f -name '*.sql' | sort); do
-            echo "=== $migration ===" | tee -a pg-migrations.log
-            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration" 2>&1 | tee -a pg-migrations.log
+            echo "=== $migration ==="
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
           done
       - name: Live PostgreSQL adversarial checks
-        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/cwos-pg-adversarial.sql 2>&1 | tee pg-adversarial.log
-      - name: Persistence and API tests against PostgreSQL
-        run: |
-          set -euo pipefail
-          pnpm --filter @ai-crm/persistence test 2>&1 | tee pg-persistence-tests.log
-          pnpm --filter @ai-crm/api test 2>&1 | tee pg-api-tests.log
-      - name: Backup, restore and structural comparison
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/cwos-pg-adversarial.sql
+      - name: Persistence tests
+        run: pnpm --filter @ai-crm/persistence test
+      - name: API tests against PostgreSQL
+        run: pnpm --filter @ai-crm/api test
+      - name: Backup and restore
         shell: bash
         run: |
           set -euo pipefail
-          pg_dump --format=custom --no-owner --no-acl "$DATABASE_URL" --file=/tmp/cwos.dump 2>&1 | tee pg-backup.log
+          pg_dump --format=custom --no-owner --no-acl "$DATABASE_URL" --file=/tmp/cwos.dump
           createdb -h 127.0.0.1 -U postgres ai_crm_restore
-          pg_restore -h 127.0.0.1 -U postgres -d ai_crm_restore --no-owner --no-acl /tmp/cwos.dump 2>&1 | tee pg-restore.log
+          pg_restore -h 127.0.0.1 -U postgres -d ai_crm_restore --no-owner --no-acl /tmp/cwos.dump
           original=$(psql "$DATABASE_URL" -Atc "select count(*) from information_schema.tables where table_schema='public'")
           restored=$(psql "postgresql://postgres:postgres@127.0.0.1:5432/ai_crm_restore" -Atc "select count(*) from information_schema.tables where table_schema='public'")
           test "$original" = "$restored"
-          psql "postgresql://postgres:postgres@127.0.0.1:5432/ai_crm_restore" -Atc "select count(*) from cwos_runtime_events" | tee pg-restored-audit-count.log
-      - name: Upload PostgreSQL evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: postgres-evidence
-          path: pg-*.log
-          if-no-files-found: error
 
   web-e2e:
-    if: ${{ !contains(github.event.head_commit.message || '', 'chore(cwos): update release gate report') }}
     name: Web production build and E2E
     runs-on: ubuntu-latest
     steps:
@@ -148,29 +125,21 @@ jobs:
           node-version: 22
           cache: pnpm
       - name: Install
-        run: pnpm install --frozen-lockfile 2>&1 | tee web-install.log
+        run: pnpm install --frozen-lockfile
       - name: Production builds
-        run: pnpm -r --if-present run build 2>&1 | tee web-build.log
+        run: pnpm -r --if-present run build
       - name: Install Chromium when Playwright is available
         shell: bash
         run: |
           if pnpm exec playwright --version >/dev/null 2>&1; then
-            pnpm exec playwright install --with-deps chromium 2>&1 | tee web-playwright-install.log
+            pnpm exec playwright install --with-deps chromium
           else
-            echo "Playwright binary not present; repository E2E script determines coverage" | tee web-playwright-install.log
+            echo "Playwright binary not present; repository E2E script determines coverage"
           fi
       - name: Repository E2E suites
-        run: pnpm -r --if-present run test:e2e 2>&1 | tee web-e2e.log
-      - name: Upload web evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: web-evidence
-          path: web-*.log
-          if-no-files-found: error
+        run: pnpm -r --if-present run test:e2e
 
   dependency-security:
-    if: ${{ !contains(github.event.head_commit.message || '', 'chore(cwos): update release gate report') }}
     name: Dependency and capability security
     runs-on: ubuntu-latest
     steps:
@@ -183,98 +152,37 @@ jobs:
           node-version: 22
           cache: pnpm
       - name: Install
-        run: pnpm install --frozen-lockfile 2>&1 | tee dependency-install.log
+        run: pnpm install --frozen-lockfile
       - name: High-severity dependency audit
-        run: pnpm audit --prod --audit-level high 2>&1 | tee dependency-audit.log
+        run: pnpm audit --prod --audit-level high
       - name: Reject raw provider and process capabilities in CWOS domain
         shell: bash
         run: |
           set -euo pipefail
           if grep -RInE 'child_process|node:fs|from "(openai|@anthropic-ai|@google/generative-ai)"|fetch\(' packages/domain/src/customer-work-os.ts packages/ai-orchestrator/src/customer-work-os-ai.ts; then
-            echo "forbidden capability found" | tee capability-boundary.log
+            echo "forbidden capability found"
             exit 1
           fi
-          echo "capability boundary clean" | tee capability-boundary.log
-      - name: Upload security evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: security-evidence
-          path: dependency-*.log
-          if-no-files-found: error
+          echo "capability boundary clean"
 
-  report:
-    if: always() && !contains(github.event.head_commit.message || '', 'chore(cwos): update release gate report')
-    name: Publish release gate evidence
-    needs: [node-regression, postgres-adversarial, web-e2e, dependency-security]
+  release-gate:
+    name: Enforce zero open gate failures
+    if: always()
+    needs:
+      - node-regression
+      - postgres-adversarial
+      - web-e2e
+      - dependency-security
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
-        with:
-          path: /tmp/cwos-evidence
-          merge-multiple: false
-      - name: Generate report
-        shell: bash
+      - name: Verify every declared v1.0.0 gate passed
         env:
           NODE_RESULT: ${{ needs.node-regression.result }}
           PG_RESULT: ${{ needs.postgres-adversarial.result }}
           WEB_RESULT: ${{ needs.web-e2e.result }}
           SECURITY_RESULT: ${{ needs.dependency-security.result }}
         run: |
-          set -euo pipefail
-          mkdir -p docs/customer-work-os/release
-          open=0
-          for result in "$NODE_RESULT" "$PG_RESULT" "$WEB_RESULT" "$SECURITY_RESULT"; do
-            if [ "$result" != "success" ]; then open=$((open+1)); fi
-          done
-          status=FAIL
-          if [ "$open" -eq 0 ]; then status=PASS; fi
-          cat > docs/customer-work-os/release/CURRENT-GATE.md <<EOF
-          # Customer Work OS v1.0.0 Release Gate
-
-          - Commit: \`${GITHUB_SHA}\`
-          - Workflow run: \`${GITHUB_RUN_ID}\`
-          - Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-          - Overall: **${status}**
-          - Open gate failures: **${open}**
-
-          | Gate | Result |
-          |---|---|
-          | Node 20/22 typecheck, unit, integration, security and build | ${NODE_RESULT} |
-          | PostgreSQL 16 migrations, RLS, finance, backup and restore | ${PG_RESULT} |
-          | Web production build and E2E | ${WEB_RESULT} |
-          | Dependency and capability security | ${SECURITY_RESULT} |
-
-          ## Evidence
-
-          Workflow artifacts under run \`${GITHUB_RUN_ID}\` contain the exact command logs. PASS means every gate above completed successfully. It does not claim mathematical absence of every possible defect; it means **zero open defects within the declared v1.0.0 verification matrix**.
-          EOF
-          printf '{"schemaVersion":1,"commit":"%s","workflowRunId":"%s","overall":"%s","openGateFailures":%s,"gates":{"node":"%s","postgres":"%s","web":"%s","security":"%s"}}\n' \
-            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$status" "$open" "$NODE_RESULT" "$PG_RESULT" "$WEB_RESULT" "$SECURITY_RESULT" \
-            > docs/customer-work-os/release/current-gate.json
-          find /tmp/cwos-evidence -type f -maxdepth 3 -print | sort > docs/customer-work-os/release/evidence-files.txt || true
-      - name: Commit report to implementation branch
-        if: github.event_name == 'push'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/customer-work-os/release
-          if ! git diff --cached --quiet; then
-            git commit -m "chore(cwos): update release gate report"
-            git push origin HEAD:${GITHUB_REF_NAME}
-          fi
-      - name: Enforce gate
-        shell: bash
-        env:
-          NODE_RESULT: ${{ needs.node-regression.result }}
-          PG_RESULT: ${{ needs.postgres-adversarial.result }}
-          WEB_RESULT: ${{ needs.web-e2e.result }}
-          SECURITY_RESULT: ${{ needs.dependency-security.result }}
-        run: |
+          echo "node=$NODE_RESULT postgres=$PG_RESULT web=$WEB_RESULT security=$SECURITY_RESULT"
           test "$NODE_RESULT" = success
           test "$PG_RESULT" = success
           test "$WEB_RESULT" = success
