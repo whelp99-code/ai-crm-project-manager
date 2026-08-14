@@ -128,14 +128,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Production builds
         run: pnpm -r --if-present run build
-      - name: Install Chromium when Playwright is available
-        shell: bash
-        run: |
-          if pnpm exec playwright --version >/dev/null 2>&1; then
-            pnpm exec playwright install --with-deps chromium
-          else
-            echo "Playwright binary not present; repository E2E script determines coverage"
-          fi
+      - name: Install Playwright Chromium from the web workspace
+        run: pnpm --filter @ai-crm/web exec playwright install --with-deps chromium
       - name: Repository E2E suites
         run: pnpm -r --if-present run test:e2e
 

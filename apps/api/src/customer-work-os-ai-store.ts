@@ -271,6 +271,12 @@ export class CustomerWorkOsAiRuntime {
     if (input.reviewerKind !== "HUMAN") throw new CustomerWorkOsAiError("HUMAN_REVIEW_REQUIRED", "AI suggestions require a human reviewer");
     const existing = await this.store.get(input.workspaceId, input.suggestionId);
     if (!existing) throw new CustomerWorkOsAiError("NOT_FOUND", `suggestion not found: ${input.suggestionId}`);
+    if (existing.createdByPrincipalId === input.reviewerPrincipalId) {
+      throw new CustomerWorkOsAiError("INDEPENDENT_REVIEW_REQUIRED", "suggestion creator cannot review their own output");
+    }
+    if (existing.version !== input.expectedVersion) {
+      throw new CustomerWorkOsAiError("CONCURRENT_MODIFICATION", `expected version ${input.expectedVersion}, found ${existing.version}`);
+    }
     const service = new CustomerWorkOsAiService();
     service.hydrate([existing]);
     const next = service.review(
