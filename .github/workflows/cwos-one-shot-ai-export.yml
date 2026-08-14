@@ -1,0 +1,38 @@
+name: CWOS One Shot AI Export
+
+on:
+  push:
+    branches:
+      - feat/customer-work-os-v1-full
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'feat(cwos): export AI suggestion runtime') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/customer-work-os-v1-full
+          fetch-depth: 0
+      - name: Export AI module
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('packages/ai-orchestrator/src/index.ts')
+          text = path.read_text()
+          line = 'export * from "./customer-work-os-ai.js";\n'
+          if line not in text:
+              text = text.rstrip() + '\n\n' + line
+          path.write_text(text)
+          Path('.github/workflows/cwos-one-shot-ai-export.yml').unlink()
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/ai-orchestrator/src/index.ts .github/workflows/cwos-one-shot-ai-export.yml
+          git commit -m "feat(cwos): export AI suggestion runtime"
+          git push origin HEAD:feat/customer-work-os-v1-full
