@@ -1,0 +1,121 @@
+name: CWOS One Shot AI Routes
+
+on:
+  push:
+    branches:
+      - feat/customer-work-os-v1-full
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'feat(cwos): expose durable AI suggestion review queue') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/customer-work-os-v1-full
+          fetch-depth: 0
+      - name: Patch AI route integration
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('apps/api/src/customer-work-os-routes-durable.ts')
+          text = path.read_text()
+          imports = '''import type { AiSuggestion } from "@ai-crm/ai-orchestrator";
+import {
+  CustomerWorkOsAiRuntime,
+  InMemoryAiSuggestionStore,
+  createPgAiSuggestionStoreFromEnvironment,
+  type AiSuggestionStore,
+} from "./customer-work-os-ai-store.js";
+'''
+          anchor = 'import { buildOwnerCockpit } from "@ai-crm/reports/customer-work-os-reports";\n'
+          if imports not in text:
+              text = text.replace(anchor, anchor + imports)
+          text = text.replace(
+              '  identityResolver?: CustomerWorkOsIdentityResolver;\n  now?: () => string;',
+              '  identityResolver?: CustomerWorkOsIdentityResolver;\n  aiStore?: AiSuggestionStore;\n  now?: () => string;',
+          )
+          setup_anchor = '''  const configuredIdentity = options.identityResolver ?? await createPgCustomerWorkOsIdentityResolverFromEnvironment();
+  if (!configuredIdentity && process.env.NODE_ENV === "production") throw new CustomerWorkOsError("IDENTITY_INFRASTRUCTURE_REQUIRED", "production CWOS requires PostgreSQL principal resolution");'''
+          setup_new = '''  const configuredIdentity = options.identityResolver ?? await createPgCustomerWorkOsIdentityResolverFromEnvironment();
+  const aiStore = options.aiStore ?? await createPgAiSuggestionStoreFromEnvironment() ?? new InMemoryAiSuggestionStore();
+  const aiRuntime = new CustomerWorkOsAiRuntime(aiStore);
+  if (!configuredIdentity && process.env.NODE_ENV === "production") throw new CustomerWorkOsError("IDENTITY_INFRASTRUCTURE_REQUIRED", "production CWOS requires PostgreSQL principal resolution");'''
+          if setup_anchor not in text:
+              raise SystemExit('identity setup anchor not found')
+          text = text.replace(setup_anchor, setup_new)
+          close_anchor = '  if (configuredIdentity && configuredIdentity !== options.identityResolver) app.addHook("onClose", async () => configuredIdentity.close?.());'
+          text = text.replace(close_anchor, close_anchor + '\n  if (aiStore !== options.aiStore) app.addHook("onClose", async () => aiStore.close?.());')
+          block = '''
+  app.post("/api/cwos/ai/suggestions", async (request, reply) => {
+    try {
+      const identity = trustedIdentity(request);
+      const body = bodyObject(request);
+      stringField(body, "id"); stringField(body, "agentRole"); stringField(body, "kind"); stringField(body, "title"); stringField(body, "inputDigest"); stringField(body, "responseDigest"); stringField(body, "modelVersion"); stringField(body, "promptVersion"); stringField(body, "createdAt"); stringField(body, "expiresAt"); arrayField(body, "evidence");
+      const { createdByPrincipalId: _ignoredCreator, workspaceId: _ignoredWorkspace, ...proposalBody } = body;
+      const suggestion = await aiRuntime.propose({ ...(proposalBody as unknown as Parameters<CustomerWorkOsAiRuntime["propose"]>[0]), workspaceId: identity.workspaceId, createdByPrincipalId: identity.principalId });
+      reply.code(201).send(suggestion);
+    } catch (error) { sendError(reply, error); }
+  });
+
+  app.get<{ Querystring: { status?: AiSuggestion["status"] } }>("/api/cwos/ai/suggestions", async (request, reply) => {
+    try {
+      const identity = trustedIdentity(request);
+      return await aiRuntime.list(identity.workspaceId, request.query.status);
+    } catch (error) { sendError(reply, error); return undefined; }
+  });
+
+  app.get<{ Params: { suggestionId: string } }>("/api/cwos/ai/suggestions/:suggestionId", async (request, reply) => {
+    try {
+      const identity = trustedIdentity(request);
+      const suggestion = await aiRuntime.get(identity.workspaceId, request.params.suggestionId);
+      if (!suggestion) throw new CustomerWorkOsError("NOT_FOUND", `AI suggestion not found: ${request.params.suggestionId}`);
+      return suggestion;
+    } catch (error) { sendError(reply, error); return undefined; }
+  });
+
+  app.post<{ Params: { suggestionId: string } }>("/api/cwos/ai/suggestions/:suggestionId/review", async (request, reply) => {
+    try {
+      const identity = trustedIdentity(request);
+      const body = bodyObject(request);
+      const suggestion = await aiRuntime.review({
+        workspaceId: identity.workspaceId,
+        suggestionId: request.params.suggestionId,
+        expectedVersion: numberField(body, "expectedVersion"),
+        reviewerPrincipalId: identity.principalId,
+        reviewerKind: identity.kind,
+        decision: stringField(body, "decision") as "ACCEPT" | "REJECT",
+        reason: stringField(body, "reason"),
+        now: now(),
+      });
+      reply.code(200).send(suggestion);
+    } catch (error) { sendError(reply, error); }
+  });
+
+  app.get<{ Params: { suggestionId: string } }>("/api/cwos/ai/suggestions/:suggestionId/prepared-command", async (request, reply) => {
+    try {
+      const identity = trustedIdentity(request);
+      if (identity.kind !== "HUMAN") throw new CustomerWorkOsError("HUMAN_AUTHORITY_REQUIRED", "only a human can retrieve an accepted prepared command");
+      return await aiRuntime.preparedCommand(identity.workspaceId, request.params.suggestionId);
+    } catch (error) { sendError(reply, error); return undefined; }
+  });
+
+'''
+          marker = '  app.post("/api/cwos/notion/plans", async (request, reply) => {'
+          if '"/api/cwos/ai/suggestions"' not in text:
+              if marker not in text:
+                  raise SystemExit('Notion route anchor not found')
+              text = text.replace(marker, block + marker)
+          path.write_text(text)
+          Path('.github/workflows/cwos-one-shot-ai-routes.yml').unlink()
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/api .github/workflows/cwos-one-shot-ai-routes.yml
+          git commit -m "feat(cwos): expose durable AI suggestion review queue"
+          git push origin HEAD:feat/customer-work-os-v1-full
