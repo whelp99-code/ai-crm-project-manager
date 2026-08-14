@@ -42,7 +42,7 @@ describe("runWorkerTick (GOV-U-06 style lease recover)", () => {
       governance,
       nowIso: "2026-01-01T00:01:00.000Z",
       log: (message, data) => {
-        logs.push({ message, data });
+        logs.push({ message, ...(data !== undefined ? { data } : {}) });
       },
     });
 
