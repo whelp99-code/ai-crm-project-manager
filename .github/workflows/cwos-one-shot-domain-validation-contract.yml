@@ -1,0 +1,192 @@
+name: CWOS One Shot Domain Validation Contract
+
+on:
+  push:
+    branches:
+      - feat/customer-work-os-v1-full
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'fix(cwos): validate runtime enums and require contract activation approval') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/customer-work-os-v1-full
+          fetch-depth: 0
+      - name: Apply validation and contract approval patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('packages/domain/src/customer-work-os.ts')
+          text = path.read_text()
+          helper = '''
+function oneOf<T extends string>(value: string, allowed: readonly T[], field: string): T {
+  if (!allowed.includes(value as T)) throw new CustomerWorkOsError("INVALID_ENUM", `${field} has unsupported value: ${value}`);
+  return value as T;
+}
+
+function isoDate(value: string, field: string): string {
+  if (!/^\\d{4}-\\d{2}-\\d{2}(?:T.*)?$/.test(value) || Number.isNaN(new Date(value.length === 10 ? `${value}T00:00:00Z` : value).getTime())) {
+    throw new CustomerWorkOsError("INVALID_DATE", `${field} is not a valid ISO date or datetime`);
+  }
+  return value;
+}
+'''
+          anchor = 'function parseMoney(value: MoneyKrw, field = "amount"): bigint {'
+          if 'function oneOf<T extends string>' not in text:
+              text = text.replace(anchor, helper + '\n' + anchor)
+          text = text.replace(
+              '    if (input.kinds.length === 0) throw new CustomerWorkOsError("INVALID_INPUT", "account requires at least one kind");',
+              '''    if (input.kinds.length === 0) throw new CustomerWorkOsError("INVALID_INPUT", "account requires at least one kind");
+    for (const kind of input.kinds) oneOf(kind, ["customer","partner","vendor","manufacturer","outsourcer","other"] as const, "account.kind");
+    oneOf(input.status, ["active","inactive","at_risk"] as const, "account.status");''',
+          )
+          text = text.replace(
+              '    if (input.startDate && input.targetDate && input.targetDate < input.startDate) {',
+              '''    oneOf(input.type, ["inquiry","opportunity","consulting","delivery","support","maintenance","renewal","internal"] as const, "engagement.type");
+    oneOf(input.stage, ["INQUIRY","DISCOVERY","PROPOSAL","NEGOTIATION","CONTRACTED","DELIVERY","ACCEPTANCE","BILLING","COLLECTION","CLOSED","ON_HOLD","LOST","CANCELLED"] as const, "engagement.stage");
+    oneOf(input.health, ["normal","warning","critical"] as const, "engagement.health");
+    if (input.startDate) isoDate(input.startDate, "engagement.startDate");
+    if (input.targetDate) isoDate(input.targetDate, "engagement.targetDate");
+    if (["LOST", "CANCELLED"].includes(input.stage) && !input.terminalReason?.trim()) throw new CustomerWorkOsError("REASON_REQUIRED", `${input.stage} requires terminalReason`);
+    if (input.startDate && input.targetDate && input.targetDate < input.startDate) {''',
+          )
+          text = text.replace(
+              '    this.account(input.workspaceId, input.accountId);\n    if (input.primary) {',
+              '    this.account(input.workspaceId, input.accountId);\n    oneOf(input.role, ["customer","prime_contractor","partner","vendor","manufacturer","delivery_partner","outsourcer","advisor"] as const, "party.role");\n    if (input.primary) {',
+          )
+          text = text.replace(
+              '    required(input.summary, "activity.summary");',
+              '    oneOf(input.type, ["email_in","email_out","call","meeting","message","visit","document","decision","note","finance"] as const, "activity.type");\n    isoDate(input.occurredAt, "activity.occurredAt");\n    required(input.summary, "activity.summary");',
+          )
+          text = text.replace(
+              '    if (input.status === "CONFIRMED" && !input.evidenceRef) {',
+              '    oneOf(input.kind, ["requirement","confirmed_fact","unknown","assumption","decision","risk","exclusion","acceptance_criterion","change"] as const, "knowledge.kind");\n    oneOf(input.status, ["OPEN","VERIFYING","CONFIRMED","REJECTED","SUPERSEDED"] as const, "knowledge.status");\n    if (input.status === "CONFIRMED" && !input.evidenceRef) {',
+          )
+          text = text.replace(
+              '    if (!Number.isInteger(input.priority) || input.priority < 0 || input.priority > 100) {',
+              '    oneOf(input.status, ["OPEN","IN_PROGRESS","WAITING","DONE","CANCELLED"] as const, "commitment.status");\n    isoDate(input.dueAt, "commitment.dueAt");\n    if (!Number.isInteger(input.priority) || input.priority < 0 || input.priority > 100) {',
+          )
+          text = text.replace(
+              '    if (input.manufacturerAccountId) this.account(input.workspaceId, input.manufacturerAccountId);',
+              '    oneOf(input.kind, ["hardware","software","license","service","maintenance","expense"] as const, "product.kind");\n    if (input.manufacturerAccountId) this.account(input.workspaceId, input.manufacturerAccountId);',
+          )
+          text = text.replace(
+              '    if (input.bomLines.length === 0) throw new CustomerWorkOsError("EMPTY_BOM", "quote requires BOM lines");',
+              '    if (input.status !== "DRAFT") throw new CustomerWorkOsError("INVALID_STATE", "new quote must start as DRAFT");\n    isoDate(input.validUntil, "quote.validUntil");\n    if (input.bomLines.length === 0) throw new CustomerWorkOsError("EMPTY_BOM", "quote requires BOM lines");',
+          )
+          old_signature = '  acceptQuoteAsContract(input: Omit<Contract, "version" | "status">, quoteExpectedVersion: number): { quote: Quote; contract: Contract; engagement: Engagement } {'
+          new_signature = '  acceptQuoteAsContract(input: Omit<Contract, "version" | "status">, quoteExpectedVersion: number, receipt: ApprovalReceipt): { quote: Quote; contract: Contract; engagement: Engagement } {'
+          if old_signature not in text and new_signature not in text:
+              raise SystemExit('acceptQuoteAsContract signature not found')
+          text = text.replace(old_signature, new_signature)
+          old_contract = '''    if (input.contractValueKrw !== quote.totalPriceKrw) throw new CustomerWorkOsError("CONTRACT_VALUE_MISMATCH", "contract value must match accepted quote");
+    const milestoneTotal = input.billingMilestones.reduce((sum, item) => sum + nonNegative(item.amountKrw, `milestone ${item.id}`), 0n);'''
+          new_contract = '''    if (input.contractValueKrw !== quote.totalPriceKrw) throw new CustomerWorkOsError("CONTRACT_VALUE_MISMATCH", "contract value must match accepted quote");
+    isoDate(input.effectiveFrom, "contract.effectiveFrom");
+    if (input.effectiveTo) isoDate(input.effectiveTo, "contract.effectiveTo");
+    if (input.effectiveTo && input.effectiveTo < input.effectiveFrom) throw new CustomerWorkOsError("INVALID_SCHEDULE", "contract effectiveTo precedes effectiveFrom");
+    const milestoneTotal = input.billingMilestones.reduce((sum, item) => sum + nonNegative(item.amountKrw, `milestone ${item.id}`), 0n);'''
+          text = text.replace(old_contract, new_contract)
+          old_contract_store = '''    const contract: Contract = { ...copy(input), status: "ACTIVE", version: 1 };
+    this.contracts.set(contract.id, contract);
+    quote.status = "ACCEPTED";
+    quote.version += 1;
+    const engagement = this.engagement(input.workspaceId, input.engagementId);'''
+          new_contract_store = '''    const engagement = this.engagement(input.workspaceId, input.engagementId);
+    const activationPayload = {
+      quoteId: input.quoteId,
+      contractValueKrw: input.contractValueKrw,
+      scope: input.scope,
+      exclusions: input.exclusions,
+      effectiveFrom: input.effectiveFrom,
+      effectiveTo: input.effectiveTo ?? null,
+      billingMilestones: input.billingMilestones,
+    };
+    this.consume(receipt, input.workspaceId, "engagement", engagement.id, engagement.version, "CONTRACT_ACTIVATE", customerWorkOsPayloadHash(activationPayload));
+    const contract: Contract = { ...copy(input), status: "ACTIVE", version: 1 };
+    this.contracts.set(contract.id, contract);
+    quote.status = "ACCEPTED";
+    quote.version += 1;'''
+          if old_contract_store not in text:
+              raise SystemExit('contract storage block not found')
+          text = text.replace(old_contract_store, new_contract_store)
+          text = text.replace(
+              '    const stored: PurchaseOrder = { ...copy(input), status: "DRAFT", version: 1 };',
+              '    const stored: PurchaseOrder = { ...copy(input), status: "DRAFT", version: 1 };',
+          )
+          text = text.replace(
+              '    const net = nonNegative(input.netAmountKrw, "net amount");',
+              '    oneOf(input.direction, ["IN","OUT"] as const, "financialItem.direction");\n    oneOf(input.category, ["contract_revenue","change_revenue","maintenance_revenue","hardware_cost","license_cost","outsourcing_cost","travel_cost","cloud_cost","internal_labor","overhead","other"] as const, "financialItem.category");\n    oneOf(input.lifecycle, ["PLANNED","APPROVED","CONFIRMED","BILLED","INCURRED","PARTIAL","SETTLED","OVERDUE","CANCELLED"] as const, "financialItem.lifecycle");\n    isoDate(input.expectedDate, "financialItem.expectedDate");\n    if (input.contractualDueDate) isoDate(input.contractualDueDate, "financialItem.contractualDueDate");\n    const net = nonNegative(input.netAmountKrw, "net amount");',
+          )
+          text = text.replace(
+              '    if (item.direction !== input.direction) throw new CustomerWorkOsError("DIRECTION_MISMATCH", "settlement direction must match financial item");',
+              '    oneOf(input.direction, ["IN","OUT"] as const, "settlement.direction");\n    isoDate(input.settledAt, "settlement.settledAt");\n    if (item.direction !== input.direction) throw new CustomerWorkOsError("DIRECTION_MISMATCH", "settlement direction must match financial item");',
+          )
+          text = text.replace(
+              '    if (!TRANSITIONS[engagement.stage].includes(nextStage))',
+              '    oneOf(nextStage, ["INQUIRY","DISCOVERY","PROPOSAL","NEGOTIATION","CONTRACTED","DELIVERY","ACCEPTANCE","BILLING","COLLECTION","CLOSED","ON_HOLD","LOST","CANCELLED"] as const, "engagement.nextStage");\n    if (!TRANSITIONS[engagement.stage].includes(nextStage))',
+          )
+          path.write_text(text)
+
+          # Update direct domain tests with a separate contract activation approval.
+          for test_path in [
+              Path('packages/domain/test/customer-work-os.integration.test.ts'),
+              Path('packages/domain/test/customer-work-os-hardening.adversarial.test.ts'),
+          ]:
+              t = test_path.read_text()
+              # Add helper around known calls by replacing ending quote version argument.
+              if test_path.name == 'customer-work-os.integration.test.ts':
+                  old = '''      },
+      approvedQuote.version,
+    );'''
+                  new = '''      },
+      approvedQuote.version,
+      approval({
+        id: "approve-contract",
+        resourceType: "engagement",
+        resourceId: "engagement",
+        resourceVersion: 2,
+        action: "CONTRACT_ACTIVATE",
+        payloadHash: customerWorkOsPayloadHash({
+          quoteId: "quote",
+          contractValueKrw: "100000000",
+          scope: quote.scope,
+          exclusions: quote.exclusions,
+          effectiveFrom: "2026-08-20",
+          effectiveTo: "2026-10-31",
+          billingMilestones: [
+            { id: "deposit", name: "계약금", amountKrw: "30000000", trigger: "계약", expectedDate: "2026-08-25" },
+            { id: "balance", name: "잔금", amountKrw: "70000000", trigger: "검수", expectedDate: "2026-10-31" },
+          ],
+        }),
+      }),
+    );'''
+                  if old not in t:
+                      raise SystemExit('integration contract call anchor not found')
+                  t = t.replace(old, new, 1)
+              else:
+                  old = '''  service.acceptQuoteAsContract({ id: "contract", workspaceId: WORKSPACE, engagementId: "eng", quoteId: "quote", title: "계약", scope: "납품", exclusions: [], contractValueKrw: "200", effectiveFrom: "2026-08-15", billingMilestones: [{ id: "bill", name: "잔금", amountKrw: "200", trigger: "검수" }] }, approved.version);'''
+                  new = '''  service.acceptQuoteAsContract(
+    { id: "contract", workspaceId: WORKSPACE, engagementId: "eng", quoteId: "quote", title: "계약", scope: "납품", exclusions: [], contractValueKrw: "200", effectiveFrom: "2026-08-15", billingMilestones: [{ id: "bill", name: "잔금", amountKrw: "200", trigger: "검수" }] },
+    approved.version,
+    receipt({ id: "contract-approval", resourceType: "engagement", resourceId: "eng", resourceVersion: 2, action: "CONTRACT_ACTIVATE", payloadHash: customerWorkOsPayloadHash({ quoteId: "quote", contractValueKrw: "200", scope: "납품", exclusions: [], effectiveFrom: "2026-08-15", effectiveTo: null, billingMilestones: [{ id: "bill", name: "잔금", amountKrw: "200", trigger: "검수" }] }) }),
+  );'''
+                  if old not in t:
+                      raise SystemExit('hardening contract call anchor not found')
+                  t = t.replace(old, new, 1)
+              test_path.write_text(t)
+
+          Path('.github/workflows/cwos-one-shot-domain-validation-contract.yml').unlink()
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/domain .github/workflows/cwos-one-shot-domain-validation-contract.yml
+          git commit -m "fix(cwos): validate runtime enums and require contract activation approval"
+          git push origin HEAD:feat/customer-work-os-v1-full
