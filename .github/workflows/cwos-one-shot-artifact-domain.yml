@@ -1,0 +1,150 @@
+name: CWOS One Shot Artifact Domain
+
+on:
+  push:
+    branches:
+      - feat/customer-work-os-v1-full
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'feat(cwos): integrate versioned artifacts') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/customer-work-os-v1-full
+          fetch-depth: 0
+      - name: Patch artifact model
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('packages/domain/src/customer-work-os.ts')
+          text = path.read_text()
+          artifact = '''
+export type ArtifactType =
+  | "customer_request" | "requirement_source" | "vendor_quote" | "customer_quote"
+  | "proposal" | "contract" | "purchase_order" | "design" | "delivery_plan"
+  | "meeting_note" | "change_request" | "test_evidence" | "acceptance_evidence"
+  | "completion_report" | "tax_invoice" | "receipt" | "other";
+
+export interface Artifact {
+  id: string;
+  workspaceId: string;
+  engagementId: string;
+  accountId?: string;
+  type: ArtifactType;
+  title: string;
+  versionLabel: string;
+  status: "DRAFT" | "REVIEW" | "APPROVED" | "SENT" | "ACCEPTED" | "SUPERSEDED";
+  storageUri: string;
+  contentHash?: string;
+  sourceActivityId?: string;
+  supersedesArtifactId?: string;
+  effectiveDate?: string;
+  approvedByPrincipalId?: string;
+  sentAt?: string;
+  acceptedAt?: string;
+  metadata: Record<string, unknown>;
+  version: number;
+}
+'''
+          anchor = 'export interface FinancialItem {'
+          if 'export interface Artifact {' not in text:
+              text = text.replace(anchor, artifact + '\n' + anchor)
+          text = text.replace(
+              '  assets: Asset[];\n  financialItems: FinancialItem[];',
+              '  assets: Asset[];\n  artifacts?: Artifact[] | undefined;\n  financialItems: FinancialItem[];',
+          )
+          text = text.replace(
+              '  private readonly assets = new Map<string, Asset>();\n  private readonly financialItems = new Map<string, FinancialItem>();',
+              '  private readonly assets = new Map<string, Asset>();\n  private readonly artifacts = new Map<string, Artifact>();\n  private readonly financialItems = new Map<string, FinancialItem>();',
+          )
+          text = text.replace(
+              '      assets: [...this.assets.values()].map(copy),\n      financialItems: [...this.financialItems.values()].map(copy),',
+              '      assets: [...this.assets.values()].map(copy),\n      artifacts: [...this.artifacts.values()].map(copy),\n      financialItems: [...this.financialItems.values()].map(copy),',
+          )
+          text = text.replace(
+              '    load(this.assets, state.assets, "asset");\n    load(this.financialItems, state.financialItems, "financial item");',
+              '    load(this.assets, state.assets, "asset");\n    load(this.artifacts, state.artifacts ?? [], "artifact");\n    load(this.financialItems, state.financialItems, "financial item");',
+          )
+          methods = '''  addArtifact(input: Omit<Artifact, "version">): Artifact {
+    this.engagement(input.workspaceId, input.engagementId);
+    if (input.accountId) this.account(input.workspaceId, input.accountId);
+    if (input.sourceActivityId) this.require(this.activities, input.workspaceId, input.sourceActivityId, "activity");
+    if (input.supersedesArtifactId) this.require(this.artifacts, input.workspaceId, input.supersedesArtifactId, "artifact");
+    oneOf(input.type, ["customer_request","requirement_source","vendor_quote","customer_quote","proposal","contract","purchase_order","design","delivery_plan","meeting_note","change_request","test_evidence","acceptance_evidence","completion_report","tax_invoice","receipt","other"] as const, "artifact.type");
+    if (!(["DRAFT", "REVIEW"] as const).includes(input.status as "DRAFT" | "REVIEW")) throw new CustomerWorkOsError("INVALID_STATE", "new artifact must start as DRAFT or REVIEW");
+    required(input.title, "artifact.title"); required(input.versionLabel, "artifact.versionLabel"); required(input.storageUri, "artifact.storageUri");
+    if (input.effectiveDate) isoDate(input.effectiveDate, "artifact.effectiveDate");
+    const duplicate = [...this.artifacts.values()].find((item) => item.workspaceId === input.workspaceId && item.engagementId === input.engagementId && item.type === input.type && item.title === input.title && item.versionLabel === input.versionLabel);
+    if (duplicate) throw new CustomerWorkOsError("DUPLICATE_ARTIFACT_VERSION", `artifact version exists: ${input.title} ${input.versionLabel}`);
+    const artifact: Artifact = { ...copy(input), version: 1 };
+    this.unique(this.artifacts, artifact.id, "artifact");
+    this.artifacts.set(artifact.id, artifact);
+    return copy(artifact);
+  }
+
+  updateArtifactStatus(
+    workspaceId: string,
+    artifactId: string,
+    expectedVersion: number,
+    nextStatus: Artifact["status"],
+    principalId: string,
+    at: string,
+    receipt?: ApprovalReceipt,
+  ): Artifact {
+    const artifact = this.requireVersion(this.artifacts, workspaceId, artifactId, expectedVersion, "artifact");
+    const allowed: Readonly<Record<Artifact["status"], readonly Artifact["status"][]>> = {
+      DRAFT: ["REVIEW", "SUPERSEDED"], REVIEW: ["APPROVED", "SUPERSEDED"],
+      APPROVED: ["SENT", "SUPERSEDED"], SENT: ["ACCEPTED", "SUPERSEDED"],
+      ACCEPTED: ["SUPERSEDED"], SUPERSEDED: [],
+    };
+    if (!allowed[artifact.status].includes(nextStatus)) throw new CustomerWorkOsError("INVALID_TRANSITION", `${artifact.status} -> ${nextStatus}`);
+    isoDate(at, "artifact.statusAt");
+    if (nextStatus === "APPROVED") {
+      const payload = { status: nextStatus, contentHash: artifact.contentHash ?? null, storageUri: artifact.storageUri };
+      this.consume(receipt, workspaceId, "artifact", artifact.id, artifact.version, "ARTIFACT_APPROVE", customerWorkOsPayloadHash(payload));
+      artifact.approvedByPrincipalId = required(principalId, "principalId");
+    }
+    if (nextStatus === "SENT") {
+      const payload = { status: nextStatus, storageUri: artifact.storageUri, versionLabel: artifact.versionLabel };
+      this.consume(receipt, workspaceId, "artifact", artifact.id, artifact.version, "ARTIFACT_SEND", customerWorkOsPayloadHash(payload));
+      if (!artifact.approvedByPrincipalId) throw new CustomerWorkOsError("ARTIFACT_NOT_APPROVED", "artifact must be approved before sending");
+      artifact.sentAt = at;
+    }
+    if (nextStatus === "ACCEPTED") {
+      if (!artifact.sentAt || !artifact.approvedByPrincipalId) throw new CustomerWorkOsError("ARTIFACT_NOT_SENT", "artifact must be sent before acceptance");
+      artifact.acceptedAt = at;
+    }
+    artifact.status = nextStatus;
+    artifact.version += 1;
+    return copy(artifact);
+  }
+
+'''
+          marker = '  addFinancialItem(input: FinancialItem): FinancialItem {'
+          if '  addArtifact(input: Omit<Artifact, "version">)' not in text:
+              if marker not in text:
+                  raise SystemExit('financial item anchor not found')
+              text = text.replace(marker, methods + marker)
+          text = text.replace(
+              '      assets: this.byEngagement(this.assets, workspaceId, engagementId),\n      financialItems,',
+              '      assets: this.byEngagement(this.assets, workspaceId, engagementId),\n      artifacts: this.byEngagement(this.artifacts, workspaceId, engagementId),\n      financialItems,',
+          )
+          text = text.replace(
+              '    | "import_plan";',
+              '    | "import_plan"\n    | "artifact";',
+          )
+          path.write_text(text)
+          Path('.github/workflows/cwos-one-shot-artifact-domain.yml').unlink()
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/domain .github/workflows/cwos-one-shot-artifact-domain.yml
+          git commit -m "feat(cwos): integrate versioned artifacts"
+          git push origin HEAD:feat/customer-work-os-v1-full
