@@ -1,0 +1,44 @@
+name: Customer Work OS
+
+on:
+  push:
+    branches:
+      - "feat/customer-work-os-v1*"
+  pull_request:
+    paths:
+      - "packages/domain/**"
+      - "docs/customer-work-os/**"
+      - ".github/workflows/customer-work-os.yml"
+
+concurrency:
+  group: cwos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PNPM_VERSION: "9.15.0"
+
+jobs:
+  domain-verification:
+    name: Domain typecheck, integration and adversarial tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Domain typecheck
+        run: pnpm --filter @ai-crm/domain typecheck
+      - name: Domain tests
+        run: pnpm --filter @ai-crm/domain test
+      - name: Full workspace regression
+        run: pnpm check
