@@ -99,8 +99,12 @@ jobs:
         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/cwos-pg-adversarial.sql
       - name: Persistence tests
         run: pnpm --filter @ai-crm/persistence test
-      - name: API tests against PostgreSQL
-        run: pnpm --filter @ai-crm/api test
+      - name: API memory-mode regression (database environment isolated)
+        run: |
+          env -u DATABASE_URL -u AI_CRM_DATABASE_URL -u AI_CRM_TEST_DATABASE_URL \
+            pnpm --filter @ai-crm/api exec vitest run --exclude='test/**/*.livepg.integration.test.ts'
+      - name: API live PostgreSQL integration suites
+        run: pnpm --filter @ai-crm/api exec vitest run 'test/**/*.livepg.integration.test.ts'
       - name: Backup and restore
         shell: bash
         run: |
