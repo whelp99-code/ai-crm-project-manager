@@ -38,12 +38,19 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: pnpm
       - name: Install
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile 2>&1 | tee workspace-install-node-${{ matrix.node }}.log
       - name: Domain typecheck
-        run: pnpm --filter @ai-crm/domain typecheck
+        run: pnpm --filter @ai-crm/domain typecheck 2>&1 | tee domain-typecheck-node-${{ matrix.node }}.log
       - name: Domain tests
-        run: pnpm --filter @ai-crm/domain test
+        run: pnpm --filter @ai-crm/domain test 2>&1 | tee domain-tests-node-${{ matrix.node }}.log
       - name: Workspace typecheck
-        run: pnpm run typecheck
+        run: pnpm run typecheck 2>&1 | tee workspace-typecheck-node-${{ matrix.node }}.log
       - name: Workspace tests
-        run: pnpm run test
+        run: pnpm run test 2>&1 | tee workspace-tests-node-${{ matrix.node }}.log
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cwos-node-${{ matrix.node }}-diagnostics
+          path: "*-node-${{ matrix.node }}.log"
+          if-no-files-found: error
