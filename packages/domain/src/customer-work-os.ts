@@ -28,6 +28,7 @@ export interface Account {
   normalizedName: string;
   kinds: Array<"customer" | "partner" | "vendor" | "manufacturer" | "outsourcer" | "other">;
   status: "active" | "inactive" | "at_risk";
+  sourceRef?: string;
   version: number;
 }
 
@@ -40,6 +41,8 @@ export interface Contact {
   email?: string;
   phone?: string;
   stakeholderRole?: "practitioner" | "technical" | "procurement" | "decision_maker" | "influencer" | "opponent";
+  roles?: string[];
+  relationship?: "unknown" | "new" | "active" | "trusted" | "at_risk";
   version: number;
 }
 
@@ -84,6 +87,55 @@ export interface Activity {
   evidenceRef?: string;
   aiConfidence?: number;
   humanReviewed: boolean;
+}
+
+export type ArtifactType =
+  | "customer_request"
+  | "requirement_source"
+  | "vendor_quote"
+  | "customer_quote"
+  | "proposal"
+  | "contract"
+  | "purchase_order"
+  | "design"
+  | "delivery_plan"
+  | "meeting_note"
+  | "change_request"
+  | "test_evidence"
+  | "acceptance_evidence"
+  | "completion_report"
+  | "tax_invoice"
+  | "receipt"
+  | "other";
+
+export interface Artifact {
+  id: string;
+  workspaceId: string;
+  engagementId: string;
+  accountId?: string;
+  type: ArtifactType;
+  title: string;
+  versionLabel: string;
+  status: "DRAFT" | "REVIEW" | "APPROVED" | "SENT" | "ACCEPTED" | "SUPERSEDED";
+  storageUri: string;
+  contentHash?: string;
+  sourceActivityId?: string;
+  supersedesArtifactId?: string;
+  effectiveDate?: string;
+  approvedByPrincipalId?: string;
+  sentAt?: string;
+  acceptedAt?: string;
+  metadata: Record<string, unknown>;
+  version: number;
+}
+
+export interface AppliedImportPlan {
+  id: string;
+  workspaceId: string;
+  planId: string;
+  planVersion: number;
+  planHash: string;
+  approvalReceiptId: string;
 }
 
 export interface KnowledgeItem {
@@ -298,6 +350,7 @@ export interface FinancialItem {
   contractualDueDate?: string;
   sourceArtifactId?: string;
   sourcePurchaseOrderId?: string;
+  evidenceRef?: string;
   revision: number;
 }
 
@@ -316,7 +369,7 @@ export interface Settlement {
 export interface ApprovalReceipt {
   id: string;
   workspaceId: string;
-  resourceType: "quote" | "change_request" | "purchase_order" | "financial_item" | "delivery_project" | "engagement";
+  resourceType: "quote" | "change_request" | "purchase_order" | "financial_item" | "delivery_project" | "engagement" | "import_plan" | "artifact";
   resourceId: string;
   resourceVersion: number;
   action: string;
@@ -432,6 +485,8 @@ export class CustomerWorkOsService {
   private readonly engagements = new Map<string, Engagement>();
   private readonly parties = new Map<string, EngagementParty>();
   private readonly activities = new Map<string, Activity>();
+  private readonly artifacts = new Map<string, Artifact>();
+  private readonly appliedImportPlans = new Map<string, AppliedImportPlan>();
   private readonly knowledge = new Map<string, KnowledgeItem>();
   private readonly commitments = new Map<string, Commitment>();
   private readonly products = new Map<string, Product>();
@@ -514,6 +569,87 @@ export class CustomerWorkOsService {
     const item = this.owned(this.activities, workspaceId, activityId, "activity");
     item.humanReviewed = true;
     return copy(item);
+  }
+
+  addArtifact(input: Omit<Artifact, "version">): Artifact {
+    this.ensureNew(this.artifacts, input.id, "artifact");
+    this.engagement(input.workspaceId, input.engagementId);
+    if (input.accountId) this.account(input.workspaceId, input.accountId);
+    if (input.sourceActivityId) this.owned(this.activities, input.workspaceId, input.sourceActivityId, "activity");
+    if (input.supersedesArtifactId) this.owned(this.artifacts, input.workspaceId, input.supersedesArtifactId, "artifact");
+    const title = required(input.title, "artifact.title");
+    const versionLabel = required(input.versionLabel, "artifact.versionLabel");
+    const storageUri = required(input.storageUri, "artifact.storageUri");
+    const duplicate = [...this.artifacts.values()].find((item) =>
+      item.workspaceId === input.workspaceId &&
+      item.engagementId === input.engagementId &&
+      item.type === input.type &&
+      item.title === title &&
+      item.versionLabel === versionLabel,
+    );
+    if (duplicate) throw new CustomerWorkOsError("DUPLICATE_ARTIFACT_VERSION", `artifact version already exists: ${duplicate.id}`);
+    if (["APPROVED", "SENT", "ACCEPTED"].includes(input.status) && !input.approvedByPrincipalId?.trim()) {
+      throw new CustomerWorkOsError("APPROVAL_REQUIRED", `artifact status ${input.status} requires approvedByPrincipalId`);
+    }
+    if (["SENT", "ACCEPTED"].includes(input.status) && !input.sentAt) {
+      throw new CustomerWorkOsError("SENT_AT_REQUIRED", `artifact status ${input.status} requires sentAt`);
+    }
+    if (input.status === "ACCEPTED" && !input.acceptedAt) {
+      throw new CustomerWorkOsError("ACCEPTED_AT_REQUIRED", "accepted artifact requires acceptedAt");
+    }
+    const stored: Artifact = {
+      ...copy(input),
+      title,
+      versionLabel,
+      storageUri,
+      metadata: copy(input.metadata),
+      version: 1,
+    };
+    this.artifacts.set(stored.id, stored);
+    return copy(stored);
+  }
+
+  isImportPlanApplied(planHash: string): boolean {
+    return this.appliedImportPlans.has(required(planHash, "planHash"));
+  }
+
+  markImportPlanApplied(
+    workspaceId: string,
+    planId: string,
+    planVersion: number,
+    planHash: string,
+    receipt: ApprovalReceipt,
+  ): AppliedImportPlan {
+    const normalizedHash = required(planHash, "planHash");
+    const existing = this.appliedImportPlans.get(normalizedHash);
+    if (existing) {
+      if (existing.workspaceId !== workspaceId || existing.planId !== planId || existing.planVersion !== planVersion) {
+        throw new CustomerWorkOsError("IMPORT_PLAN_HASH_CONFLICT", "import plan hash was already applied to another resource");
+      }
+      return copy(existing);
+    }
+    if (this.consumedReceiptIds.has(receipt.id)) throw new CustomerWorkOsError("REPLAYED_APPROVAL", `approval already consumed: ${receipt.id}`);
+    if (
+      receipt.status !== "CONSUMED" ||
+      receipt.workspaceId !== workspaceId ||
+      receipt.resourceType !== "import_plan" ||
+      receipt.resourceId !== planId ||
+      receipt.resourceVersion !== planVersion ||
+      receipt.action !== "NOTION_IMPORT_APPROVE"
+    ) {
+      throw new CustomerWorkOsError("STALE_APPROVAL", "Notion import approval is stale or bound to another plan");
+    }
+    const applied: AppliedImportPlan = {
+      id: normalizedHash,
+      workspaceId,
+      planId: required(planId, "planId"),
+      planVersion,
+      planHash: normalizedHash,
+      approvalReceiptId: receipt.id,
+    };
+    this.consumedReceiptIds.add(receipt.id);
+    this.appliedImportPlans.set(normalizedHash, applied);
+    return copy(applied);
   }
 
   addKnowledgeItem(input: Omit<KnowledgeItem, "version">): KnowledgeItem {
@@ -1020,6 +1156,7 @@ export class CustomerWorkOsService {
     engagement: Engagement;
     parties: EngagementParty[];
     activities: Activity[];
+    artifacts: Artifact[];
     knowledge: KnowledgeItem[];
     commitments: Commitment[];
     quotes: Quote[];
@@ -1041,6 +1178,7 @@ export class CustomerWorkOsService {
       engagement: copy(engagement),
       parties: this.byEngagement(this.parties, workspaceId, engagementId),
       activities: this.byEngagement(this.activities, workspaceId, engagementId).sort((left, right) => right.occurredAt.localeCompare(left.occurredAt)),
+      artifacts: this.byEngagement(this.artifacts, workspaceId, engagementId),
       knowledge: this.byEngagement(this.knowledge, workspaceId, engagementId),
       commitments: this.byEngagement(this.commitments, workspaceId, engagementId).sort((left, right) => left.dueAt.localeCompare(right.dueAt)),
       quotes: this.byEngagement(this.quotes, workspaceId, engagementId),

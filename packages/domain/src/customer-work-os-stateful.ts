@@ -3,6 +3,8 @@ import {
   CustomerWorkOsService,
   type Account,
   type Activity,
+  type AppliedImportPlan,
+  type Artifact,
   type Asset,
   type ChangeRequest,
   type Commitment,
@@ -28,6 +30,8 @@ export interface CustomerWorkOsState {
   engagements: Engagement[];
   parties: EngagementParty[];
   activities: Activity[];
+  artifacts?: Artifact[];
+  appliedImportPlans?: AppliedImportPlan[];
   knowledge: KnowledgeItem[];
   commitments: Commitment[];
   products: Product[];
@@ -52,6 +56,8 @@ type ServiceInternals = {
   engagements: Map<string, Engagement>;
   parties: Map<string, EngagementParty>;
   activities: Map<string, Activity>;
+  artifacts: Map<string, Artifact>;
+  appliedImportPlans: Map<string, AppliedImportPlan>;
   knowledge: Map<string, KnowledgeItem>;
   commitments: Map<string, Commitment>;
   products: Map<string, Product>;
@@ -156,6 +162,8 @@ CustomerWorkOsService.prototype.exportState = function exportState(): CustomerWo
     engagements: sortedValues(state.engagements),
     parties: sortedValues(state.parties),
     activities: sortedValues(state.activities),
+    artifacts: sortedValues(state.artifacts),
+    appliedImportPlans: sortedValues(state.appliedImportPlans),
     knowledge: sortedValues(state.knowledge),
     commitments: sortedValues(state.commitments),
     products: sortedValues(state.products),
@@ -185,6 +193,8 @@ CustomerWorkOsService.prototype.hydrateState = function hydrateState(input: Cust
     engagements: readMap<Engagement>(input.engagements, "engagements"),
     parties: readMap<EngagementParty>(input.parties, "parties"),
     activities: readMap<Activity>(input.activities, "activities"),
+    artifacts: readMap<Artifact>(input.artifacts ?? [], "artifacts"),
+    appliedImportPlans: readMap<AppliedImportPlan>(input.appliedImportPlans ?? [], "appliedImportPlans"),
     knowledge: readMap<KnowledgeItem>(input.knowledge, "knowledge"),
     commitments: readMap<Commitment>(input.commitments, "commitments"),
     products: readMap<Product>(input.products, "products"),
@@ -206,6 +216,8 @@ CustomerWorkOsService.prototype.hydrateState = function hydrateState(input: Cust
   replaceMap(state.engagements, next.engagements);
   replaceMap(state.parties, next.parties);
   replaceMap(state.activities, next.activities);
+  replaceMap(state.artifacts, next.artifacts);
+  replaceMap(state.appliedImportPlans, next.appliedImportPlans);
   replaceMap(state.knowledge, next.knowledge);
   replaceMap(state.commitments, next.commitments);
   replaceMap(state.products, next.products);
