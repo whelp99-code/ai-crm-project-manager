@@ -7,9 +7,9 @@ import {
   createPgPmRepository,
   type PgQueryable,
   type PmRepository,
-} from "../../../packages/domain/src/pg-pm-adapter.js";
-import type { PmPlan, PmAssignment, PmTarget, TargetObservation, VarianceException } from "../../../packages/domain/src/pm.js";
-import type { DeliveryProject } from "../../../packages/domain/src/delivery.js";
+} from "@ai-crm/domain/pg-pm-adapter";
+import type { PmPlan, PmAssignment, PmTarget, TargetObservation, VarianceException } from "@ai-crm/domain/pm";
+import type { DeliveryProject } from "@ai-crm/domain/delivery";
 
 /**
  * Ultragoal P6-b G001 / PG-B (PM + delivery) acceptance against REAL

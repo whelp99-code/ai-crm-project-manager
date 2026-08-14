@@ -355,12 +355,12 @@ export function applyNotionPlanToDomain(input: {
     });
     for (const source of item.accountSourceIds) {
       const accountId = accountIds.get(source)!;
-      service.assignParty({ id: `party-${notionCwosHash({ engagement: item.id, accountId, role: "customer" }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, accountId, role: "customer", primary: true });
+      service.assignParty({ id: `party-${notionCwosHash({ engagement: item.id, accountId, role: "customer" }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, accountId, role: "customer", primary: true, commercialResponsibility: true, deliveryResponsibility: false });
       parties += 1;
     }
     for (const source of item.partnerSourceIds) {
       const accountId = accountIds.get(source)!;
-      service.assignParty({ id: `party-${notionCwosHash({ engagement: item.id, accountId, role: "partner" }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, accountId, role: "partner", primary: false });
+      service.assignParty({ id: `party-${notionCwosHash({ engagement: item.id, accountId, role: "partner" }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, accountId, role: "partner", primary: false, commercialResponsibility: false, deliveryResponsibility: true });
       parties += 1;
     }
     if (item.nextAction && !["CLOSED", "LOST", "CANCELLED"].includes(item.stage)) {
@@ -393,7 +393,7 @@ export function applyNotionPlanToDomain(input: {
     }
   }
 
-  service.markImportPlanApplied(record.workspaceId, record.id, record.version, record.planHash, receipt);
+  service.markImportPlanApplied(record.workspaceId, record.id, receipt.resourceVersion, record.planHash, receipt);
   return { alreadyApplied: false, accounts: plan.accounts.length, contacts, engagements: plan.engagements.length, parties, activities: plan.activities.length, commitments, artifacts, financialItems: plan.financialItems.length, settlements, quarantined: plan.quarantined.length };
 }
 

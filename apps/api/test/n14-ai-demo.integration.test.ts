@@ -98,7 +98,7 @@ function reportSnapshot() {
 
 describe("N14-01 live demo: NL command -> MODEL_INVOKE (gateway service principal) -> COMMAND_MAP -> effect", () => {
   it("model client is invoked only under the dedicated gateway service principal, never the operator", async () => {
-    const invokeSpy = vi.fn(async () => ({
+    const invokeSpy = vi.fn(async (_request: Parameters<ModelClient["invoke"]>[0]) => ({
       structuredOutput: {
         steps: [
           {

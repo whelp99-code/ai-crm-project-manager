@@ -93,7 +93,7 @@ describe("S0 natural command integration", () => {
   });
 
   it("S0-I-02: mock ModelClient is invoked via gateway service principal", async () => {
-    const invokeSpy = vi.fn(async () => ({
+    const invokeSpy = vi.fn(async (_request: Parameters<ModelClient["invoke"]>[0]) => ({
       structuredOutput: {
         steps: [
           {
@@ -861,11 +861,6 @@ describe("S0 natural command integration", () => {
   });
 
   it("ready() fails closed when databaseUrl set but pool cannot connect", async () => {
-    const broken = {
-      async query() {
-        throw new Error("simulated pool failure");
-      },
-    };
     // Inject a pool that fails on first dual-write is not ready-fail; instead
     // force onReady dynamic path with invalid URL and no injectable Pool by
     // stubbing — use pgPool that is undefined and databaseUrl that cannot open.
