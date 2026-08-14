@@ -1,0 +1,71 @@
+name: CWOS One Shot Policy Expansion
+
+on:
+  push:
+    branches:
+      - feat/customer-work-os-v1-full
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'feat(cwos): complete control action policy matrix') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/customer-work-os-v1-full
+          fetch-depth: 0
+      - name: Expand fail-closed action policy
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('apps/api/src/customer-work-os-policy.ts')
+          text = path.read_text()
+          old_union = '''  | "CUSTOMER_EMAIL_SEND"
+  | "CALENDAR_INVITE_SEND"
+  | "DATA_DELETE";'''
+          new_union = '''  | "CUSTOMER_EMAIL_SEND"
+  | "CALENDAR_INVITE_SEND"
+  | "ARTIFACT_APPROVE"
+  | "ARTIFACT_SEND"
+  | "DELIVERY_BASELINE_APPROVE"
+  | "PURCHASE_ORDER_SEND"
+  | "RENEWAL_OPPORTUNITY_ACCEPT"
+  | "CRM_SUGGESTION_ACCEPT"
+  | "DEAL_QUALIFY"
+  | "AI_CHANGE_CANARY"
+  | "NOTION_IMPORT_APPROVE"
+  | "NOTION_IMPORT_APPLY"
+  | "DATA_DELETE";'''
+          if old_union not in text:
+              raise SystemExit('policy action union anchor not found')
+          text = text.replace(old_union, new_union)
+          old_tail = '''  CALENDAR_INVITE_SEND: { action: "CALENDAR_INVITE_SEND", risk: "MEDIUM", requiredRoles: ["owner", "admin", "commercial_approver", "delivery_approver"], expiresMinutes: 60, separationOfDuty: true, externalEffect: true, reversible: true },
+  DATA_DELETE: { action: "DATA_DELETE", risk: "CRITICAL", requiredRoles: ["owner", "admin"], expiresMinutes: 15, separationOfDuty: true, externalEffect: false, reversible: false },'''
+          new_tail = '''  CALENDAR_INVITE_SEND: { action: "CALENDAR_INVITE_SEND", risk: "MEDIUM", requiredRoles: ["owner", "admin", "commercial_approver", "delivery_approver"], expiresMinutes: 60, separationOfDuty: true, externalEffect: true, reversible: true },
+  ARTIFACT_APPROVE: { action: "ARTIFACT_APPROVE", risk: "HIGH", requiredRoles: ["owner", "admin", "commercial_approver", "delivery_approver"], expiresMinutes: 60, separationOfDuty: true, externalEffect: false, reversible: true },
+  ARTIFACT_SEND: { action: "ARTIFACT_SEND", risk: "HIGH", requiredRoles: ["owner", "admin", "commercial_approver", "delivery_approver"], expiresMinutes: 30, separationOfDuty: true, externalEffect: true, reversible: false },
+  DELIVERY_BASELINE_APPROVE: { action: "DELIVERY_BASELINE_APPROVE", risk: "HIGH", requiredRoles: ["owner", "admin", "delivery_approver"], expiresMinutes: 60, separationOfDuty: true, externalEffect: false, reversible: true },
+  PURCHASE_ORDER_SEND: { action: "PURCHASE_ORDER_SEND", risk: "CRITICAL", requiredRoles: ["owner", "admin", "procurement_approver"], expiresMinutes: 30, separationOfDuty: true, externalEffect: true, reversible: false },
+  RENEWAL_OPPORTUNITY_ACCEPT: { action: "RENEWAL_OPPORTUNITY_ACCEPT", risk: "MEDIUM", requiredRoles: ["owner", "admin", "commercial_approver"], expiresMinutes: 120, separationOfDuty: true, externalEffect: false, reversible: true },
+  CRM_SUGGESTION_ACCEPT: { action: "CRM_SUGGESTION_ACCEPT", risk: "MEDIUM", requiredRoles: ["owner", "admin", "commercial_approver", "delivery_approver"], expiresMinutes: 120, separationOfDuty: true, externalEffect: false, reversible: true },
+  DEAL_QUALIFY: { action: "DEAL_QUALIFY", risk: "MEDIUM", requiredRoles: ["owner", "admin", "commercial_approver"], expiresMinutes: 120, separationOfDuty: true, externalEffect: false, reversible: true },
+  AI_CHANGE_CANARY: { action: "AI_CHANGE_CANARY", risk: "HIGH", requiredRoles: ["owner", "admin"], expiresMinutes: 30, separationOfDuty: true, externalEffect: false, reversible: true },
+  NOTION_IMPORT_APPROVE: { action: "NOTION_IMPORT_APPROVE", risk: "CRITICAL", requiredRoles: ["owner", "admin"], expiresMinutes: 30, separationOfDuty: true, externalEffect: false, reversible: true },
+  NOTION_IMPORT_APPLY: { action: "NOTION_IMPORT_APPLY", risk: "CRITICAL", requiredRoles: ["owner", "admin"], expiresMinutes: 15, separationOfDuty: true, externalEffect: false, reversible: false },
+  DATA_DELETE: { action: "DATA_DELETE", risk: "CRITICAL", requiredRoles: ["owner", "admin"], expiresMinutes: 15, separationOfDuty: true, externalEffect: false, reversible: false },'''
+          if old_tail not in text:
+              raise SystemExit('policy object tail anchor not found')
+          text = text.replace(old_tail, new_tail)
+          path.write_text(text)
+          Path('.github/workflows/cwos-one-shot-policy-expansion.yml').unlink()
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/api/src/customer-work-os-policy.ts .github/workflows/cwos-one-shot-policy-expansion.yml
+          git commit -m "feat(cwos): complete control action policy matrix"
+          git push origin HEAD:feat/customer-work-os-v1-full
