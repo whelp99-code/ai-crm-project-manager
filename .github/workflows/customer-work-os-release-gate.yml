@@ -104,7 +104,7 @@ jobs:
           env -u DATABASE_URL -u AI_CRM_DATABASE_URL -u AI_CRM_TEST_DATABASE_URL \
             pnpm --filter @ai-crm/api exec vitest run --exclude='test/**/*.livepg.integration.test.ts'
       - name: API live PostgreSQL integration suites
-        run: pnpm --filter @ai-crm/api exec vitest run 'test/**/*.livepg.integration.test.ts'
+        run: pnpm --filter @ai-crm/api exec sh -c 'vitest run $(find test -maxdepth 1 -type f -name "*.livepg.integration.test.ts" | sort)'
       - name: Backup and restore
         shell: bash
         run: |
