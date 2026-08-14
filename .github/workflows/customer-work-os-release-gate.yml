@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feat/customer-work-os-v1-full
+      - release/customer-work-os-v1-stabilization
   pull_request:
     paths:
       - "apps/**"
