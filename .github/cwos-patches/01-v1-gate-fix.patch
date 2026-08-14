@@ -4,32 +4,12 @@ Date: Fri, 14 Aug 2026 04:55:00 +0000
 Subject: [PATCH] fix(cwos): repair release gate and exact optional boundaries
 
 ---
- .github/workflows/customer-work-os-release-gate.yml      | 8 ++++++--
  apps/api/src/app.ts                                      | 9 +++++++--
  apps/api/src/customer-work-os-controls.ts                | 6 ++++--
  apps/api/src/customer-work-os-routes-durable.ts          | 2 +-
  .../customer-work-os-routes-durable.integration.test.ts  | 6 +++++-
- 5 files changed, 23 insertions(+), 8 deletions(-)
+ 4 files changed, 17 insertions(+), 6 deletions(-)
 
-diff --git a/.github/workflows/customer-work-os-release-gate.yml b/.github/workflows/customer-work-os-release-gate.yml
-index bd23a90..a4aa190 100644
---- a/.github/workflows/customer-work-os-release-gate.yml
-+++ b/.github/workflows/customer-work-os-release-gate.yml
-@@ -99,8 +99,12 @@ jobs:
-         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/cwos-pg-adversarial.sql
-       - name: Persistence tests
-         run: pnpm --filter @ai-crm/persistence test
--      - name: API tests against PostgreSQL
--        run: pnpm --filter @ai-crm/api test
-+      - name: API memory-mode regression (database environment isolated)
-+        run: |
-+          env -u DATABASE_URL -u AI_CRM_DATABASE_URL -u AI_CRM_TEST_DATABASE_URL \
-+            pnpm --filter @ai-crm/api exec vitest run --exclude='test/**/*.livepg.integration.test.ts'
-+      - name: API live PostgreSQL integration suites
-+        run: pnpm --filter @ai-crm/api exec vitest run 'test/**/*.livepg.integration.test.ts'
-       - name: Backup and restore
-         shell: bash
-         run: |
 diff --git a/apps/api/src/app.ts b/apps/api/src/app.ts
 index 56bf51b..4542696 100644
 --- a/apps/api/src/app.ts
