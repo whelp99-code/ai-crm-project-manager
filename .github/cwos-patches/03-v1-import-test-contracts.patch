@@ -1,0 +1,179 @@
+From 86787a65647bfad63fd9bfaa231108590babfe86 Mon Sep 17 00:00:00 2001
+From: "OpenAI GPT-5.6 Pro" <chatgpt@openai.com>
+Date: Fri, 14 Aug 2026 04:55:00 +0000
+Subject: [PATCH] fix(cwos): complete Notion import and test type contracts
+
+---
+ apps/api/package.json                                     | 3 ++-
+ apps/api/src/customer-work-os-notion.ts                   | 6 +++---
+ apps/api/test/model-resilience.integration.test.ts        | 8 ++++----
+ apps/api/test/n14-ai-demo.integration.test.ts             | 2 +-
+ apps/api/test/pg-b-pm-delivery.livepg.integration.test.ts | 6 +++---
+ apps/api/test/s0-natural-command.integration.test.ts      | 7 +------
+ packages/imports/src/index.ts                             | 3 +++
+ pnpm-lock.yaml                                            | 3 +++
+ 8 files changed, 20 insertions(+), 18 deletions(-)
+
+diff --git a/apps/api/package.json b/apps/api/package.json
+index 807e148..98cb9c0 100644
+--- a/apps/api/package.json
++++ b/apps/api/package.json
+@@ -25,6 +25,7 @@
+   },
+   "devDependencies": {
+     "typescript": "^5.7.2",
+-    "vitest": "^2.1.8"
++    "vitest": "^2.1.8",
++    "@types/pg": "^8.11.10"
+   }
+ }
+diff --git a/apps/api/src/customer-work-os-notion.ts b/apps/api/src/customer-work-os-notion.ts
+index 267f78c..dfd957f 100644
+--- a/apps/api/src/customer-work-os-notion.ts
++++ b/apps/api/src/customer-work-os-notion.ts
+@@ -355,12 +355,12 @@ export function applyNotionPlanToDomain(input: {
+     });
+     for (const source of item.accountSourceIds) {
+       const accountId = accountIds.get(source)!;
+-      service.assignParty({ id: `party-${notionCwosHash({ engagement: item.id, accountId, role: "customer" }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, accountId, role: "customer", primary: true });
++      service.assignParty({ id: `party-${notionCwosHash({ engagement: item.id, accountId, role: "customer" }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, accountId, role: "customer", primary: true, commercialResponsibility: true, deliveryResponsibility: false });
+       parties += 1;
+     }
+     for (const source of item.partnerSourceIds) {
+       const accountId = accountIds.get(source)!;
+-      service.assignParty({ id: `party-${notionCwosHash({ engagement: item.id, accountId, role: "partner" }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, accountId, role: "partner", primary: false });
++      service.assignParty({ id: `party-${notionCwosHash({ engagement: item.id, accountId, role: "partner" }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, accountId, role: "partner", primary: false, commercialResponsibility: false, deliveryResponsibility: true });
+       parties += 1;
+     }
+     if (item.nextAction && !["CLOSED", "LOST", "CANCELLED"].includes(item.stage)) {
+@@ -393,7 +393,7 @@ export function applyNotionPlanToDomain(input: {
+     }
+   }
+ 
+-  service.markImportPlanApplied(record.workspaceId, record.id, record.version, record.planHash, receipt);
++  service.markImportPlanApplied(record.workspaceId, record.id, receipt.resourceVersion, record.planHash, receipt);
+   return { alreadyApplied: false, accounts: plan.accounts.length, contacts, engagements: plan.engagements.length, parties, activities: plan.activities.length, commitments, artifacts, financialItems: plan.financialItems.length, settlements, quarantined: plan.quarantined.length };
+ }
+ 
+diff --git a/apps/api/test/model-resilience.integration.test.ts b/apps/api/test/model-resilience.integration.test.ts
+index 41462dc..6400d98 100644
+--- a/apps/api/test/model-resilience.integration.test.ts
++++ b/apps/api/test/model-resilience.integration.test.ts
+@@ -151,7 +151,7 @@ describe("D7 model-gateway resilience (offline, fetch-stub, no network)", () =>
+   });
+ 
+   it("aborts a hung request after the configured timeout and surfaces PROVIDER_TIMEOUT", async () => {
+-    const fetchMock = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
++    const fetchMock = vi.fn((_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+       return new Promise<Response>((_resolve, reject) => {
+         init?.signal?.addEventListener("abort", () => {
+           reject(new DOMException("The operation was aborted.", "AbortError"));
+@@ -169,7 +169,7 @@ describe("D7 model-gateway resilience (offline, fetch-stub, no network)", () =>
+ 
+   it("retries a timeout as a transient failure and succeeds once the provider responds in time", async () => {
+     let calls = 0;
+-    const fetchMock = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
++    const fetchMock = vi.fn((_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+       calls += 1;
+       if (calls === 1) {
+         return new Promise<Response>((_resolve, reject) => {
+@@ -195,7 +195,7 @@ describe("D7 model-gateway resilience (offline, fetch-stub, no network)", () =>
+       // headers resolve), this attempt would hang forever instead of
+       // aborting; with the fix, the still-armed timer aborts the in-flight
+       // body read and the client surfaces PROVIDER_TIMEOUT.
+-      const fetchMock = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
++      const fetchMock = vi.fn((_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+         const stalledResponse = {
+           ok: true,
+           status: 200,
+@@ -234,7 +234,7 @@ describe("D7 model-gateway resilience (offline, fetch-stub, no network)", () =>
+             releaseLock: () => {},
+           }),
+         }) as unknown as ReadableStream<Uint8Array>;
+-      const fetchMock = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
++      const fetchMock = vi.fn((_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+         const stalledResponse = {
+           ok: true,
+           status: 200,
+diff --git a/apps/api/test/n14-ai-demo.integration.test.ts b/apps/api/test/n14-ai-demo.integration.test.ts
+index 47850c3..4afc654 100644
+--- a/apps/api/test/n14-ai-demo.integration.test.ts
++++ b/apps/api/test/n14-ai-demo.integration.test.ts
+@@ -98,7 +98,7 @@ function reportSnapshot() {
+ 
+ describe("N14-01 live demo: NL command -> MODEL_INVOKE (gateway service principal) -> COMMAND_MAP -> effect", () => {
+   it("model client is invoked only under the dedicated gateway service principal, never the operator", async () => {
+-    const invokeSpy = vi.fn(async () => ({
++    const invokeSpy = vi.fn(async (_request: Parameters<ModelClient["invoke"]>[0]) => ({
+       structuredOutput: {
+         steps: [
+           {
+diff --git a/apps/api/test/pg-b-pm-delivery.livepg.integration.test.ts b/apps/api/test/pg-b-pm-delivery.livepg.integration.test.ts
+index 9be3f95..1b5ab63 100644
+--- a/apps/api/test/pg-b-pm-delivery.livepg.integration.test.ts
++++ b/apps/api/test/pg-b-pm-delivery.livepg.integration.test.ts
+@@ -7,9 +7,9 @@ import {
+   createPgPmRepository,
+   type PgQueryable,
+   type PmRepository,
+-} from "../../../packages/domain/src/pg-pm-adapter.js";
+-import type { PmPlan, PmAssignment, PmTarget, TargetObservation, VarianceException } from "../../../packages/domain/src/pm.js";
+-import type { DeliveryProject } from "../../../packages/domain/src/delivery.js";
++} from "@ai-crm/domain/pg-pm-adapter";
++import type { PmPlan, PmAssignment, PmTarget, TargetObservation, VarianceException } from "@ai-crm/domain/pm";
++import type { DeliveryProject } from "@ai-crm/domain/delivery";
+ 
+ /**
+  * Ultragoal P6-b G001 / PG-B (PM + delivery) acceptance against REAL
+diff --git a/apps/api/test/s0-natural-command.integration.test.ts b/apps/api/test/s0-natural-command.integration.test.ts
+index 778253a..fff0f78 100644
+--- a/apps/api/test/s0-natural-command.integration.test.ts
++++ b/apps/api/test/s0-natural-command.integration.test.ts
+@@ -93,7 +93,7 @@ describe("S0 natural command integration", () => {
+   });
+ 
+   it("S0-I-02: mock ModelClient is invoked via gateway service principal", async () => {
+-    const invokeSpy = vi.fn(async () => ({
++    const invokeSpy = vi.fn(async (_request: Parameters<ModelClient["invoke"]>[0]) => ({
+       structuredOutput: {
+         steps: [
+           {
+@@ -861,11 +861,6 @@ describe("S0 natural command integration", () => {
+   });
+ 
+   it("ready() fails closed when databaseUrl set but pool cannot connect", async () => {
+-    const broken = {
+-      async query() {
+-        throw new Error("simulated pool failure");
+-      },
+-    };
+     // Inject a pool that fails on first dual-write is not ready-fail; instead
+     // force onReady dynamic path with invalid URL and no injectable Pool by
+     // stubbing — use pgPool that is undefined and databaseUrl that cannot open.
+diff --git a/packages/imports/src/index.ts b/packages/imports/src/index.ts
+index 94be01b..a428aaa 100644
+--- a/packages/imports/src/index.ts
++++ b/packages/imports/src/index.ts
+@@ -393,3 +393,6 @@ export class ImportService {
+     return batch;
+   }
+ }
++
++
++export * from "./notion-cwos.js";
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index bc364ae..73c5cf5 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -71,6 +71,9 @@ importers:
+         specifier: ^8.13.1
+         version: 8.22.0
+     devDependencies:
++      '@types/pg':
++        specifier: ^8.11.10
++        version: 8.20.0
+       typescript:
+         specifier: ^5.7.2
+         version: 5.9.3
+-- 
+2.47.3
