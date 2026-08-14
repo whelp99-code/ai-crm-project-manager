@@ -5,7 +5,7 @@ on:
     branches:
       - release/customer-work-os-v1-stabilization
     paths:
-      - ".github/cwos-patches/*.patch"
+      - ".github/cwos-patches/**"
 
 permissions:
   contents: write
@@ -16,24 +16,33 @@ concurrency:
 
 jobs:
   apply:
+    if: ${{ endsWith(github.event.head_commit.message, '[apply-cwos-patch]') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Apply exactly one reviewed patch
+      - name: Reconstruct and apply exactly one reviewed patch bundle
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p /tmp/cwos-patch
+          mapfile -t parts < <(find .github/cwos-patches -maxdepth 1 -type f -name '*.b64part' | sort)
           mapfile -t patches < <(find .github/cwos-patches -maxdepth 1 -type f -name '*.patch' | sort)
-          test "${#patches[@]}" -eq 1
-          patch_file="${patches[0]}"
+          if [ "${#parts[@]}" -gt 0 ]; then
+            test "${#patches[@]}" -eq 0
+            cat "${parts[@]}" | base64 --decode | gzip --decompress > /tmp/cwos-patch/reviewed.patch
+            patch_file=/tmp/cwos-patch/reviewed.patch
+          else
+            test "${#patches[@]}" -eq 1
+            patch_file="${patches[0]}"
+          fi
           git apply --check "$patch_file"
           git apply "$patch_file"
-          rm -f "$patch_file"
+          rm -rf .github/cwos-patches/*
           git config user.name "cwos-release-bot"
           git config user.email "cwos-release-bot@users.noreply.github.com"
           git add -A
           git diff --cached --check
-          git commit -m "fix(cwos): close v1 release-gate findings"
+          git commit -m "feat(cwos): implement sequential Customer Work OS v2.0.0"
           git push origin "HEAD:${GITHUB_REF_NAME}"
