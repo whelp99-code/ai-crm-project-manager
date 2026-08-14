@@ -65,7 +65,7 @@ describe("Customer Work OS state snapshots", () => {
     const before = service.exportState();
     const unsupported = { ...structuredClone(before), schemaVersion: 2 } as unknown as CustomerWorkOsState;
 
-    expect(() => service.hydrateState(unsupported)).toMatchObject({ code: "UNSUPPORTED_STATE" });
+    expect(() => service.hydrateState(unsupported)).toThrowError(expect.objectContaining({ code: "UNSUPPORTED_STATE" }));
     expect(service.exportState()).toEqual(before);
   });
 });

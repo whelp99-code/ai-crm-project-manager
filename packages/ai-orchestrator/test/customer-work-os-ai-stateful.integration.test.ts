@@ -58,6 +58,6 @@ describe("Customer Work OS AI state hydration", () => {
       reviewedByPrincipalId: "ai-1",
       reviewReason: "self",
       version: 2,
-    })])).toMatchObject({ code: "INVALID_STATE" });
+    })])).toThrowError(expect.objectContaining({ code: "INVALID_STATE" }));
   });
 });

@@ -7,6 +7,7 @@ export default defineConfig({
     watch: false,
     isolate: true,
     reporters: ["default"],
+    exclude: ["**/node_modules/**", "**/dist/**", "apps/web/e2e/**"],
     sequence: {
       shuffle: false,
     },
