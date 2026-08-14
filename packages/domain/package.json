@@ -11,7 +11,9 @@
     "./delivery": "./src/delivery.ts",
     "./pm": "./src/pm.ts",
     "./workflow-graph": "./src/workflow-graph.ts",
-    "./customer-work-os": "./src/customer-work-os.ts",
+    "./customer-work-os": "./src/customer-work-os-stateful.ts",
+    "./customer-work-os-core": "./src/customer-work-os.ts",
+    "./customer-work-os-graphs": "./src/customer-work-os-graphs.ts",
     "./pg-crm-adapter": "./src/pg-crm-adapter.ts",
     "./pg-pm-adapter": "./src/pg-pm-adapter.ts",
     "./pg-crm-sub-adapter": "./src/pg-crm-sub-adapter.ts"

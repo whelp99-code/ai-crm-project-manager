@@ -25,12 +25,29 @@ export interface CustomerWorkOsRuntimeEnvelope {
   updatedAt: string;
 }
 
+export interface CustomerWorkOsMutationAudit {
+  workspaceId: string;
+  operationId: string;
+  principalId: string;
+  idempotencyKey: string;
+  requestHash: string;
+  beforeStateHash: string;
+  afterStateHash: string;
+  resultHash: string;
+  createdAt: string;
+  sequence?: number;
+  runtimeVersion?: number;
+  previousEventHash?: string;
+  eventHash?: string;
+}
+
 export interface CustomerWorkOsSnapshotStore {
   load(workspaceId: string): Promise<CustomerWorkOsRuntimeEnvelope | undefined>;
   compareAndSwap(
     workspaceId: string,
     expectedVersion: number,
     next: Omit<CustomerWorkOsRuntimeEnvelope, "version">,
+    audit: CustomerWorkOsMutationAudit,
   ): Promise<CustomerWorkOsRuntimeEnvelope>;
   close?(): Promise<void>;
 }
@@ -55,6 +72,55 @@ function emptyState(): CustomerWorkOsState {
   return new CustomerWorkOsService().exportState();
 }
 
+function sortIdempotency(records: Iterable<IdempotencyRecord>): IdempotencyRecord[] {
+  return [...records]
+    .map((record) => copy(record))
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.key.localeCompare(right.key));
+}
+
+function runtimeStateHash(domain: CustomerWorkOsState, idempotency: IdempotencyRecord[]): string {
+  return customerWorkOsPayloadHash({ domain, idempotency: sortIdempotency(idempotency) });
+}
+
+function envelopeStateHash(input: Omit<CustomerWorkOsRuntimeEnvelope, "version" | "stateHash">): string {
+  return customerWorkOsPayloadHash({
+    schemaVersion: input.schemaVersion,
+    workspaceId: input.workspaceId,
+    domain: input.domain,
+    idempotency: sortIdempotency(input.idempotency),
+    updatedByPrincipalId: input.updatedByPrincipalId,
+    updatedAt: input.updatedAt,
+  });
+}
+
+function assertWorkspaceBoundary(workspaceId: string, state: CustomerWorkOsState): void {
+  const collections: Array<ReadonlyArray<{ workspaceId: string }>> = [
+    state.accounts,
+    state.contacts,
+    state.engagements,
+    state.parties,
+    state.activities,
+    state.knowledge,
+    state.commitments,
+    state.products,
+    state.quotes,
+    state.contracts,
+    state.deliveryProjects,
+    state.changes,
+    state.purchaseOrders,
+    state.assets,
+    state.financialItems,
+    state.settlements,
+  ];
+  for (const collection of collections) {
+    for (const item of collection) {
+      if (item.workspaceId !== workspaceId) {
+        throw new CustomerWorkOsError("CROSS_WORKSPACE_STATE", "runtime snapshot contains an entity from another workspace");
+      }
+    }
+  }
+}
+
 function validateEnvelope(envelope: CustomerWorkOsRuntimeEnvelope): void {
   if (envelope.schemaVersion !== 1 || envelope.domain.schemaVersion !== 1) {
     throw new CustomerWorkOsError("UNSUPPORTED_STATE", "unsupported Customer Work OS state schema");
@@ -62,7 +128,16 @@ function validateEnvelope(envelope: CustomerWorkOsRuntimeEnvelope): void {
   if (!envelope.workspaceId.trim() || envelope.version < 1 || !Number.isSafeInteger(envelope.version)) {
     throw new CustomerWorkOsError("INVALID_STATE", "invalid runtime envelope identity or version");
   }
-  const calculated = customerWorkOsPayloadHash({
+  assertWorkspaceBoundary(envelope.workspaceId, envelope.domain);
+  const keys = new Set<string>();
+  for (const record of envelope.idempotency) {
+    if (!record.key.trim() || !record.requestHash.trim() || !Number.isInteger(record.statusCode)) {
+      throw new CustomerWorkOsError("INVALID_STATE", "invalid idempotency record");
+    }
+    if (keys.has(record.key)) throw new CustomerWorkOsError("INVALID_STATE", `duplicate idempotency key ${record.key}`);
+    keys.add(record.key);
+  }
+  const calculated = envelopeStateHash({
     schemaVersion: envelope.schemaVersion,
     workspaceId: envelope.workspaceId,
     domain: envelope.domain,
@@ -73,8 +148,60 @@ function validateEnvelope(envelope: CustomerWorkOsRuntimeEnvelope): void {
   if (calculated !== envelope.stateHash) throw new CustomerWorkOsError("STATE_HASH_MISMATCH", "runtime state hash does not match payload");
 }
 
+function validateAuditInput(
+  workspaceId: string,
+  candidate: CustomerWorkOsRuntimeEnvelope,
+  audit: CustomerWorkOsMutationAudit,
+  expectedBeforeStateHash: string,
+): void {
+  if (audit.workspaceId !== workspaceId) throw new CustomerWorkOsError("CROSS_WORKSPACE", "audit workspace does not match runtime workspace");
+  for (const [name, value] of Object.entries({
+    operationId: audit.operationId,
+    principalId: audit.principalId,
+    idempotencyKey: audit.idempotencyKey,
+    requestHash: audit.requestHash,
+    beforeStateHash: audit.beforeStateHash,
+    afterStateHash: audit.afterStateHash,
+    resultHash: audit.resultHash,
+    createdAt: audit.createdAt,
+  })) {
+    if (typeof value !== "string" || !value.trim()) throw new CustomerWorkOsError("INVALID_AUDIT", `${name} is required`);
+  }
+  if (audit.beforeStateHash !== expectedBeforeStateHash) {
+    throw new CustomerWorkOsError("AUDIT_CHAIN_MISMATCH", "audit before-state hash does not match the persisted runtime state");
+  }
+  const expectedAfter = runtimeStateHash(candidate.domain, candidate.idempotency);
+  if (audit.afterStateHash !== expectedAfter) {
+    throw new CustomerWorkOsError("AUDIT_CHAIN_MISMATCH", "audit after-state hash does not match the candidate runtime state");
+  }
+}
+
+function finalizeAudit(
+  audit: CustomerWorkOsMutationAudit,
+  sequence: number,
+  runtimeVersion: number,
+  previousEventHash?: string,
+): CustomerWorkOsMutationAudit {
+  const core: CustomerWorkOsMutationAudit = {
+    workspaceId: audit.workspaceId,
+    operationId: audit.operationId,
+    principalId: audit.principalId,
+    idempotencyKey: audit.idempotencyKey,
+    requestHash: audit.requestHash,
+    beforeStateHash: audit.beforeStateHash,
+    afterStateHash: audit.afterStateHash,
+    resultHash: audit.resultHash,
+    createdAt: audit.createdAt,
+    sequence,
+    runtimeVersion,
+    ...(previousEventHash ? { previousEventHash } : {}),
+  };
+  return { ...core, eventHash: customerWorkOsPayloadHash(core) };
+}
+
 export class InMemoryCustomerWorkOsSnapshotStore implements CustomerWorkOsSnapshotStore {
   private readonly rows = new Map<string, CustomerWorkOsRuntimeEnvelope>();
+  private readonly events = new Map<string, CustomerWorkOsMutationAudit[]>();
 
   async load(workspaceId: string): Promise<CustomerWorkOsRuntimeEnvelope | undefined> {
     const value = this.rows.get(workspaceId);
@@ -85,6 +212,7 @@ export class InMemoryCustomerWorkOsSnapshotStore implements CustomerWorkOsSnapsh
     workspaceId: string,
     expectedVersion: number,
     next: Omit<CustomerWorkOsRuntimeEnvelope, "version">,
+    audit: CustomerWorkOsMutationAudit,
   ): Promise<CustomerWorkOsRuntimeEnvelope> {
     const current = this.rows.get(workspaceId);
     const actualVersion = current?.version ?? 0;
@@ -93,8 +221,24 @@ export class InMemoryCustomerWorkOsSnapshotStore implements CustomerWorkOsSnapsh
     }
     const stored: CustomerWorkOsRuntimeEnvelope = { ...copy(next), version: expectedVersion + 1 };
     validateEnvelope(stored);
+    const expectedBefore = current
+      ? runtimeStateHash(current.domain, current.idempotency)
+      : runtimeStateHash(emptyState(), []);
+    validateAuditInput(workspaceId, stored, audit, expectedBefore);
+
+    const history = this.events.get(workspaceId) ?? [];
+    const previous = history.at(-1);
+    if (previous && previous.afterStateHash !== audit.beforeStateHash) {
+      throw new CustomerWorkOsError("AUDIT_CHAIN_MISMATCH", "audit history is not contiguous");
+    }
+    const event = finalizeAudit(audit, history.length + 1, stored.version, previous?.eventHash);
     this.rows.set(workspaceId, stored);
+    this.events.set(workspaceId, [...history, event]);
     return copy(stored);
+  }
+
+  auditLog(workspaceId: string): CustomerWorkOsMutationAudit[] {
+    return (this.events.get(workspaceId) ?? []).map((event) => copy(event));
   }
 }
 
@@ -124,6 +268,11 @@ interface SnapshotRow {
   updated_at: Date | string;
 }
 
+interface AuditHeadRow {
+  head_sequence: string | number | bigint;
+  head_event_hash: string | null;
+}
+
 async function withWorkspace<T>(pool: SqlPool, workspaceId: string, operation: (connection: SqlConnection) => Promise<T>): Promise<T> {
   const connection = await pool.connect();
   try {
@@ -146,7 +295,7 @@ function fromRow(row: SnapshotRow): CustomerWorkOsRuntimeEnvelope {
     workspaceId: row.workspace_id,
     version: Number(row.version),
     domain: copy(row.state),
-    idempotency: copy(row.idempotency),
+    idempotency: sortIdempotency(row.idempotency),
     stateHash: row.state_hash,
     updatedByPrincipalId: row.updated_by_principal_id,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at),
@@ -175,17 +324,52 @@ export class PgCustomerWorkOsSnapshotStore implements CustomerWorkOsSnapshotStor
     workspaceId: string,
     expectedVersion: number,
     next: Omit<CustomerWorkOsRuntimeEnvelope, "version">,
+    audit: CustomerWorkOsMutationAudit,
   ): Promise<CustomerWorkOsRuntimeEnvelope> {
     const candidate: CustomerWorkOsRuntimeEnvelope = { ...copy(next), version: expectedVersion + 1 };
     validateEnvelope(candidate);
+
     return withWorkspace(this.pool, workspaceId, async (connection) => {
-      const result = expectedVersion === 0
+      await connection.query(
+        `INSERT INTO cwos_runtime_audit_heads (workspace_id, head_sequence)
+         VALUES ($1, 0)
+         ON CONFLICT (workspace_id) DO NOTHING`,
+        [workspaceId],
+      );
+      const headResult = await connection.query<AuditHeadRow>(
+        `SELECT head_sequence, head_event_hash
+           FROM cwos_runtime_audit_heads
+          WHERE workspace_id = $1
+          FOR UPDATE`,
+        [workspaceId],
+      );
+      const head = headResult.rows[0];
+      if (!head) throw new CustomerWorkOsError("AUDIT_HEAD_MISSING", "runtime audit head is missing");
+
+      const currentResult = await connection.query<SnapshotRow>(
+        `SELECT workspace_id, version, schema_version, state, idempotency, state_hash,
+                updated_by_principal_id, updated_at
+           FROM cwos_runtime_snapshots
+          WHERE workspace_id = $1
+          FOR UPDATE`,
+        [workspaceId],
+      );
+      const current = currentResult.rows[0];
+      const actualVersion = current ? Number(current.version) : 0;
+      if (actualVersion !== expectedVersion) {
+        throw new CustomerWorkOsError("CONCURRENT_MODIFICATION", `expected runtime version ${expectedVersion}, found ${actualVersion}`);
+      }
+      const expectedBefore = current
+        ? runtimeStateHash(current.state, current.idempotency)
+        : runtimeStateHash(emptyState(), []);
+      validateAuditInput(workspaceId, candidate, audit, expectedBefore);
+
+      const snapshotResult = expectedVersion === 0
         ? await connection.query<SnapshotRow>(
             `INSERT INTO cwos_runtime_snapshots
                (workspace_id, version, schema_version, state, idempotency, state_hash,
                 updated_by_principal_id, updated_at)
              VALUES ($1, 1, 1, $2::jsonb, $3::jsonb, $4, $5, $6::timestamptz)
-             ON CONFLICT (workspace_id) DO NOTHING
              RETURNING workspace_id, version, schema_version, state, idempotency, state_hash,
                        updated_by_principal_id, updated_at`,
             [workspaceId, JSON.stringify(candidate.domain), JSON.stringify(candidate.idempotency), candidate.stateHash, candidate.updatedByPrincipalId, candidate.updatedAt],
@@ -204,9 +388,32 @@ export class PgCustomerWorkOsSnapshotStore implements CustomerWorkOsSnapshotStor
                         updated_by_principal_id, updated_at`,
             [workspaceId, expectedVersion, JSON.stringify(candidate.domain), JSON.stringify(candidate.idempotency), candidate.stateHash, candidate.updatedByPrincipalId, candidate.updatedAt],
           );
-      const row = result.rows[0];
-      if (!row) throw new CustomerWorkOsError("CONCURRENT_MODIFICATION", `runtime version ${expectedVersion} is stale`);
-      return fromRow(row);
+      const snapshotRow = snapshotResult.rows[0];
+      if (!snapshotRow) throw new CustomerWorkOsError("CONCURRENT_MODIFICATION", `runtime version ${expectedVersion} is stale`);
+
+      const sequence = Number(head.head_sequence) + 1;
+      const event = finalizeAudit(audit, sequence, candidate.version, head.head_event_hash ?? undefined);
+      const insertedEvent = await connection.query<{ id: string }>(
+        `INSERT INTO cwos_runtime_events
+          (workspace_id, sequence, runtime_version, operation_id, principal_id,
+           idempotency_key, request_hash, before_state_hash, after_state_hash,
+           result_hash, previous_event_hash, event_hash, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::timestamptz)
+         RETURNING id`,
+        [workspaceId, sequence, candidate.version, event.operationId, event.principalId,
+         event.idempotencyKey, event.requestHash, event.beforeStateHash, event.afterStateHash,
+         event.resultHash, event.previousEventHash ?? null, event.eventHash, event.createdAt],
+      );
+      const eventId = insertedEvent.rows[0]?.id;
+      if (!eventId) throw new CustomerWorkOsError("AUDIT_WRITE_FAILED", "runtime audit event was not inserted");
+      await connection.query(
+        `UPDATE cwos_runtime_audit_heads
+            SET head_sequence = $2, head_event_id = $3::uuid,
+                head_event_hash = $4, updated_at = $5::timestamptz
+          WHERE workspace_id = $1`,
+        [workspaceId, sequence, eventId, event.eventHash, event.createdAt],
+      );
+      return fromRow(snapshotRow);
     });
   }
 
@@ -282,7 +489,9 @@ export async function createPgCustomerWorkOsInfrastructureFromEnvironment(): Pro
   const module = await dynamicImport("pg");
   const Pool = module.Pool as new (options: { connectionString: string; max: number; application_name: string }) => SqlPool;
   if (!Pool) throw new CustomerWorkOsError("PG_DRIVER_UNAVAILABLE", "pg Pool export is unavailable");
-  const pool = new Pool({ connectionString, max: Number(process.env.CWOS_PG_POOL_MAX ?? 5), application_name: "ai-crm-cwos" });
+  const max = Number(process.env.CWOS_PG_POOL_MAX ?? 5);
+  if (!Number.isInteger(max) || max < 1 || max > 50) throw new CustomerWorkOsError("INVALID_CONFIG", "CWOS_PG_POOL_MAX must be 1..50");
+  const pool = new Pool({ connectionString, max, application_name: "ai-crm-cwos" });
   const store = new PgCustomerWorkOsSnapshotStore(pool);
   const approvals = new PgGovernanceApprovalResolver(pool);
   return { store, approvals, close: () => pool.end() };
@@ -301,7 +510,7 @@ export class CustomerWorkOsRuntimeManager {
 
   constructor(private readonly store: CustomerWorkOsSnapshotStore) {}
 
-  async read<T>(workspaceId: string, operation: (service: CustomerWorkOsService) => T): Promise<T> {
+  async read<T>(workspaceId: string, operation: (service: CustomerWorkOsService) => T | Promise<T>): Promise<T> {
     const runtime = await this.runtime(workspaceId);
     return operation(runtime.service);
   }
@@ -311,7 +520,8 @@ export class CustomerWorkOsRuntimeManager {
     principalId: string;
     idempotencyKey: string;
     requestHash: string;
-    operation(service: CustomerWorkOsService): T;
+    operationId?: string;
+    operation(service: CustomerWorkOsService): T | Promise<T>;
     statusCode?: number;
     now?: string;
   }): Promise<{ statusCode: number; payload: T; replayed: boolean }> {
@@ -328,8 +538,10 @@ export class CustomerWorkOsRuntimeManager {
       const before = runtime.service.exportState();
       const beforeVersion = runtime.version;
       const beforeIdempotency = new Map(runtime.idempotency);
+      const beforeRecords = sortIdempotency(beforeIdempotency.values());
+      const beforeStateHash = runtimeStateHash(before, beforeRecords);
       try {
-        const payload = input.operation(runtime.service);
+        const payload = await input.operation(runtime.service);
         const statusCode = input.statusCode ?? 201;
         const createdAt = input.now ?? new Date().toISOString();
         runtime.idempotency.set(input.idempotencyKey, {
@@ -339,11 +551,10 @@ export class CustomerWorkOsRuntimeManager {
           payload: copy(payload),
           createdAt,
         });
-        const retained = [...runtime.idempotency.values()]
-          .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-          .slice(-5000);
+        const retained = sortIdempotency(runtime.idempotency.values()).slice(-5000);
         runtime.idempotency = new Map(retained.map((item) => [item.key, item]));
         const domain = runtime.service.exportState();
+        const afterStateHash = runtimeStateHash(domain, retained);
         const envelopeCore = {
           schemaVersion: 1 as const,
           workspaceId: input.workspaceId,
@@ -352,8 +563,24 @@ export class CustomerWorkOsRuntimeManager {
           updatedByPrincipalId: input.principalId,
           updatedAt: createdAt,
         };
-        const stateHash = customerWorkOsPayloadHash(envelopeCore);
-        const saved = await this.store.compareAndSwap(input.workspaceId, runtime.version, { ...envelopeCore, stateHash });
+        const stateHash = envelopeStateHash(envelopeCore);
+        const audit: CustomerWorkOsMutationAudit = {
+          workspaceId: input.workspaceId,
+          operationId: input.operationId?.trim() || "unspecified",
+          principalId: input.principalId,
+          idempotencyKey: input.idempotencyKey,
+          requestHash: input.requestHash,
+          beforeStateHash,
+          afterStateHash,
+          resultHash: customerWorkOsPayloadHash(payload),
+          createdAt,
+        };
+        const saved = await this.store.compareAndSwap(
+          input.workspaceId,
+          runtime.version,
+          { ...envelopeCore, stateHash },
+          audit,
+        );
         runtime.version = saved.version;
         return { statusCode, payload: copy(payload), replayed: false };
       } catch (error) {
@@ -395,14 +622,15 @@ export class CustomerWorkOsRuntimeManager {
   private async serialized<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.locks.get(workspaceId) ?? Promise.resolve();
     let release!: () => void;
-    const current = new Promise<void>((resolve) => { release = resolve; });
-    this.locks.set(workspaceId, previous.then(() => current));
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => gate);
+    this.locks.set(workspaceId, tail);
     await previous;
     try {
       return await operation();
     } finally {
       release();
-      if (this.locks.get(workspaceId) === current) this.locks.delete(workspaceId);
+      if (this.locks.get(workspaceId) === tail) this.locks.delete(workspaceId);
     }
   }
 }

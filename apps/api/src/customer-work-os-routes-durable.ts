@@ -8,6 +8,7 @@ import {
   type ChangeRequest,
   type Commitment,
   type Contract,
+  type CustomerWorkOsService,
   type DeliveryProject,
   type DeliveryWorkItem,
   type Engagement,
@@ -25,10 +26,16 @@ import {
   type CustomerWorkOsSnapshotStore,
   type GovernanceApprovalResolver,
 } from "./customer-work-os-runtime.js";
+import {
+  createPgCustomerWorkOsIdentityResolverFromEnvironment,
+  type CustomerWorkOsIdentity,
+  type CustomerWorkOsIdentityResolver,
+} from "./customer-work-os-identity.js";
 
 export interface DurableCustomerWorkOsRouteOptions {
   store?: CustomerWorkOsSnapshotStore;
   approvals?: GovernanceApprovalResolver;
+  identityResolver?: CustomerWorkOsIdentityResolver;
   now?: () => string;
 }
 
@@ -70,9 +77,15 @@ function optionalString(body: Record<string, unknown>, name: string): string | u
   return value.trim() || undefined;
 }
 
+function withoutKeys(body: Record<string, unknown>, ...keys: string[]): Record<string, unknown> {
+  const next = { ...body };
+  for (const key of keys) delete next[key];
+  return next;
+}
+
 function status(error: CustomerWorkOsError): number {
   if (error.code === "NOT_FOUND" || error.code === "APPROVAL_NOT_FOUND") return 404;
-  if (error.code === "CROSS_WORKSPACE") return 403;
+  if (error.code === "CROSS_WORKSPACE" || error.code === "CROSS_WORKSPACE_STATE") return 403;
   if (error.code === "APPROVAL_INFRASTRUCTURE_REQUIRED") return 503;
   if ([
     "DUPLICATE_ID",
@@ -107,21 +120,40 @@ export async function registerDurableCustomerWorkOsRoutes(
   const infrastructure = options.store ? undefined : await createPgCustomerWorkOsInfrastructureFromEnvironment();
   const store = options.store ?? infrastructure?.store ?? new InMemoryCustomerWorkOsSnapshotStore();
   const approvals = options.approvals ?? infrastructure?.approvals;
+  const environmentIdentity = options.identityResolver || !infrastructure
+    ? undefined
+    : await createPgCustomerWorkOsIdentityResolverFromEnvironment();
+  const identityResolver = options.identityResolver ?? environmentIdentity;
   const manager = new CustomerWorkOsRuntimeManager(store);
   const now = options.now ?? (() => new Date().toISOString());
 
   if (infrastructure) app.addHook("onClose", async () => infrastructure.close());
   else if (store.close) app.addHook("onClose", async () => store.close?.());
+  if (environmentIdentity?.close) app.addHook("onClose", async () => environmentIdentity.close?.());
+
+  async function verifyIdentity(workspaceId: string, principalId: string, humanAuthority: boolean): Promise<CustomerWorkOsIdentity> {
+    const identity = identityResolver
+      ? await identityResolver.resolve(workspaceId, principalId)
+      : { workspaceId, principalId, kind: "HUMAN" as const, role: "legacy", active: true };
+    if (!identity.active || identity.workspaceId !== workspaceId || identity.principalId !== principalId) {
+      throw new CustomerWorkOsError("PRINCIPAL_NOT_FOUND", "principal is inactive or not bound to the requested workspace");
+    }
+    if (humanAuthority && identity.kind !== "HUMAN") {
+      throw new CustomerWorkOsError("HUMAN_AUTHORITY_REQUIRED", "final business mutations require an active human principal");
+    }
+    return identity;
+  }
 
   async function mutate<T>(
     request: FastifyRequest,
     reply: FastifyReply,
     routeKey: string,
-    operation: (service: Parameters<Parameters<CustomerWorkOsRuntimeManager["mutate"]>[0]["operation"]>[0], workspaceId: string, principalId: string, body: Record<string, unknown>) => T,
+    operation: (service: CustomerWorkOsService, workspaceId: string, principalId: string, body: Record<string, unknown>) => T | Promise<T>,
   ): Promise<void> {
     try {
       const workspaceId = header(request, "x-workspace-id");
       const principalId = header(request, "x-principal-id");
+      await verifyIdentity(workspaceId, principalId, true);
       const idempotencyKey = header(request, "idempotency-key");
       const body = bodyObject(request);
       const requestHash = customerWorkOsPayloadHash({ routeKey, workspaceId, principalId, body });
@@ -130,6 +162,7 @@ export async function registerDurableCustomerWorkOsRoutes(
         principalId,
         idempotencyKey,
         requestHash,
+        operationId: routeKey,
         operation: (service) => operation(service, workspaceId, principalId, body),
         now: now(),
       });
@@ -143,6 +176,23 @@ export async function registerDurableCustomerWorkOsRoutes(
   async function resolveApproval(input: Parameters<GovernanceApprovalResolver["resolve"]>[0]): Promise<ApprovalReceipt> {
     if (!approvals) throw new CustomerWorkOsError("APPROVAL_INFRASTRUCTURE_REQUIRED", "approval resolver is required for this action");
     return approvals.resolve(input);
+  }
+
+  async function mutationContext(request: FastifyRequest): Promise<{
+    workspaceId: string;
+    principalId: string;
+    idempotencyKey: string;
+    body: Record<string, unknown>;
+  }> {
+    const workspaceId = header(request, "x-workspace-id");
+    const principalId = header(request, "x-principal-id");
+    await verifyIdentity(workspaceId, principalId, true);
+    return {
+      workspaceId,
+      principalId,
+      idempotencyKey: header(request, "idempotency-key"),
+      body: bodyObject(request),
+    };
   }
 
   app.post("/api/cwos/accounts", async (request, reply) => {
@@ -196,10 +246,7 @@ export async function registerDurableCustomerWorkOsRoutes(
 
   app.post<{ Params: { quoteId: string } }>("/api/cwos/quotes/:quoteId/approve", async (request, reply) => {
     try {
-      const workspaceId = header(request, "x-workspace-id");
-      const principalId = header(request, "x-principal-id");
-      const idempotencyKey = header(request, "idempotency-key");
-      const body = bodyObject(request);
+      const { workspaceId, principalId, idempotencyKey, body } = await mutationContext(request);
       const engagementId = stringField(body, "engagementId");
       const expectedVersion = numberField(body, "expectedVersion");
       const minimumMarginBps = numberField(body, "minimumMarginBps");
@@ -208,7 +255,7 @@ export async function registerDurableCustomerWorkOsRoutes(
       const payload = { totalCostKrw: quote.totalCostKrw, totalPriceKrw: quote.totalPriceKrw, marginBps: quote.marginBps, scope: quote.scope };
       const receipt = await resolveApproval({ workspaceId, approvalId: approvalId(body), resourceType: "quote", resourceId: quote.id, resourceVersion: expectedVersion, action: "QUOTE_APPROVE", payloadHash: customerWorkOsPayloadHash(payload) });
       const requestHash = customerWorkOsPayloadHash({ route: "quote.approve", workspaceId, principalId, quoteId: quote.id, body });
-      const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operation: (service) => service.approveQuote(workspaceId, quote.id, expectedVersion, receipt, minimumMarginBps), now: now() });
+      const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operationId: "quote.approve", operation: (service) => service.approveQuote(workspaceId, quote.id, expectedVersion, receipt, minimumMarginBps), now: now() });
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false").code(result.statusCode).send(result.payload);
     } catch (error) { sendError(reply, error); }
   });
@@ -249,14 +296,16 @@ export async function registerDurableCustomerWorkOsRoutes(
 
   app.post<{ Params: { requestId: string } }>("/api/cwos/change-requests/:requestId/approve", async (request, reply) => {
     try {
-      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); const idempotencyKey = header(request, "idempotency-key"); const body = bodyObject(request);
-      const engagementId = stringField(body, "engagementId"); const expectedVersion = numberField(body, "expectedVersion"); const disposition = stringField(body, "disposition") as NonNullable<ChangeRequest["disposition"]>;
+      const { workspaceId, principalId, idempotencyKey, body } = await mutationContext(request);
+      const engagementId = stringField(body, "engagementId");
+      const expectedVersion = numberField(body, "expectedVersion");
+      const disposition = stringField(body, "disposition") as NonNullable<ChangeRequest["disposition"]>;
       const change = await manager.read(workspaceId, (service) => service.getEngagementSnapshot(workspaceId, engagementId).changes.find((item) => item.id === request.params.requestId));
       if (!change) throw new CustomerWorkOsError("NOT_FOUND", `change request not found: ${request.params.requestId}`);
       const payload = { disposition, scopeImpact: change.scopeImpact, scheduleImpactDays: change.scheduleImpactDays, costImpactKrw: change.costImpactKrw, priceImpactKrw: change.priceImpactKrw };
       const receipt = await resolveApproval({ workspaceId, approvalId: approvalId(body), resourceType: "change_request", resourceId: change.id, resourceVersion: expectedVersion, action: "CHANGE_REQUEST_APPROVE", payloadHash: customerWorkOsPayloadHash(payload) });
       const requestHash = customerWorkOsPayloadHash({ route: "change.approve", workspaceId, principalId, requestId: change.id, body });
-      const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operation: (service) => service.approveChangeRequest(workspaceId, change.id, expectedVersion, disposition, receipt), now: now() });
+      const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operationId: "change.approve", operation: (service) => service.approveChangeRequest(workspaceId, change.id, expectedVersion, disposition, receipt), now: now() });
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false").code(result.statusCode).send(result.payload);
     } catch (error) { sendError(reply, error); }
   });
@@ -274,15 +323,16 @@ export async function registerDurableCustomerWorkOsRoutes(
 
   app.post<{ Params: { orderId: string } }>("/api/cwos/purchase-orders/:orderId/approve", async (request, reply) => {
     try {
-      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); const idempotencyKey = header(request, "idempotency-key"); const body = bodyObject(request);
-      const engagementId = stringField(body, "engagementId"); const expectedVersion = numberField(body, "expectedVersion");
+      const { workspaceId, principalId, idempotencyKey, body } = await mutationContext(request);
+      const engagementId = stringField(body, "engagementId");
+      const expectedVersion = numberField(body, "expectedVersion");
       const order = await manager.read(workspaceId, (service) => service.getEngagementSnapshot(workspaceId, engagementId).purchaseOrders.find((item) => item.id === request.params.orderId));
       if (!order) throw new CustomerWorkOsError("NOT_FOUND", `purchase order not found: ${request.params.orderId}`);
       const total = order.lines.reduce((sum, line) => sum + BigInt(line.unitCostKrw) * BigInt(line.quantity), 0n).toString();
       const payload = { vendorAccountId: order.vendorAccountId, totalCostKrw: total, lines: order.lines };
       const receipt = await resolveApproval({ workspaceId, approvalId: approvalId(body), resourceType: "purchase_order", resourceId: order.id, resourceVersion: expectedVersion, action: "PURCHASE_ORDER_APPROVE", payloadHash: customerWorkOsPayloadHash(payload) });
       const requestHash = customerWorkOsPayloadHash({ route: "po.approve", workspaceId, principalId, orderId: order.id, body });
-      const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operation: (service) => service.approvePurchaseOrder(workspaceId, order.id, expectedVersion, receipt), now: now() });
+      const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operationId: "purchase_order.approve", operation: (service) => service.approvePurchaseOrder(workspaceId, order.id, expectedVersion, receipt), now: now() });
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false").code(result.statusCode).send(result.payload);
     } catch (error) { sendError(reply, error); }
   });
@@ -304,30 +354,32 @@ export async function registerDurableCustomerWorkOsRoutes(
 
   app.post("/api/cwos/financial-items", async (request, reply) => {
     try {
-      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); const idempotencyKey = header(request, "idempotency-key"); const body = bodyObject(request);
+      const { workspaceId, principalId, idempotencyKey, body } = await mutationContext(request);
       stringField(body, "id"); stringField(body, "accountId"); stringField(body, "direction"); stringField(body, "category"); stringField(body, "lifecycle"); stringField(body, "netAmountKrw"); stringField(body, "vatAmountKrw"); stringField(body, "grossAmountKrw"); stringField(body, "expectedDate");
-      const input = { ...(body as unknown as Omit<FinancialItem, "workspaceId">), workspaceId };
+      const domainBody = withoutKeys(body, "approvalId");
+      const input = { ...(domainBody as unknown as Omit<FinancialItem, "workspaceId">), workspaceId };
       if (input.lifecycle !== "PLANNED") {
         const payloadHash = customerWorkOsPayloadHash(input);
         await resolveApproval({ workspaceId, approvalId: approvalId(body), resourceType: "financial_item", resourceId: input.id, resourceVersion: input.revision, action: "FINANCIAL_ITEM_CREATE", payloadHash });
       }
       const requestHash = customerWorkOsPayloadHash({ route: "finance.item.create", workspaceId, principalId, body });
-      const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operation: (service) => service.addFinancialItem(input), now: now() });
+      const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operationId: "finance.item.create", operation: (service) => service.addFinancialItem(input), now: now() });
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false").code(result.statusCode).send(result.payload);
     } catch (error) { sendError(reply, error); }
   });
 
   app.post("/api/cwos/settlements", async (request, reply) => {
     try {
-      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); const idempotencyKey = header(request, "idempotency-key"); const body = bodyObject(request);
+      const { workspaceId, principalId, idempotencyKey, body } = await mutationContext(request);
       const engagementId = stringField(body, "engagementId"); stringField(body, "id"); stringField(body, "financialItemId"); stringField(body, "direction"); stringField(body, "amountKrw"); stringField(body, "settledAt"); stringField(body, "accountOrCard"); stringField(body, "evidenceRef");
-      const settlement = { ...(body as unknown as Omit<Settlement, "workspaceId">), workspaceId };
+      const domainBody = withoutKeys(body, "approvalId", "engagementId");
+      const settlement = { ...(domainBody as unknown as Omit<Settlement, "workspaceId">), workspaceId };
       const item = await manager.read(workspaceId, (service) => service.getEngagementSnapshot(workspaceId, engagementId).financialItems.find((current) => current.id === settlement.financialItemId));
       if (!item) throw new CustomerWorkOsError("NOT_FOUND", `financial item not found: ${settlement.financialItemId}`);
       const payloadHash = customerWorkOsPayloadHash(settlement);
       await resolveApproval({ workspaceId, approvalId: approvalId(body), resourceType: "financial_item", resourceId: item.id, resourceVersion: item.revision, action: "FINANCE_SETTLEMENT_RECORD", payloadHash });
       const requestHash = customerWorkOsPayloadHash({ route: "finance.settlement.record", workspaceId, principalId, body });
-      const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operation: (service) => service.recordSettlement(settlement), now: now() });
+      const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operationId: "finance.settlement.record", operation: (service) => service.recordSettlement(settlement), now: now() });
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false").code(result.statusCode).send(result.payload);
     } catch (error) { sendError(reply, error); }
   });
@@ -336,16 +388,43 @@ export async function registerDurableCustomerWorkOsRoutes(
     await mutate(request, reply, "engagement.transition", (service, workspaceId, _principalId, body) => service.transitionEngagement(workspaceId, request.params.engagementId, numberField(body, "expectedVersion"), stringField(body, "nextStage") as Engagement["stage"], optionalString(body, "reason")));
   });
 
+  app.get("/api/cwos/cockpit", async (request, reply) => {
+    try {
+      const workspaceId = header(request, "x-workspace-id");
+      const principalId = header(request, "x-principal-id");
+      await verifyIdentity(workspaceId, principalId, false);
+      return await manager.read(workspaceId, (service) => {
+        const state = service.exportState();
+        const terminal = new Set(["CLOSED", "LOST", "CANCELLED"]);
+        const activeEngagements = state.engagements.filter((engagement) => !terminal.has(engagement.stage));
+        const openCommitments = state.commitments.filter((commitment) => !["DONE", "CANCELLED"].includes(commitment.status));
+        return {
+          workspaceId,
+          activeEngagementCount: activeEngagements.length,
+          criticalEngagementCount: activeEngagements.filter((engagement) => engagement.health === "critical").length,
+          openCommitmentCount: openCommitments.length,
+          overdueCommitmentCount: openCommitments.filter((commitment) => commitment.dueAt < now()).length,
+          pendingQuoteCount: state.quotes.filter((quote) => ["DRAFT", "REVIEW", "SENT"].includes(quote.status)).length,
+          generatedAt: now(),
+        };
+      });
+    } catch (error) { sendError(reply, error); return undefined; }
+  });
+
   app.get<{ Params: { engagementId: string } }>("/api/cwos/engagements/:engagementId", async (request, reply) => {
     try {
-      const workspaceId = header(request, "x-workspace-id"); header(request, "x-principal-id");
+      const workspaceId = header(request, "x-workspace-id");
+      const principalId = header(request, "x-principal-id");
+      await verifyIdentity(workspaceId, principalId, false);
       return await manager.read(workspaceId, (service) => service.getEngagementSnapshot(workspaceId, request.params.engagementId));
     } catch (error) { sendError(reply, error); return undefined; }
   });
 
   app.get<{ Params: { engagementId: string } }>("/api/cwos/engagements/:engagementId/finance", async (request, reply) => {
     try {
-      const workspaceId = header(request, "x-workspace-id"); header(request, "x-principal-id");
+      const workspaceId = header(request, "x-workspace-id");
+      const principalId = header(request, "x-principal-id");
+      await verifyIdentity(workspaceId, principalId, false);
       return await manager.read(workspaceId, (service) => service.financeSummary(workspaceId, request.params.engagementId));
     } catch (error) { sendError(reply, error); return undefined; }
   });
