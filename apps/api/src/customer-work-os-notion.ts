@@ -333,7 +333,6 @@ export function applyNotionPlanToDomain(input: {
         ...(item.primaryPhone ? { phone: item.primaryPhone } : {}),
         roles: ["business"],
         relationship: "unknown",
-        version: 1,
       });
       contacts += 1;
     }

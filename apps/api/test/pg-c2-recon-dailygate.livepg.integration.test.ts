@@ -313,7 +313,12 @@ describe.skipIf(!LIVE)("PG-C2 finance reconciliation + daily-gate against REAL P
       expect(persistedState).toBeDefined();
       // policyVersion is reconstructed from the live pack, never persisted.
       const gateB = new DailyGate(FINANCE_PACK, WS_B, FINANCE_PACK.packVersion);
-      gateB.restoreState(persistedState!);
+      gateB.restoreState({
+        streak: persistedState!.streak,
+        tier: persistedState!.tier,
+        ...(persistedState!.lastDateEpoch !== undefined ? { lastDateEpoch: persistedState!.lastDateEpoch } : {}),
+        ...(persistedState!.activatedMatrixVersion !== undefined ? { activatedMatrixVersion: persistedState!.activatedMatrixVersion } : {}),
+      });
 
       const persistedRecords = await repoB.listDayRecords(WS_B);
       expect(persistedRecords).toHaveLength(3);

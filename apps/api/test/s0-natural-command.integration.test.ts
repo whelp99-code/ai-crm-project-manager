@@ -739,12 +739,12 @@ describe("S0 natural command integration", () => {
   it("dual-write mock pool receives orch snapshot + governance rows on agent command", async () => {
     const queries: Array<{ sql: string; params?: unknown[] }> = [];
     const pgPool = {
-      async query(sql: string, params?: unknown[]) {
-        queries.push({ sql, params });
+      async query<T = unknown>(sql: string, params?: unknown[]) {
+        queries.push({ sql, ...(params ? { params } : {}) });
         if (sql.replace(/\s+/g, " ").trim().startsWith("INSERT INTO audit_events")) {
-          return { rows: [{ id: "audit-fake-dw" }] };
+          return { rows: [{ id: "audit-fake-dw" } as T], rowCount: 1 };
         }
-        return { rows: [] };
+        return { rows: [] as T[], rowCount: 0 };
       },
     };
     const api = await ready({
