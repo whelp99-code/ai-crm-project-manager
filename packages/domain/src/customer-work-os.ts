@@ -389,7 +389,7 @@ function canonicalize(value: unknown): unknown {
 }
 
 export function customerWorkOsPayloadHash(value: unknown): string {
-  const serialized = JSON.stringify(canonicalize(value));
+  const serialized = JSON.stringify(canonicalize(value)) ?? "undefined";
   let hash = 2166136261;
   for (let index = 0; index < serialized.length; index += 1) {
     hash ^= serialized.charCodeAt(index);
@@ -872,7 +872,8 @@ export class CustomerWorkOsService {
       throw new CustomerWorkOsError("NEXT_ACTION_REQUIRED", "active engagement requires an open commitment");
     }
     engagement.stage = nextStage;
-    engagement.terminalReason = reason?.trim();
+    if (reason?.trim()) engagement.terminalReason = reason.trim();
+    else delete engagement.terminalReason;
     engagement.version += 1;
     return copy(engagement);
   }

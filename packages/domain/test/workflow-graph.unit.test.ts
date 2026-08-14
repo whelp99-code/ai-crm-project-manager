@@ -146,6 +146,6 @@ describe("WorkflowGraphRuntime", () => {
         expiresAt: "2026-08-14T01:00:00.000Z",
         status: "APPROVED",
       },
-    })).rejects.toMatchObject<Partial<WorkflowGraphError>>({ code: "STALE_APPROVAL" });
+    })).rejects.toMatchObject({ code: "STALE_APPROVAL" });
   });
 });

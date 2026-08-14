@@ -324,7 +324,12 @@ export class WorkflowGraphRuntime<TState extends Record<string, unknown>> {
     try {
       result = node.kind === "TERMINAL"
         ? { outcome: node.terminalResult === "SUCCESS" ? "complete" : "fail" }
-        : await handler!({ run: clone(run), node: clone(node), now, approvalReceipt });
+        : await handler!({
+  run: clone(run),
+  node: clone(node),
+  now,
+  ...(approvalReceipt !== undefined ? { approvalReceipt } : {}),
+});
     } catch (error) {
       const signature = error instanceof Error ? `${error.name}:${error.message}` : String(error);
       result = { outcome: "error", failureSignature: signature, message: signature };
@@ -369,9 +374,9 @@ export class WorkflowGraphRuntime<TState extends Record<string, unknown>> {
         progressBefore,
         progressAfter,
         costUnits: cost,
-        failureSignature: result.failureSignature,
+        ...(result.failureSignature !== undefined ? { failureSignature: result.failureSignature } : {}),
         evidenceIds: result.evidence?.map((item) => item.id) ?? [],
-        message: result.message,
+        ...(result.message !== undefined ? { message: result.message } : {}),
         occurredAt: now,
       });
       run.updatedAt = now;
@@ -388,9 +393,9 @@ export class WorkflowGraphRuntime<TState extends Record<string, unknown>> {
         progressBefore,
         progressAfter,
         costUnits: cost,
-        failureSignature: result.failureSignature,
+        ...(result.failureSignature !== undefined ? { failureSignature: result.failureSignature } : {}),
         evidenceIds: result.evidence?.map((item) => item.id) ?? [],
-        message: result.message,
+        ...(result.message !== undefined ? { message: result.message } : {}),
         occurredAt: now,
       });
       run.updatedAt = now;
