@@ -1,0 +1,165 @@
+name: CWOS One Shot Compile Security Hardening
+
+on:
+  push:
+    branches:
+      - feat/customer-work-os-v1-full
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cwos-one-shot-compile-security-hardening
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'fix(cwos): harden types payloads AI review and primary host') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/customer-work-os-v1-full
+          fetch-depth: 0
+      - name: Apply compile and security fixes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          # Durable routes: explicit service/asset types, audit operation IDs, strip control-only fields.
+          route = Path('apps/api/src/customer-work-os-routes-durable.ts')
+          text = route.read_text()
+          text = text.replace(
+              '  CustomerWorkOsError,\n  customerWorkOsPayloadHash,\n  type Account,',
+              '  CustomerWorkOsError,\n  CustomerWorkOsService,\n  customerWorkOsPayloadHash,\n  type Account,\n  type Asset,',
+          )
+          text = text.replace(
+              '    operation: (service: Parameters<Parameters<CustomerWorkOsRuntimeManager["mutate"]>[0]["operation"]>[0], workspaceId: string, principalId: string, body: Record<string, unknown>) => T,',
+              '    operation: (service: CustomerWorkOsService, workspaceId: string, principalId: string, body: Record<string, unknown>) => T,',
+          )
+          helper_old = '''        requestHash,
+        operation: (service) => operation(service, workspaceId, principalId, body),'''
+          helper_new = '''        requestHash,
+        operationId: routeKey,
+        operation: (service) => operation(service, workspaceId, principalId, body),'''
+          text = text.replace(helper_old, helper_new)
+          direct_ids = ["quote.approve", "change.approve", "purchase_order.approve", "finance.item.create", "finance.settlement.record"]
+          needle = 'const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operation:'
+          for operation_id in direct_ids:
+              if needle not in text:
+                  raise SystemExit(f'direct manager mutation missing for {operation_id}')
+              text = text.replace(needle, f'const result = await manager.mutate({{ workspaceId, principalId, idempotencyKey, requestHash, operationId: "{operation_id}", operation:', 1)
+          text = text.replace(
+              'return service.registerAsset({ ...(body as unknown as Omit<Parameters<typeof service.registerAsset>[0], "workspaceId" | "version">), workspaceId });',
+              'return service.registerAsset({ ...(body as unknown as Omit<Asset, "workspaceId" | "version">), workspaceId });',
+          )
+          old_financial = '''      const input = { ...(body as unknown as Omit<FinancialItem, "workspaceId">), workspaceId };
+      if (input.lifecycle !== "PLANNED") {'''
+          new_financial = '''      const { approvalId: _approvalId, ...financialBody } = body;
+      const input = { ...(financialBody as unknown as Omit<FinancialItem, "workspaceId">), workspaceId };
+      if (input.lifecycle !== "PLANNED") {'''
+          text = text.replace(old_financial, new_financial)
+          old_settlement = '''      const settlement = { ...(body as unknown as Omit<Settlement, "workspaceId">), workspaceId };
+      const item = await manager.read'''
+          new_settlement = '''      const { approvalId: _approvalId, engagementId: _engagementId, ...settlementBody } = body;
+      const settlement = { ...(settlementBody as unknown as Omit<Settlement, "workspaceId">), workspaceId };
+      const item = await manager.read'''
+          text = text.replace(old_settlement, new_settlement)
+          route.write_text(text)
+
+          # Runtime test: avoid generic Parameters inference on a generic method.
+          runtime_test = Path('apps/api/test/customer-work-os-runtime.integration.test.ts')
+          text = runtime_test.read_text()
+          text = text.replace(
+              'import { CustomerWorkOsError } from "@ai-crm/domain/customer-work-os";',
+              'import { CustomerWorkOsError, type CustomerWorkOsService } from "@ai-crm/domain/customer-work-os";',
+          )
+          text = text.replace(
+              'operation: (service: Parameters<Parameters<CustomerWorkOsRuntimeManager["mutate"]>[0]["operation"]>[0]) => service.createAccount({',
+              'operation: (service: CustomerWorkOsService) => service.createAccount({',
+          )
+          runtime_test.write_text(text)
+
+          # AI: validate usage shape, bind evidence to the supplied context, and prevent self-review.
+          ai = Path('packages/ai-orchestrator/src/customer-work-os-ai.ts')
+          text = ai.read_text()
+          usage_shape = '''
+function assertUsageShape(usage: AiUsage): void {
+  for (const [name, value] of Object.entries(usage)) {
+    if (!Number.isInteger(value) || value < 0) throw new CustomerWorkOsAiError("INVALID_USAGE", `${name} must be a non-negative integer`);
+  }
+}
+'''
+          anchor = 'function assertUsageWithinBudget(usage: AiUsage, budget: AiBudget): void {'
+          if 'function assertUsageShape' not in text:
+              text = text.replace(anchor, usage_shape + '\n' + anchor)
+          text = text.replace(
+              '    const result = await analyzer.analyze(copy(request));\n    assertUsageWithinBudget(result.usage, request.budget);\n    const proposal = proposalFromOutput(result);',
+              '''    const result = await analyzer.analyze(copy(request));
+    assertUsageShape(result.usage);
+    assertUsageWithinBudget(result.usage, request.budget);
+    const proposal = proposalFromOutput(result);
+    const allowedEvidenceSources = new Set<string>([
+      request.inputRef,
+      ...request.context.artifactRefs,
+      ...request.context.facts.flatMap((fact) => fact.evidence.map((span) => span.sourceRef)),
+    ]);
+    for (const span of proposal.evidence) {
+      if (!allowedEvidenceSources.has(span.sourceRef)) throw new CustomerWorkOsAiError("EVIDENCE_OUTSIDE_CONTEXT", `evidence source is outside the context pack: ${span.sourceRef}`);
+    }''',
+          )
+          text = text.replace(
+              '    if (!reviewerPrincipalId.trim()) throw new CustomerWorkOsAiError("INVALID_PRINCIPAL", "reviewer principal is required");\n    if (!reason.trim())',
+              '    if (!reviewerPrincipalId.trim()) throw new CustomerWorkOsAiError("INVALID_PRINCIPAL", "reviewer principal is required");\n    if (reviewerPrincipalId === suggestion.createdByPrincipalId) throw new CustomerWorkOsAiError("INDEPENDENT_REVIEW_REQUIRED", "suggestion creator cannot approve the same suggestion");\n    if (!reason.trim())',
+          )
+          ai.write_text(text)
+
+          # AI tests use evidence from the context pack.
+          ai_test = Path('packages/ai-orchestrator/test/customer-work-os-ai.adversarial.test.ts')
+          text = ai_test.read_text().replace('sourceRef: "finance://summary"', 'sourceRef: "mail://1"').replace('sourceRef: "data://1"', 'sourceRef: "mail://1"')
+          text = text.replace('service.review(WORKSPACE, suggestion.id, suggestion.version, "owner", "ACCEPT"', 'service.review(WORKSPACE, suggestion.id, suggestion.version, "human-owner", "ACCEPT"')
+          ai_test.write_text(text)
+
+          # Notion import optional fields under exactOptionalPropertyTypes.
+          notion = Path('packages/imports/src/notion-cwos.ts')
+          text = notion.read_text()
+          text = re.sub(r'\?: string;', '?: string | undefined;', text)
+          notion.write_text(text)
+
+          # Web client type-only import.
+          roots = [Path('apps/web/src/app/customer-work-os/page.tsx'), Path('apps/web/app/customer-work-os/page.tsx')]
+          web = next((candidate for candidate in roots if candidate.exists()), None)
+          if web is not None:
+              text = web.read_text().replace('import { FormEvent, useMemo, useState } from "react";', 'import { useMemo, useState } from "react";\nimport type { FormEvent } from "react";')
+              web.write_text(text)
+
+          # Primary API host: use durable governed plugin, regardless of whether the earlier memory plugin patch landed.
+          app = Path('apps/api/src/app.ts')
+          text = app.read_text()
+          text = text.replace('import { registerCustomerWorkOsRoutes } from "./customer-work-os-routes.js";\n', '')
+          durable_import = 'import { registerDurableCustomerWorkOsRoutes } from "./customer-work-os-routes-durable.js";\n'
+          if durable_import not in text:
+              event_anchor = 'import { EventHub } from "./event-hub.js";\n'
+              if event_anchor not in text:
+                  raise SystemExit('EventHub import anchor not found')
+              text = text.replace(event_anchor, event_anchor + durable_import)
+          text = text.replace('  await registerCustomerWorkOsRoutes(app);\n', '')
+          durable_call = '  await registerDurableCustomerWorkOsRoutes(app);\n'
+          if durable_call not in text:
+              return_anchor = '  return app;'
+              position = text.rfind(return_anchor)
+              if position < 0:
+                  raise SystemExit('return app anchor not found')
+              text = text[:position] + durable_call + text[position:]
+          app.write_text(text)
+
+          Path('.github/workflows/cwos-one-shot-compile-security-hardening.yml').unlink()
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps packages .github/workflows/cwos-one-shot-compile-security-hardening.yml
+          git commit -m "fix(cwos): harden types payloads AI review and primary host"
+          git push origin HEAD:feat/customer-work-os-v1-full
