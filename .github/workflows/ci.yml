@@ -122,6 +122,7 @@ jobs:
             test/pg-d-audit-primary.livepg.integration.test.ts \
             test/pg-mutex-concurrency.livepg.integration.test.ts \
             test/q2-reports-model.livepg.integration.test.ts \
+            test/customer-work-os-v2.livepg.integration.test.ts \
             --no-file-parallelism
           pnpm --filter @ai-crm/worker exec vitest run \
             test/worker-durable.live-pg.integration.test.ts \

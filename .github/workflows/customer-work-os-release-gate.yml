@@ -72,9 +72,7 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     env:
-      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/ai_crm
-      AI_CRM_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/ai_crm
-      AI_CRM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/ai_crm
+      PG_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/ai_crm
       PGPASSWORD: postgres
     steps:
       - uses: actions/checkout@v4
@@ -93,26 +91,51 @@ jobs:
           set -euo pipefail
           for migration in $(find packages/persistence/migrations -maxdepth 1 -type f -name '*.sql' | sort); do
             echo "=== $migration ==="
-            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
+            psql "$PG_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
           done
       - name: Live PostgreSQL adversarial checks
-        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/cwos-pg-adversarial.sql
+        run: psql "$PG_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/cwos-pg-adversarial.sql
       - name: Persistence tests
         run: pnpm --filter @ai-crm/persistence test
-      - name: API memory-mode regression (database environment isolated)
+      - name: API memory-mode regression
+        # The job has a live database, but ordinary API tests intentionally stay in
+        # memory mode. Only the explicit live-pg files below receive DATABASE_URL.
+        env:
+          DATABASE_URL: ""
+          AI_CRM_DATABASE_URL: ""
+          AI_CRM_TEST_DATABASE_URL: ""
+          PERSISTENCE_MODE: memory
+        run: pnpm --filter @ai-crm/api test
+      - name: API live PostgreSQL tests
+        env:
+          DATABASE_URL: ${{ env.PG_TEST_DATABASE_URL }}
+          AI_CRM_DATABASE_URL: ${{ env.PG_TEST_DATABASE_URL }}
+          AI_CRM_TEST_DATABASE_URL: ${{ env.PG_TEST_DATABASE_URL }}
+          LIVE_PG_TEST: "1"
         run: |
-          env -u DATABASE_URL -u AI_CRM_DATABASE_URL -u AI_CRM_TEST_DATABASE_URL \
-            pnpm --filter @ai-crm/api exec vitest run --exclude='test/**/*.livepg.integration.test.ts'
-      - name: API live PostgreSQL integration suites
-        run: pnpm --filter @ai-crm/api exec sh -c 'vitest run $(find test -maxdepth 1 -type f -name "*.livepg.integration.test.ts" | sort)'
+          pnpm --filter @ai-crm/api exec vitest run \
+            test/n08-pg-primary.livepg.integration.test.ts \
+            test/n09-notify.livepg.integration.test.ts \
+            test/n12-n13-livepg.integration.test.ts \
+            test/sor-restart-livepg.integration.test.ts \
+            test/pg-a-crm-sub.livepg.integration.test.ts \
+            test/pg-b-pm-delivery.livepg.integration.test.ts \
+            test/pg-c1-ledger.livepg.integration.test.ts \
+            test/pg-c2-recon-dailygate.livepg.integration.test.ts \
+            test/q1-recon-pgfirst.livepg.integration.test.ts \
+            test/pg-d-audit-primary.livepg.integration.test.ts \
+            test/pg-mutex-concurrency.livepg.integration.test.ts \
+            test/q2-reports-model.livepg.integration.test.ts \
+            test/customer-work-os-v2.livepg.integration.test.ts \
+            --no-file-parallelism
       - name: Backup and restore
         shell: bash
         run: |
           set -euo pipefail
-          pg_dump --format=custom --no-owner --no-acl "$DATABASE_URL" --file=/tmp/cwos.dump
+          pg_dump --format=custom --no-owner --no-acl "$PG_TEST_DATABASE_URL" --file=/tmp/cwos.dump
           createdb -h 127.0.0.1 -U postgres ai_crm_restore
           pg_restore -h 127.0.0.1 -U postgres -d ai_crm_restore --no-owner --no-acl /tmp/cwos.dump
-          original=$(psql "$DATABASE_URL" -Atc "select count(*) from information_schema.tables where table_schema='public'")
+          original=$(psql "$PG_TEST_DATABASE_URL" -Atc "select count(*) from information_schema.tables where table_schema='public'")
           restored=$(psql "postgresql://postgres:postgres@127.0.0.1:5432/ai_crm_restore" -Atc "select count(*) from information_schema.tables where table_schema='public'")
           test "$original" = "$restored"
 
@@ -157,7 +180,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if grep -RInE 'child_process|node:fs|from "(openai|@anthropic-ai|@google/generative-ai)"|fetch\(' packages/domain/src/customer-work-os.ts packages/ai-orchestrator/src/customer-work-os-ai.ts; then
+          if grep -RInE 'child_process|node:fs|from "(openai|@anthropic-ai|@google/generative-ai)"|fetch\(' \
+            packages/domain/src/customer-work-os.ts \
+            packages/domain/src/customer-work-os-v2 \
+            packages/ai-orchestrator/src/customer-work-os-ai.ts; then
             echo "forbidden capability found"
             exit 1
           fi
@@ -173,7 +199,7 @@ jobs:
       - dependency-security
     runs-on: ubuntu-latest
     steps:
-      - name: Verify every declared v1.0.0 gate passed
+      - name: Verify every declared Customer Work OS gate passed
         env:
           NODE_RESULT: ${{ needs.node-regression.result }}
           PG_RESULT: ${{ needs.postgres-adversarial.result }}

@@ -16,7 +16,8 @@
     "./customer-work-os-graphs": "./src/customer-work-os-graphs.ts",
     "./pg-crm-adapter": "./src/pg-crm-adapter.ts",
     "./pg-pm-adapter": "./src/pg-pm-adapter.ts",
-    "./pg-crm-sub-adapter": "./src/pg-crm-sub-adapter.ts"
+    "./pg-crm-sub-adapter": "./src/pg-crm-sub-adapter.ts",
+    "./customer-work-os-v2": "./src/customer-work-os-v2/index.ts"
   },
   "scripts": {
     "typecheck": "tsc -b --noEmit",

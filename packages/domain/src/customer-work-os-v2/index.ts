@@ -1,0 +1,12 @@
+export const CUSTOMER_WORK_OS_V2_VERSION = "2.0.0" as const;
+export * from "./shared.js";
+export * from "./identity.js";
+export * from "./psa.js";
+export * from "./inbox.js";
+export * from "./connectors.js";
+export * from "./graphs.js";
+export * from "./ai.js";
+export * from "./portal.js";
+export * from "./admin.js";
+export * from "./operations.js";
+export * from "./platform.js";
