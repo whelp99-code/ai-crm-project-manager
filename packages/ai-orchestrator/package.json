@@ -7,7 +7,8 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./customer-work-os-ai": "./src/customer-work-os-ai.ts"
+    "./customer-work-os-ai": "./src/customer-work-os-ai-stateful.ts",
+    "./customer-work-os-ai-core": "./src/customer-work-os-ai.ts"
   },
   "scripts": { "typecheck": "tsc -b --noEmit", "test": "vitest run" },
   "dependencies": { "@ai-crm/contracts": "workspace:*", "@ai-crm/model-gateway": "workspace:*" },
