@@ -443,6 +443,7 @@ export class CustomerWorkOsService {
   private readonly assets = new Map<string, Asset>();
   private readonly financialItems = new Map<string, FinancialItem>();
   private readonly settlements = new Map<string, Settlement>();
+  private readonly financialItemBaseLifecycle = new Map<string, FinancialItem["lifecycle"]>();
   private readonly consumedReceiptIds = new Set<string>();
 
   createAccount(input: Omit<Account, "normalizedName" | "version">): Account {
@@ -670,6 +671,97 @@ export class CustomerWorkOsService {
     return copy(project);
   }
 
+
+  updateDeliverableStatus(
+    workspaceId: string,
+    projectId: string,
+    expectedVersion: number,
+    deliverableId: string,
+    status: Deliverable["status"],
+    evidenceRef?: string,
+  ): DeliveryProject {
+    const project = this.versioned(this.deliveryProjects, workspaceId, projectId, expectedVersion, "delivery project");
+    if (project.status === "COMPLETE" || project.status === "CANCELLED") {
+      throw new CustomerWorkOsError("INVALID_STATE", `delivery project is ${project.status}`);
+    }
+    const deliverable = project.deliverables.find((item) => item.id === deliverableId);
+    if (!deliverable) throw new CustomerWorkOsError("NOT_FOUND", `deliverable not found: ${deliverableId}`);
+    deliverable.status = status;
+    if (status === "APPROVED") deliverable.evidenceRef = required(evidenceRef ?? "", "deliverable evidence");
+    else delete deliverable.evidenceRef;
+    if (project.status === "PLANNED") project.status = "ACTIVE";
+    project.version += 1;
+    return copy(project);
+  }
+
+  updateDeliveryWorkItemStatus(
+    workspaceId: string,
+    projectId: string,
+    expectedVersion: number,
+    workItemId: string,
+    status: DeliveryWorkItem["status"],
+    actualHours?: number,
+  ): DeliveryProject {
+    const project = this.versioned(this.deliveryProjects, workspaceId, projectId, expectedVersion, "delivery project");
+    if (project.status === "COMPLETE" || project.status === "CANCELLED") {
+      throw new CustomerWorkOsError("INVALID_STATE", `delivery project is ${project.status}`);
+    }
+    const workItem = project.workItems.find((item) => item.id === workItemId);
+    if (!workItem) throw new CustomerWorkOsError("NOT_FOUND", `delivery work item not found: ${workItemId}`);
+    if (actualHours !== undefined) {
+      if (!Number.isFinite(actualHours) || actualHours < 0) throw new CustomerWorkOsError("INVALID_HOURS", "actualHours must be finite and non-negative");
+      workItem.actualHours = actualHours;
+    }
+    if (status === "DONE" && workItem.actualHours === undefined) {
+      throw new CustomerWorkOsError("ACTUAL_HOURS_REQUIRED", "completed work requires actualHours");
+    }
+    workItem.status = status;
+    if (project.status === "PLANNED") project.status = "ACTIVE";
+    project.version += 1;
+    return copy(project);
+  }
+
+  proposeDeliveryCompletion(workspaceId: string, projectId: string, expectedVersion: number): DeliveryProject {
+    const project = this.versioned(this.deliveryProjects, workspaceId, projectId, expectedVersion, "delivery project");
+    if (project.status === "COMPLETE" || project.status === "CANCELLED") {
+      throw new CustomerWorkOsError("INVALID_STATE", `delivery project is ${project.status}`);
+    }
+    const incompleteDeliverables = project.deliverables.filter(
+      (item) => item.required && (item.status !== "APPROVED" || !item.evidenceRef?.trim()),
+    );
+    if (incompleteDeliverables.length > 0) {
+      throw new CustomerWorkOsError("COMPLETION_RULE_FAILED", `required deliverables are not approved with evidence: ${incompleteDeliverables.map((item) => item.id).join(",")}`);
+    }
+    const incompleteWork = project.workItems.filter((item) => item.status !== "DONE");
+    if (incompleteWork.length > 0) {
+      throw new CustomerWorkOsError("COMPLETION_RULE_FAILED", `delivery work is incomplete: ${incompleteWork.map((item) => item.id).join(",")}`);
+    }
+    project.status = "AWAITING_APPROVAL";
+    project.version += 1;
+    return copy(project);
+  }
+
+  completeDelivery(
+    workspaceId: string,
+    projectId: string,
+    expectedVersion: number,
+    receipt: ApprovalReceipt,
+  ): DeliveryProject {
+    const project = this.versioned(this.deliveryProjects, workspaceId, projectId, expectedVersion, "delivery project");
+    if (project.status !== "AWAITING_APPROVAL") throw new CustomerWorkOsError("INVALID_STATE", "delivery completion was not proposed");
+    const payload = { projectId: project.id, version: project.version, deliverables: project.deliverables, workItems: project.workItems };
+    this.consume(receipt, workspaceId, "delivery_project", project.id, project.version, "DELIVERY_COMPLETE", customerWorkOsPayloadHash(payload));
+    const engagement = this.engagement(workspaceId, project.engagementId);
+    if (engagement.stage !== "DELIVERY" && engagement.stage !== "ACCEPTANCE") {
+      throw new CustomerWorkOsError("INVALID_STAGE", `cannot complete delivery from ${engagement.stage}`);
+    }
+    project.status = "COMPLETE";
+    project.version += 1;
+    engagement.stage = "BILLING";
+    engagement.version += 1;
+    return copy(project);
+  }
+
   proposeChangeRequest(input: Omit<ChangeRequest, "status" | "version">): ChangeRequest {
     this.ensureNew(this.changes, input.id, "change request");
     const project = this.owned(this.deliveryProjects, input.workspaceId, input.deliveryProjectId, "delivery project");
@@ -767,6 +859,15 @@ export class CustomerWorkOsService {
     if (order.status !== "PARTIALLY_RECEIVED" && order.status !== "RECEIVED") throw new CustomerWorkOsError("NOT_RECEIVED", "asset cannot be registered before receipt");
     this.account(input.workspaceId, input.customerAccountId);
     this.owned(this.products, input.workspaceId, input.productId, "product");
+    const receivedQuantity = order.lines
+      .filter((line) => line.productId === input.productId)
+      .reduce((sum, line) => sum + line.receivedQuantity, 0);
+    const registeredQuantity = [...this.assets.values()].filter(
+      (item) => item.workspaceId === input.workspaceId && item.purchaseOrderId === order.id && item.productId === input.productId,
+    ).length;
+    if (registeredQuantity >= receivedQuantity) {
+      throw new CustomerWorkOsError("ASSET_QUANTITY_EXCEEDED", "serialized assets cannot exceed received quantity");
+    }
     const identifier = required(input.serialOrLicenseKey, "serialOrLicenseKey");
     const duplicate = [...this.assets.values()].find((item) => item.workspaceId === input.workspaceId && item.serialOrLicenseKey === identifier);
     if (duplicate) throw new CustomerWorkOsError("DUPLICATE_ASSET_IDENTIFIER", "serial/license key already registered");
@@ -789,6 +890,7 @@ export class CustomerWorkOsService {
       if (input.engagementId !== order.engagementId || input.direction !== "OUT") throw new CustomerWorkOsError("PURCHASE_BINDING_MISMATCH", "purchase-linked financial item must be OUT for the same engagement");
     }
     if (!Number.isInteger(input.revision) || input.revision < 1) throw new CustomerWorkOsError("INVALID_REVISION", "financial revision must be >= 1");
+    this.financialItemBaseLifecycle.set(input.id, input.lifecycle);
     this.financialItems.set(input.id, copy(input));
     return copy(input);
   }
@@ -815,6 +917,7 @@ export class CustomerWorkOsService {
     const settled = this.settledAmount(item.id);
     const gross = parseMoney(item.grossAmountKrw);
     if (settled > 0n) item.lifecycle = settled < gross ? "PARTIAL" : "SETTLED";
+    else item.lifecycle = this.financialItemBaseLifecycle.get(item.id) ?? (item.direction === "IN" ? "BILLED" : "INCURRED");
     return { settlement: copy(input), financialItem: copy(item) };
   }
 
@@ -862,6 +965,41 @@ export class CustomerWorkOsService {
       forecastMarginBps: calculateMarginBps(expectedRevenue, eac),
       cashPositionKrw: amount(collected - paid),
     };
+  }
+
+
+  closeEngagement(
+    workspaceId: string,
+    engagementId: string,
+    expectedVersion: number,
+    receipt: ApprovalReceipt,
+  ): Engagement {
+    const engagement = this.versioned(this.engagements, workspaceId, engagementId, expectedVersion, "engagement");
+    if (engagement.stage !== "COLLECTION") throw new CustomerWorkOsError("INVALID_STAGE", `cannot close engagement from ${engagement.stage}`);
+    const openCommitments = this.openCommitments(workspaceId, engagementId);
+    if (openCommitments.length > 0) throw new CustomerWorkOsError("OPEN_COMMITMENTS", "engagement has unfinished commitments");
+    const activeChanges = this.byEngagement(this.changes, workspaceId, engagementId).filter(
+      (item) => !["REJECTED", "APPLIED"].includes(item.status),
+    );
+    if (activeChanges.length > 0) throw new CustomerWorkOsError("OPEN_CHANGE_REQUESTS", "engagement has unresolved change requests");
+    if (engagement.deliveryProjectId) {
+      const project = this.owned(this.deliveryProjects, workspaceId, engagement.deliveryProjectId, "delivery project");
+      if (project.status !== "COMPLETE") throw new CustomerWorkOsError("DELIVERY_NOT_COMPLETE", "delivery project is not complete");
+    }
+    const finance = this.financeSummary(workspaceId, engagementId);
+    if (finance.receivableKrw !== "0" || finance.payableKrw !== "0") {
+      throw new CustomerWorkOsError("FINANCE_NOT_SETTLED", "receivable and payable must be zero before close");
+    }
+    const payload = {
+      engagementId: engagement.id,
+      version: engagement.version,
+      projectKey: engagement.projectKey,
+      finance,
+    };
+    this.consume(receipt, workspaceId, "engagement", engagement.id, engagement.version, "ENGAGEMENT_CLOSE", customerWorkOsPayloadHash(payload));
+    engagement.stage = "CLOSED";
+    engagement.version += 1;
+    return copy(engagement);
   }
 
   transitionEngagement(workspaceId: string, engagementId: string, expectedVersion: number, nextStage: EngagementStage, reason?: string): Engagement {

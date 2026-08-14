@@ -419,9 +419,9 @@ export class WorkflowGraphRuntime<TState extends Record<string, unknown>> {
       progressBefore,
       progressAfter,
       costUnits: cost,
-      failureSignature: result.failureSignature,
+      ...(result.failureSignature !== undefined ? { failureSignature: result.failureSignature } : {}),
       evidenceIds: result.evidence?.map((item) => item.id) ?? [],
-      message: result.message,
+      ...(result.message !== undefined ? { message: result.message } : {}),
       occurredAt: now,
     });
     run.updatedAt = now;
