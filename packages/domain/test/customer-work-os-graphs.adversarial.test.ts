@@ -5,7 +5,6 @@ import {
   customerWorkGraph,
   validateAllCustomerWorkGraphs,
   validateCustomerWorkGraph,
-  type CustomerWorkGraph,
 } from "../src/customer-work-os-graphs.js";
 
 function copy<T>(value: T): T {
