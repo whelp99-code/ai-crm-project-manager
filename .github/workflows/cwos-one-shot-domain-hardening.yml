@@ -1,0 +1,144 @@
+name: CWOS One Shot Domain Hardening
+
+on:
+  push:
+    branches:
+      - feat/customer-work-os-v1-full
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cwos-one-shot-domain-hardening
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'fix(cwos): harden lifecycle asset and settlement invariants') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/customer-work-os-v1-full
+          fetch-depth: 0
+      - name: Apply exact hardening patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('packages/domain/src/customer-work-os.ts')
+          text = path.read_text()
+          text = text.replace(
+              'const serialized = JSON.stringify(canonicalize(value));',
+              'const serialized = JSON.stringify(canonicalize(value)) ?? "undefined";',
+          )
+          text = text.replace(
+              '    const project: DeliveryProject = { ...copy(input), status: "PLANNED", workItems: [], version: 1 };',
+              '    if (this.openCommitments(input.workspaceId, input.engagementId).length === 0) throw new CustomerWorkOsError("NEXT_ACTION_REQUIRED", "delivery handover requires an open commitment");\n    const project: DeliveryProject = { ...copy(input), status: "PLANNED", workItems: [], version: 1 };',
+          )
+          text = text.replace(
+              '    this.account(input.workspaceId, input.customerAccountId);\n    this.owned(this.products, input.workspaceId, input.productId, "product");\n    const identifier = required(input.serialOrLicenseKey, "serialOrLicenseKey");',
+              '    this.account(input.workspaceId, input.customerAccountId);\n    this.owned(this.products, input.workspaceId, input.productId, "product");\n    const receivedLine = order.lines.find((line) => line.productId === input.productId);\n    if (!receivedLine || receivedLine.receivedQuantity <= 0) throw new CustomerWorkOsError("NOT_RECEIVED", "no received quantity exists for this product");\n    const registeredQuantity = [...this.assets.values()].filter((asset) => asset.workspaceId === input.workspaceId && asset.purchaseOrderId === order.id && asset.productId === input.productId).length;\n    if (registeredQuantity >= receivedLine.receivedQuantity) throw new CustomerWorkOsError("ASSET_QUANTITY_EXCEEDED", "registered assets exceed received quantity");\n    const identifier = required(input.serialOrLicenseKey, "serialOrLicenseKey");',
+          )
+          text = text.replace(
+              '    if (settled > 0n) item.lifecycle = settled < gross ? "PARTIAL" : "SETTLED";',
+              '    item.lifecycle = settled === 0n ? (item.direction === "IN" ? "BILLED" : "INCURRED") : settled < gross ? "PARTIAL" : "SETTLED";',
+          )
+          text = text.replace(
+              '    engagement.stage = nextStage;\n    engagement.terminalReason = reason?.trim();\n    engagement.version += 1;',
+              '    engagement.stage = nextStage;\n    if (reason?.trim()) engagement.terminalReason = reason.trim();\n    else delete engagement.terminalReason;\n    engagement.version += 1;',
+          )
+          marker = '  getEngagementSnapshot(workspaceId: string, engagementId: string): {'
+          insertion = '''  updateDeliverableStatus(
+            workspaceId: string,
+            projectId: string,
+            expectedVersion: number,
+            deliverableId: string,
+            status: Deliverable["status"],
+            evidenceRef?: string,
+          ): DeliveryProject {
+            const project = this.versioned(this.deliveryProjects, workspaceId, projectId, expectedVersion, "delivery project");
+            const deliverable = project.deliverables.find((item) => item.id === deliverableId);
+            if (!deliverable) throw new CustomerWorkOsError("NOT_FOUND", `deliverable not found: ${deliverableId}`);
+            if (status === "APPROVED" && !evidenceRef?.trim()) throw new CustomerWorkOsError("EVIDENCE_REQUIRED", "approved deliverable requires evidence");
+            deliverable.status = status;
+            if (evidenceRef?.trim()) deliverable.evidenceRef = evidenceRef.trim();
+            else if (status !== "APPROVED") delete deliverable.evidenceRef;
+            project.version += 1;
+            return copy(project);
+          }
+
+          updateDeliveryWorkItemStatus(
+            workspaceId: string,
+            projectId: string,
+            expectedVersion: number,
+            workItemId: string,
+            status: DeliveryWorkItem["status"],
+            actualHours?: number,
+          ): DeliveryProject {
+            const project = this.versioned(this.deliveryProjects, workspaceId, projectId, expectedVersion, "delivery project");
+            const item = project.workItems.find((current) => current.id === workItemId);
+            if (!item) throw new CustomerWorkOsError("NOT_FOUND", `delivery work item not found: ${workItemId}`);
+            if (actualHours !== undefined && (!Number.isFinite(actualHours) || actualHours < 0)) throw new CustomerWorkOsError("INVALID_HOURS", "actualHours must be non-negative");
+            item.status = status;
+            if (actualHours !== undefined) item.actualHours = actualHours;
+            project.version += 1;
+            return copy(project);
+          }
+
+          proposeDeliveryCompletion(workspaceId: string, projectId: string, expectedVersion: number): DeliveryProject {
+            const project = this.versioned(this.deliveryProjects, workspaceId, projectId, expectedVersion, "delivery project");
+            const missing = project.deliverables.filter((item) => item.required && (item.status !== "APPROVED" || !item.evidenceRef));
+            if (missing.length > 0) throw new CustomerWorkOsError("COMPLETION_RULE_FAILED", `required deliverables lack approval evidence: ${missing.map((item) => item.id).join(",")}`);
+            if (project.workItems.some((item) => item.status !== "DONE")) throw new CustomerWorkOsError("COMPLETION_RULE_FAILED", "all delivery work items must be done");
+            const unresolved = [...this.changes.values()].filter((item) => item.workspaceId === workspaceId && item.deliveryProjectId === project.id && !["REJECTED", "APPLIED"].includes(item.status));
+            if (unresolved.length > 0) throw new CustomerWorkOsError("COMPLETION_RULE_FAILED", "unresolved change requests remain");
+            project.status = "AWAITING_APPROVAL";
+            project.version += 1;
+            return copy(project);
+          }
+
+          completeDelivery(workspaceId: string, projectId: string, expectedVersion: number, receipt: ApprovalReceipt): DeliveryProject {
+            const project = this.versioned(this.deliveryProjects, workspaceId, projectId, expectedVersion, "delivery project");
+            if (project.status !== "AWAITING_APPROVAL") throw new CustomerWorkOsError("INVALID_STATE", "delivery completion must be proposed first");
+            const payload = { projectId: project.id, version: project.version, deliverables: project.deliverables, workItems: project.workItems };
+            this.consume(receipt, workspaceId, "delivery_project", project.id, project.version, "DELIVERY_COMPLETE", customerWorkOsPayloadHash(payload));
+            project.status = "COMPLETE";
+            project.version += 1;
+            const engagement = this.engagement(workspaceId, project.engagementId);
+            engagement.stage = "BILLING";
+            engagement.version += 1;
+            return copy(project);
+          }
+
+          closeEngagement(workspaceId: string, engagementId: string, expectedVersion: number, receipt: ApprovalReceipt): Engagement {
+            const engagement = this.versioned(this.engagements, workspaceId, engagementId, expectedVersion, "engagement");
+            if (engagement.stage !== "COLLECTION") throw new CustomerWorkOsError("INVALID_STAGE", "engagement must be in COLLECTION");
+            if (this.openCommitments(workspaceId, engagementId).length > 0) throw new CustomerWorkOsError("OPEN_COMMITMENTS", "engagement has open commitments");
+            if (engagement.deliveryProjectId) {
+              const project = this.owned(this.deliveryProjects, workspaceId, engagement.deliveryProjectId, "delivery project");
+              if (project.status !== "COMPLETE") throw new CustomerWorkOsError("DELIVERY_NOT_COMPLETE", "delivery project is not complete");
+            }
+            const finance = this.financeSummary(workspaceId, engagementId);
+            if (parseMoney(finance.receivableKrw) !== 0n || parseMoney(finance.payableKrw) !== 0n) throw new CustomerWorkOsError("FINANCE_NOT_CLOSED", "receivable or payable remains");
+            const payload = { stage: engagement.stage, finance, openCommitments: 0 };
+            this.consume(receipt, workspaceId, "engagement", engagement.id, engagement.version, "ENGAGEMENT_CLOSE", customerWorkOsPayloadHash(payload));
+            engagement.stage = "CLOSED";
+            engagement.version += 1;
+            return copy(engagement);
+          }
+
+'''
+          if marker not in text:
+              raise SystemExit('snapshot marker not found')
+          if 'proposeDeliveryCompletion(' not in text:
+              text = text.replace(marker, insertion + marker)
+          path.write_text(text)
+          Path('.github/workflows/cwos-one-shot-domain-hardening.yml').unlink()
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/domain/src/customer-work-os.ts .github/workflows/cwos-one-shot-domain-hardening.yml
+          git commit -m "fix(cwos): harden lifecycle asset and settlement invariants"
+          git push origin HEAD:feat/customer-work-os-v1-full
