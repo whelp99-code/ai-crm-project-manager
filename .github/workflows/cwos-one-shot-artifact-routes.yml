@@ -1,0 +1,70 @@
+name: CWOS One Shot Artifact Routes
+
+on:
+  push:
+    branches:
+      - feat/customer-work-os-v1-full
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'feat(cwos): expose governed artifact lifecycle') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/customer-work-os-v1-full
+          fetch-depth: 0
+      - name: Patch artifact routes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('apps/api/src/customer-work-os-routes-durable.ts')
+          text = path.read_text()
+          text = text.replace('  type Asset,\n  type ChangeRequest,', '  type Asset,\n  type Artifact,\n  type ChangeRequest,')
+          block = '''
+  app.post("/api/cwos/artifacts", async (request, reply) => {
+    await mutate(request, reply, "artifact.create", (service, workspaceId, _principalId, body) => {
+      stringField(body, "id"); stringField(body, "engagementId"); stringField(body, "type"); stringField(body, "title"); stringField(body, "versionLabel"); stringField(body, "status"); stringField(body, "storageUri");
+      return service.addArtifact({ ...(body as unknown as Omit<Artifact, "workspaceId" | "version">), workspaceId });
+    });
+  });
+
+  app.post<{ Params: { artifactId: string } }>("/api/cwos/artifacts/:artifactId/status", async (request, reply) => {
+    try {
+      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); const idempotencyKey = header(request, "idempotency-key"); const body = bodyObject(request);
+      const engagementId = stringField(body, "engagementId"); const expectedVersion = numberField(body, "expectedVersion"); const nextStatus = stringField(body, "nextStatus") as Artifact["status"]; const at = stringField(body, "at");
+      const artifact = await manager.read(workspaceId, (service) => service.getEngagementSnapshot(workspaceId, engagementId).artifacts.find((item) => item.id === request.params.artifactId));
+      if (!artifact) throw new CustomerWorkOsError("NOT_FOUND", `artifact not found: ${request.params.artifactId}`);
+      let receipt: ApprovalReceipt | undefined;
+      if (nextStatus === "APPROVED") {
+        const payload = { status: nextStatus, contentHash: artifact.contentHash ?? null, storageUri: artifact.storageUri };
+        receipt = await resolveApproval({ workspaceId, approvalId: approvalId(body), resourceType: "artifact", resourceId: artifact.id, resourceVersion: expectedVersion, action: "ARTIFACT_APPROVE", payloadHash: customerWorkOsPayloadHash(payload) });
+      } else if (nextStatus === "SENT") {
+        const payload = { status: nextStatus, storageUri: artifact.storageUri, versionLabel: artifact.versionLabel };
+        receipt = await resolveApproval({ workspaceId, approvalId: approvalId(body), resourceType: "artifact", resourceId: artifact.id, resourceVersion: expectedVersion, action: "ARTIFACT_SEND", payloadHash: customerWorkOsPayloadHash(payload) });
+      }
+      const requestHash = customerWorkOsPayloadHash({ route: "artifact.status", workspaceId, principalId, artifactId: artifact.id, expectedVersion, nextStatus, at });
+      const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operationId: "artifact.status", operation: (service) => service.updateArtifactStatus(workspaceId, artifact.id, expectedVersion, nextStatus, principalId, at, receipt), now: now() });
+      reply.header("x-idempotent-replay", result.replayed ? "true" : "false").code(result.statusCode).send(result.payload);
+    } catch (error) { sendError(reply, error); }
+  });
+
+'''
+          marker = '  app.post("/api/cwos/financial-items", async (request, reply) => {'
+          if '"/api/cwos/artifacts"' not in text:
+              if marker not in text:
+                  raise SystemExit('finance route anchor not found')
+              text = text.replace(marker, block + marker)
+          path.write_text(text)
+          Path('.github/workflows/cwos-one-shot-artifact-routes.yml').unlink()
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/api .github/workflows/cwos-one-shot-artifact-routes.yml
+          git commit -m "feat(cwos): expose governed artifact lifecycle"
+          git push origin HEAD:feat/customer-work-os-v1-full
