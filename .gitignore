@@ -17,3 +17,4 @@ tmp/
 apps/web/test-results/
 playwright-report/
 apps/web/playwright-report/
+.omo/

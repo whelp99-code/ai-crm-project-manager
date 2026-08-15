@@ -19,8 +19,8 @@ let pool: import("pg").Pool;
 
 function scoped(poolInstance: import("pg").Pool): V2PgQueryable {
   return {
-    async query<T = Record<string, unknown>>(text: string, values?: readonly unknown[]) {
-      return await poolInstance.query(text, values) as unknown as { rows: T[]; rowCount: number | null };
+    async query<T = Record<string, unknown>>(text: string, values?: unknown[]) {
+      return (await poolInstance.query(text, values)) as unknown as { rows: T[]; rowCount: number | null };
     },
     async withWorkspaceScope<T>(workspaceId: string, fn: (queryable: V2PgQueryable) => Promise<T>) {
       const client = await poolInstance.connect();
@@ -28,8 +28,8 @@ function scoped(poolInstance: import("pg").Pool): V2PgQueryable {
         await client.query("BEGIN");
         await client.query("SELECT set_config('app.workspace_id',$1,true)", [workspaceId]);
         const queryable: V2PgQueryable = {
-          async query<T2 = Record<string, unknown>>(text: string, values?: readonly unknown[]) {
-            return await client.query(text, values) as unknown as { rows: T2[]; rowCount: number | null };
+          async query<T2 = Record<string, unknown>>(text: string, values?: unknown[]) {
+            return (await client.query(text, values)) as unknown as { rows: T2[]; rowCount: number | null };
           },
         };
         const result = await fn(queryable);

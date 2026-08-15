@@ -115,9 +115,13 @@ describe("Customer Work OS v2 runtime", () => {
 
     const results = await Promise.allSettled([request("initial-a"), request("initial-b")]);
     expect(results.filter((item) => item.status === "fulfilled")).toHaveLength(1);
+    // The per-workspace command queue serializes both requests: the winner
+    // bootstraps the principal, and the second request then evaluates against
+    // the ALREADY-BOOTSTRAPPED state, where registering the same principal
+    // again is refused as a non-bootstrap command before any CAS is attempted.
     const rejection = results.find((item): item is PromiseRejectedResult => item.status === "rejected");
     expect(rejection?.reason).toBeInstanceOf(CustomerWorkOsV2Error);
-    expect((rejection?.reason as CustomerWorkOsV2Error).code).toBe("CONCURRENT_MODIFICATION");
+    expect((rejection?.reason as CustomerWorkOsV2Error).code).toBe("MEMBERSHIP_REQUIRED");
     expect(store.auditLog(workspaceId)).toHaveLength(1);
   });
 });
