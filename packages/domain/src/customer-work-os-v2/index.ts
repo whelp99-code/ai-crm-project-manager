@@ -1,4 +1,4 @@
-export const CUSTOMER_WORK_OS_V2_VERSION = "2.0.0" as const;
+export const CUSTOMER_WORK_OS_V2_VERSION = "2.5.0" as const;
 export * from "./shared.js";
 export * from "./identity.js";
 export * from "./psa.js";
@@ -10,3 +10,5 @@ export * from "./portal.js";
 export * from "./admin.js";
 export * from "./operations.js";
 export * from "./platform.js";
+export * from "./intelligence-contracts.js";
+export * from "./intelligence-v25.js";
