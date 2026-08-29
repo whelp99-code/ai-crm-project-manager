@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 interface BriefingResponse {
   runtimeVersion: number;
   briefing: null | {
@@ -15,12 +17,15 @@ async function loadBriefing(): Promise<BriefingResponse | null> {
   const apiBase = process.env.API_BASE_URL;
   const workspaceId = process.env.WORKSPACE_ID;
   const principalId = process.env.OPERATOR_PRINCIPAL_ID ?? process.env.DEMO_PRINCIPAL_ID;
-  if (!apiBase || !workspaceId || !principalId) return null;
+  const apiToken = process.env.API_AUTH_TOKEN ?? process.env.AUTH_API_KEY;
+  if (!apiBase || !workspaceId || !principalId || !apiToken) return null;
   const response = await fetch(`${apiBase}/api/cwos/v2.5/briefing`, {
     headers: {
+      authorization: `Bearer ${apiToken}`,
       "x-workspace-id": workspaceId,
       "x-principal-id": principalId,
       "x-principal-kind": "human",
+      "x-step-up": "true",
     },
     cache: "no-store",
   });
@@ -29,7 +34,7 @@ async function loadBriefing(): Promise<BriefingResponse | null> {
 
 export default async function TodayPage() {
   const result = await loadBriefing();
-  if (!result) return <section className="error"><h1>Today Briefing을 불러오지 못했습니다</h1><p>API와 환경설정을 확인하세요.</p></section>;
+  if (!result) return <section className="error"><h1>Today Briefing을 불러오지 못했습니다</h1><p>API와 서버 인증 환경설정을 확인하세요.</p></section>;
   if (!result.briefing) return <section className="panel"><h1>Today</h1><p>아직 AI Manager를 실행한 기록이 없습니다.</p></section>;
   return (
     <>
