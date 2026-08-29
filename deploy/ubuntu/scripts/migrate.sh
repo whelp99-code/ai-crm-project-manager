@@ -37,8 +37,13 @@ fi
 for migration in "${migrations[@]}"; do
   filename="$(basename "$migration")"
   checksum="$(sha256sum "$migration" | awk '{print $1}')"
-  stored="$(psql "$ADMIN_DATABASE_URL" -At -v ON_ERROR_STOP=1 -v filename="$filename" \
-    -c "SELECT checksum FROM public.schema_migrations WHERE filename = :'filename'")"
+  stored="$(
+    psql "$ADMIN_DATABASE_URL" -At -v ON_ERROR_STOP=1 --set=filename="$filename" <<'SQL'
+SELECT checksum
+  FROM public.schema_migrations
+ WHERE filename = :'filename';
+SQL
+  )"
 
   if [[ -n "$stored" ]]; then
     if [[ "$stored" != "$checksum" ]]; then
@@ -52,8 +57,12 @@ for migration in "${migrations[@]}"; do
 
   echo "APPLY $filename"
   psql "$ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
-  psql "$ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 -v filename="$filename" -v checksum="$checksum" \
-    -c "INSERT INTO public.schema_migrations(filename, checksum) VALUES (:'filename', :'checksum')"
+  psql "$ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 \
+    --set=filename="$filename" \
+    --set=checksum="$checksum" <<'SQL'
+INSERT INTO public.schema_migrations(filename, checksum)
+VALUES (:'filename', :'checksum');
+SQL
 done
 
 psql "$ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 \
