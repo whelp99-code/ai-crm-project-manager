@@ -17,7 +17,8 @@
     "./pg-crm-adapter": "./src/pg-crm-adapter.ts",
     "./pg-pm-adapter": "./src/pg-pm-adapter.ts",
     "./pg-crm-sub-adapter": "./src/pg-crm-sub-adapter.ts",
-    "./customer-work-os-v2": "./src/customer-work-os-v2/index.ts"
+    "./customer-work-os-v2": "./src/customer-work-os-v2/index.ts",
+    "./customer-work-os-v2.5": "./src/customer-work-os-v25/index.ts"
   },
   "scripts": {
     "typecheck": "tsc -b --noEmit",

@@ -82,13 +82,17 @@ export class CustomerWorkOsV2RuntimeManager {
         }
         return { statusCode: replay.statusCode, result: structuredClone(replay.result), envelope: current };
       }
-      assertV2ActorCanCommand(current.state, input.actor, input.command, input.payload);
+      // The caller is authenticated for the workspace at this point. Report a stale
+      // compare-and-swap version before re-evaluating command-specific state rules,
+      // otherwise a losing concurrent bootstrap can surface MEMBERSHIP_REQUIRED
+      // instead of the stable CONCURRENT_MODIFICATION contract.
       if (current.version !== input.expectedVersion) {
         throw new CustomerWorkOsV2Error(
           "CONCURRENT_MODIFICATION",
           `expected ${input.expectedVersion}, found ${current.version}`,
         );
       }
+      assertV2ActorCanCommand(current.state, input.actor, input.command, input.payload);
       const platform = new CustomerWorkOsV2Platform(input.workspaceId);
       platform.hydrateState(current.state);
       const result = executeV2Command(platform, input.command, input.payload, input.actor);

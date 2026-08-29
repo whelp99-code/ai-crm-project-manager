@@ -1,0 +1,104 @@
+name: Ubuntu Pilot Deployment
+
+on:
+  pull_request:
+    paths:
+      - "deploy/ubuntu/**"
+      - "apps/api/**"
+      - "apps/web/**"
+      - "apps/worker/**"
+      - "packages/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - ".dockerignore"
+      - ".github/workflows/ubuntu-pilot-deployment.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ubuntu-pilot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install-backup-restore:
+    name: Build, install, backup and restore
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate deployment shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          for script in deploy/ubuntu/bootstrap.sh deploy/ubuntu/scripts/*.sh; do
+            echo "bash -n $script"
+            bash -n "$script"
+          done
+
+      - name: Generate isolated CI environment
+        run: bash deploy/ubuntu/scripts/generate-env.sh
+
+      - name: Validate Compose model
+        run: docker compose --env-file deploy/ubuntu/.env -f deploy/ubuntu/compose.yml config --quiet
+
+      - name: Install the complete Ubuntu pilot stack
+        run: bash deploy/ubuntu/scripts/install.sh
+
+      - name: Exercise Universal Capture through the trusted web proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          response=$(curl --fail-with-body --silent --show-error \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            -H 'Idempotency-Key: ubuntu-ci-capture-1' \
+            --data '{"expectedVersion":1,"capture":{"id":"ubuntu-ci-capture-1","workspaceId":"'"$(grep '^WORKSPACE_ID=' deploy/ubuntu/.env | cut -d= -f2-)"'","kind":"TEXT","title":null,"content":"테스트 고객 HCI 프로젝트 검수 일정 확인 메모","occurredAt":"2026-08-29T00:00:00.000Z","sender":"owner-1","sourceRef":"ci://capture/1","providerEventId":null,"attachments":[],"language":"ko"},"context":{"accountAliases":[],"engagementAliases":[],"defaultTimezone":"Asia/Seoul"}}' \
+            http://127.0.0.1:3000/api/cwos/v2.5/capture)
+          node -e 'const x=JSON.parse(process.argv[1]); if(!x.result?.id) process.exit(1); console.log(JSON.stringify({planId:x.result.id,runtimeVersion:x.runtimeVersion}))' "$response"
+
+      - name: Backup and restore drill
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash deploy/ubuntu/scripts/backup.sh
+          dump=$(find deploy/ubuntu/backups -maxdepth 1 -type f -name '*.dump' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
+          test -n "$dump"
+          RESTORE_CONFIRM=RESTORE_AI_CRM_PM bash deploy/ubuntu/scripts/restore.sh "$dump"
+
+      - name: Prove captured state survived destructive restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          source deploy/ubuntu/.env
+          set +a
+          restored=$(docker compose --env-file deploy/ubuntu/.env -f deploy/ubuntu/compose.yml \
+            exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At \
+            -v workspace_id="$WORKSPACE_ID" <<'SQL'
+          SELECT CASE
+            WHEN version >= 2
+             AND state->'capture'->'sources' @> '[{"id":"ubuntu-ci-capture-1"}]'::jsonb
+            THEN 1 ELSE 0 END
+          FROM public.cwos_v25_automation_snapshots
+          WHERE workspace_id = :'workspace_id'::uuid;
+          SQL
+          )
+          test "$restored" = "1"
+          echo "PASS  captured state survived backup and destructive restore"
+
+      - name: Final verification
+        run: bash deploy/ubuntu/scripts/verify.sh
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          docker compose --env-file deploy/ubuntu/.env -f deploy/ubuntu/compose.yml ps || true
+          docker compose --env-file deploy/ubuntu/.env -f deploy/ubuntu/compose.yml logs --no-color --tail=300 postgres migrate api web worker || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose --env-file deploy/ubuntu/.env -f deploy/ubuntu/compose.yml down --volumes --remove-orphans || true

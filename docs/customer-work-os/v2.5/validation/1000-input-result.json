@@ -1,0 +1,28 @@
+{
+  "status": "PASS",
+  "executedAt": "2026-08-29T00:00:00Z",
+  "seed": 250829,
+  "total": 1000,
+  "rejectedAsDesigned": 100,
+  "duplicateReplays": 50,
+  "needsReview": 741,
+  "autoReady": 159,
+  "totalMutations": 2665,
+  "financialMutations": 151,
+  "changeMutations": 95,
+  "highRiskAutoApproved": 0,
+  "maxQuestionsPerEvent": 2,
+  "unexpectedFailures": 0,
+  "storedSources": 950,
+  "storedPlans": 950,
+  "stateHash": "fnv1a64:1986c6d85278e676",
+  "commands": [
+    "tsc -p tsconfig.domain.json",
+    "tsc -p tsconfig.api.json",
+    "tsc -p tsconfig.web.json",
+    "tsc -p tsconfig.test.json && node dist-test/local-domain-test.js",
+    "tsc -p tsconfig.load.json && node dist-load/scripts/cwos-v25-1000-input-test.js"
+  ],
+  "scope": "deterministic local v2.1-v2.5 source validation",
+  "productionReleaseApproved": false
+}

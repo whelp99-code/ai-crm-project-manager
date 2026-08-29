@@ -4,9 +4,6 @@ import {
   CustomerWorkOsV2Platform,
   customerWorkOsV2StateHash,
   type CustomerWorkOsV2State,
-  type IdentityPrincipal,
-  type V2Actor,
-  type WorkspaceMembership,
 } from "@ai-crm/domain/customer-work-os-v2";
 
 export interface V2IdempotencyRecord {
