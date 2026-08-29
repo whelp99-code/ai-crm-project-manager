@@ -128,7 +128,7 @@ function canonicalKey(record: BaselineSourceRecord): string {
     case "ACCOUNT": {
       const name = stringField(data, ["normalizedName", "name", "company", "accountName"]);
       const registration = stringField(data, ["businessRegistrationNumber", "registrationNumber"]);
-      return `account:${normalizeText(registration ?? name ?? record.sourceRef)}`;
+      return `account:${normalizeText(registration ?? name ?? record.sourceRef).replace(/\s+/g, "")}`;
     }
     case "CONTACT": {
       const email = stringField(data, ["email", "primaryEmail"]);
@@ -258,12 +258,18 @@ export class BaselineBuilderService {
     const quarantinedSourceRecordIds: string[] = [];
     const accepted: BaselineSourceRecord[] = [];
     const seenFingerprints = new Set<string>();
+    const seenSourceIds = new Set<string>();
 
     for (const raw of input.records) {
+      const sourceId = required(raw.id, "sourceRecord.id");
+      if (seenSourceIds.has(sourceId) || this.sourceRecords.has(sourceId)) {
+        throw new CustomerWorkOsV25Error("DUPLICATE_SOURCE_ID", `baseline source id already exists: ${sourceId}`);
+      }
+      seenSourceIds.add(sourceId);
       assertWorkspace(actor, raw.workspaceId);
       const record: BaselineSourceRecord = {
         ...copy(raw),
-        id: required(raw.id, "sourceRecord.id"),
+        id: sourceId,
         sourceRef: required(raw.sourceRef, "sourceRecord.sourceRef"),
         contentHash: required(raw.contentHash, "sourceRecord.contentHash"),
         confidence: clampConfidence(raw.confidence),
@@ -365,7 +371,12 @@ export class BaselineBuilderService {
     conflict.resolvedByPrincipalId = actor.principalId;
     conflict.version += 1;
     canonical.data[current.field] = copy(answer);
-    canonical.status = "READY";
+    const hasOpenCanonicalQuestion = [...this.questions.values()].some((item) =>
+      item.id !== current.id &&
+      item.canonicalRecordId === canonical.id &&
+      item.status === "OPEN",
+    );
+    canonical.status = hasOpenCanonicalQuestion ? "NEEDS_REVIEW" : "READY";
     canonical.version += 1;
     current.status = "ANSWERED";
     current.answer = copy(answer);
@@ -391,6 +402,29 @@ export class BaselineBuilderService {
     plan.appliedByPrincipalId = actor.principalId;
     plan.version += 1;
     return copy(plan);
+  }
+
+  getPlan(planId: string, workspaceId: string): BaselinePlan {
+    const plan = this.plans.get(planId);
+    if (!plan) throw new CustomerWorkOsV25Error("PLAN_NOT_FOUND", "baseline plan not found");
+    if (plan.workspaceId !== workspaceId) throw new CustomerWorkOsV25Error("CROSS_WORKSPACE", "cross-workspace baseline access is forbidden");
+    return copy(plan);
+  }
+
+  canonicalForPlan(planId: string, workspaceId: string): CanonicalBaselineRecord[] {
+    const plan = this.getPlan(planId, workspaceId);
+    return plan.canonicalRecordIds.map((id) => {
+      const record = this.canonicalRecords.get(id);
+      if (!record) throw new CustomerWorkOsV25Error("CANONICAL_NOT_FOUND", `canonical record not found: ${id}`);
+      return copy(record);
+    });
+  }
+
+  readyPlans(workspaceId: string): BaselinePlan[] {
+    return [...this.plans.values()]
+      .filter((item) => item.workspaceId === workspaceId && item.status === "READY")
+      .map(copy)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
   reviewQueue(workspaceId: string): BaselineQuestion[] {
