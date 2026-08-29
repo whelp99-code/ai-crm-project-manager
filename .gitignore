@@ -14,6 +14,8 @@ coverage/
 .vitest-cache/
 tmp/
 .gjc/
+.deployment/
+deploy/ubuntu/backups/
 apps/web/test-results/
 playwright-report/
 apps/web/playwright-report/
