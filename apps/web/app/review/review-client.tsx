@@ -10,9 +10,6 @@ export interface ReviewQuestion {
 }
 
 export function ReviewClient(props: {
-  apiBase: string;
-  workspaceId: string;
-  principalId: string;
   initialVersion: number;
   questions: ReviewQuestion[];
 }) {
@@ -31,15 +28,11 @@ export function ReviewClient(props: {
         : question.kind === "capture"
           ? { questionId: question.id, answer: value }
           : { taskId: question.id, answer: value, answeredAt: new Date().toISOString() };
-      const response = await fetch(`${props.apiBase}/api/cwos/v2.5/commands`, {
+      const response = await fetch("/api/cwos/v2.5/commands", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-workspace-id": props.workspaceId,
-          "x-principal-id": props.principalId,
-          "x-principal-kind": "human",
-          "x-step-up": "true",
-          "Idempotency-Key": `review-${question.id}-${Date.now()}`,
+          "Idempotency-Key": `review-${question.id}-${Date.now()}-${crypto.randomUUID()}`,
         },
         body: JSON.stringify({ command, expectedVersion: runtimeVersion, payload }),
       });
