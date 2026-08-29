@@ -53,6 +53,8 @@ services:
       MODEL_GATEWAY_DATABASE_URL: postgresql://ai_crm_runtime_model_gateway:${MODEL_GATEWAY_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-ai_crm}
       AUTH_API_KEY: ${AUTH_API_KEY:?AUTH_API_KEY is required}
       API_AUTH_TOKEN: ${AUTH_API_KEY}
+      WORKSPACE_ID: ${WORKSPACE_ID:?WORKSPACE_ID is required}
+      OPERATOR_PRINCIPAL_ID: ${OPERATOR_PRINCIPAL_ID:?OPERATOR_PRINCIPAL_ID is required}
       MODEL_PROVIDER: ${MODEL_PROVIDER:-}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
@@ -68,7 +70,7 @@ services:
       timeout: 5s
       retries: 30
       start_period: 20s
-    command: ["pnpm", "exec", "tsx", "apps/api/src/server.ts"]
+    command: ["/app/node_modules/.bin/tsx", "apps/api/src/server.ts"]
 
   web:
     <<: *app-image
@@ -91,7 +93,7 @@ services:
       timeout: 5s
       retries: 30
       start_period: 30s
-    command: ["pnpm", "--filter", "@ai-crm/web", "exec", "next", "start", "-H", "0.0.0.0", "-p", "3000"]
+    command: ["/app/apps/web/node_modules/.bin/next", "start", "-H", "0.0.0.0", "-p", "3000"]
 
   worker:
     <<: *app-image
@@ -104,7 +106,7 @@ services:
       DATABASE_URL: postgresql://ai_crm_runtime_worker:${RUNTIME_WORKER_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-ai_crm}
       ADMIN_DATABASE_URL: postgresql://${POSTGRES_USER:-ai_crm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ai_crm}
       WORKER_INTERVAL_MS: ${WORKER_INTERVAL_MS:-60000}
-    command: ["pnpm", "--filter", "@ai-crm/worker", "start"]
+    command: ["/app/node_modules/.bin/tsx", "apps/worker/src/main.ts"]
 
 volumes:
   postgres-data:
