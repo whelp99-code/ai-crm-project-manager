@@ -14,7 +14,10 @@
     "test:integration": "vitest run integration",
     "test:security": "vitest run security",
     "test:cwos:v25:1000": "tsx scripts/cwos-v25-1000-input-test.ts",
-    "check": "pnpm run typecheck && pnpm run test"
+    "check": "pnpm run typecheck && pnpm run test",
+    "deploy:ubuntu": "bash deploy/ubuntu/scripts/install.sh",
+    "verify:ubuntu": "bash deploy/ubuntu/scripts/verify.sh",
+    "backup:ubuntu": "bash deploy/ubuntu/scripts/backup.sh"
   },
   "pnpm": {
     "overrides": {
