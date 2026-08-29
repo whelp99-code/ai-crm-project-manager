@@ -24,7 +24,6 @@ interface PlanPreview {
 }
 
 export function CaptureClient(props: {
-  apiBase: string;
   workspaceId: string;
   principalId: string;
 }) {
@@ -40,20 +39,13 @@ export function CaptureClient(props: {
     setError(null);
     setPlan(null);
     try {
-      const commonHeaders = {
-        "x-workspace-id": props.workspaceId,
-        "x-principal-id": props.principalId,
-        "x-principal-kind": "human",
-        "x-step-up": "true",
-      };
-      const stateResponse = await fetch(`${props.apiBase}/api/cwos/v2.5/state`, { headers: commonHeaders });
+      const stateResponse = await fetch("/api/cwos/v2.5/state", { cache: "no-store" });
       if (!stateResponse.ok) throw new Error(`현재 상태를 불러오지 못했습니다 (${stateResponse.status})`);
       const state = await stateResponse.json() as { version: number };
-      const id = `capture-${Date.now()}`;
-      const response = await fetch(`${props.apiBase}/api/cwos/v2.5/capture`, {
+      const id = `capture-${Date.now()}-${crypto.randomUUID()}`;
+      const response = await fetch("/api/cwos/v2.5/capture", {
         method: "POST",
         headers: {
-          ...commonHeaders,
           "Content-Type": "application/json",
           "Idempotency-Key": id,
         },
