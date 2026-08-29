@@ -87,4 +87,7 @@ ALTER ROLE ai_crm_runtime_worker SET idle_in_transaction_session_timeout = '60s'
 ALTER ROLE ai_crm_runtime_model_gateway SET statement_timeout = '60s';
 SQL
 
-echo "Migrations and runtime role credentials are ready."
+psql "$ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f deploy/ubuntu/sql/reconcile-runtime-privileges.sql
+
+echo "Migrations, runtime role credentials and privileges are ready."
