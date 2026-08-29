@@ -1,6 +1,6 @@
 {
   "name": "ai-crm-project-manager",
-  "version": "2.0.0",
+  "version": "2.5.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -13,6 +13,7 @@
     "test:unit": "vitest run unit",
     "test:integration": "vitest run integration",
     "test:security": "vitest run security",
+    "test:cwos:v25:1000": "tsx scripts/cwos-v25-1000-input-test.ts",
     "check": "pnpm run typecheck && pnpm run test"
   },
   "pnpm": {
