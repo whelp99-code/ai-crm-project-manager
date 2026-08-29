@@ -20,7 +20,10 @@ let pool: import("pg").Pool;
 function scoped(poolInstance: import("pg").Pool): V25PgQueryable {
   return {
     async query<T = Record<string, unknown>>(text: string, values?: readonly unknown[]) {
-      return await poolInstance.query(text, values) as unknown as { rows: T[]; rowCount: number | null };
+      const result = values === undefined
+        ? await poolInstance.query(text)
+        : await poolInstance.query(text, [...values]);
+      return result as unknown as { rows: T[]; rowCount: number | null };
     },
     async withWorkspaceScope<T>(workspaceId: string, fn: (queryable: V25PgQueryable) => Promise<T>) {
       const client = await poolInstance.connect();
@@ -29,7 +32,10 @@ function scoped(poolInstance: import("pg").Pool): V25PgQueryable {
         await client.query("SELECT set_config('app.workspace_id',$1,true)", [workspaceId]);
         const queryable: V25PgQueryable = {
           async query<T2 = Record<string, unknown>>(text: string, values?: readonly unknown[]) {
-            return await client.query(text, values) as unknown as { rows: T2[]; rowCount: number | null };
+            const result = values === undefined
+              ? await client.query(text)
+              : await client.query(text, [...values]);
+            return result as unknown as { rows: T2[]; rowCount: number | null };
           },
         };
         const result = await fn(queryable);
