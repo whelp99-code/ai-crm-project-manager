@@ -11,6 +11,7 @@ on:
       - "packages/**"
       - "scripts/cwos-*"
       - "docs/customer-work-os/**"
+      - "deploy/ubuntu/**"
       - ".github/workflows/customer-work-os-release-gate.yml"
   workflow_dispatch:
 
@@ -77,7 +78,11 @@ jobs:
           --health-retries 20
     env:
       PG_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/ai_crm
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
       PGPASSWORD: postgres
+      PGDATABASE: ai_crm
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -131,16 +136,31 @@ jobs:
             test/customer-work-os-v2.livepg.integration.test.ts \
             test/customer-work-os-v25.livepg.integration.test.ts \
             --no-file-parallelism
-      - name: Backup and restore
+      - name: Backup, restore and privilege reconciliation
         shell: bash
         run: |
           set -euo pipefail
           pg_dump --format=custom --no-owner --no-acl "$PG_TEST_DATABASE_URL" --file=/tmp/cwos.dump
           createdb -h 127.0.0.1 -U postgres ai_crm_restore
           pg_restore -h 127.0.0.1 -U postgres -d ai_crm_restore --no-owner --no-acl /tmp/cwos.dump
+          restore_url="postgresql://postgres:postgres@127.0.0.1:5432/ai_crm_restore"
+          psql "$restore_url" -v ON_ERROR_STOP=1 -f deploy/ubuntu/sql/reconcile-runtime-privileges.sql
           original=$(psql "$PG_TEST_DATABASE_URL" -Atc "select count(*) from information_schema.tables where table_schema='public'")
-          restored=$(psql "postgresql://postgres:postgres@127.0.0.1:5432/ai_crm_restore" -Atc "select count(*) from information_schema.tables where table_schema='public'")
+          restored=$(psql "$restore_url" -Atc "select count(*) from information_schema.tables where table_schema='public'")
           test "$original" = "$restored"
+          psql "$restore_url" -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$
+          BEGIN
+            IF NOT has_table_privilege('ai_crm_runtime_api', 'public.cwos_v2_runtime_snapshots', 'SELECT,INSERT,UPDATE')
+               OR NOT has_table_privilege('ai_crm_runtime_api', 'public.cwos_v25_automation_snapshots', 'SELECT,INSERT,UPDATE')
+               OR NOT has_table_privilege('ai_crm_audit_verifier', 'public.cwos_v2_audit_events', 'SELECT')
+               OR NOT has_table_privilege('ai_crm_audit_verifier', 'public.cwos_v25_automation_audit_events', 'SELECT') THEN
+              RAISE EXCEPTION 'restored runtime privileges are incomplete';
+            END IF;
+          END;
+          $$;
+          SQL
+          dropdb -h 127.0.0.1 -U postgres ai_crm_restore
 
   web-e2e:
     name: Web production build and E2E
