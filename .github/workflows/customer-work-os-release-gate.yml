@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - release/customer-work-os-v1-stabilization
+      - feat/cwos-v2.5-ai-managed-input
   pull_request:
     paths:
       - "apps/**"
@@ -45,6 +46,9 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Typecheck and all Vitest suites
         run: pnpm check
+      - name: Deterministic 1,000-input AI-managed ingestion
+        if: ${{ matrix.node == 22 }}
+        run: pnpm test:cwos:v25:1000
       - name: Package builds
         run: pnpm -r --if-present run build
       - name: Package lint
@@ -98,8 +102,6 @@ jobs:
       - name: Persistence tests
         run: pnpm --filter @ai-crm/persistence test
       - name: API memory-mode regression
-        # The job has a live database, but ordinary API tests intentionally stay in
-        # memory mode. Only the explicit live-pg files below receive DATABASE_URL.
         env:
           DATABASE_URL: ""
           AI_CRM_DATABASE_URL: ""
@@ -127,6 +129,7 @@ jobs:
             test/pg-mutex-concurrency.livepg.integration.test.ts \
             test/q2-reports-model.livepg.integration.test.ts \
             test/customer-work-os-v2.livepg.integration.test.ts \
+            test/customer-work-os-v25.livepg.integration.test.ts \
             --no-file-parallelism
       - name: Backup and restore
         shell: bash
@@ -183,6 +186,7 @@ jobs:
           if grep -RInE 'child_process|node:fs|from "(openai|@anthropic-ai|@google/generative-ai)"|fetch\(' \
             packages/domain/src/customer-work-os.ts \
             packages/domain/src/customer-work-os-v2 \
+            packages/domain/src/customer-work-os-v25 \
             packages/ai-orchestrator/src/customer-work-os-ai.ts; then
             echo "forbidden capability found"
             exit 1
