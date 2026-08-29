@@ -1,5 +1,7 @@
 import { ReviewClient, type ReviewQuestion } from "./review-client";
 
+export const dynamic = "force-dynamic";
+
 interface ReviewResponse {
   runtimeVersion: number;
   stateHash: string;
@@ -16,12 +18,15 @@ async function loadReview(): Promise<ReviewResponse | null> {
   const apiBase = process.env.API_BASE_URL;
   const workspaceId = process.env.WORKSPACE_ID;
   const principalId = process.env.OPERATOR_PRINCIPAL_ID ?? process.env.DEMO_PRINCIPAL_ID;
-  if (!apiBase || !workspaceId || !principalId) return null;
+  const apiToken = process.env.API_AUTH_TOKEN ?? process.env.AUTH_API_KEY;
+  if (!apiBase || !workspaceId || !principalId || !apiToken) return null;
   const response = await fetch(`${apiBase}/api/cwos/v2.5/review`, {
     headers: {
+      authorization: `Bearer ${apiToken}`,
       "x-workspace-id": workspaceId,
       "x-principal-id": principalId,
       "x-principal-kind": "human",
+      "x-step-up": "true",
     },
     cache: "no-store",
   });
@@ -29,12 +34,9 @@ async function loadReview(): Promise<ReviewResponse | null> {
 }
 
 export default async function ReviewPage() {
-  const apiBase = process.env.API_BASE_URL;
-  const workspaceId = process.env.WORKSPACE_ID;
-  const principalId = process.env.OPERATOR_PRINCIPAL_ID ?? process.env.DEMO_PRINCIPAL_ID;
   const result = await loadReview();
-  if (!result || !apiBase || !workspaceId || !principalId) {
-    return <section className="error"><h1>Review Inbox를 불러오지 못했습니다</h1><p>API와 환경설정을 확인하세요.</p></section>;
+  if (!result) {
+    return <section className="error"><h1>Review Inbox를 불러오지 못했습니다</h1><p>API와 서버 인증 환경설정을 확인하세요.</p></section>;
   }
   const questions: ReviewQuestion[] = [
     ...result.review.baselineQuestions.map((item) => ({ ...item, kind: "baseline" as const })),
@@ -62,7 +64,7 @@ export default async function ReviewPage() {
         </section>
         <section>
           <h2>짧은 확인 질문</h2>
-          <ReviewClient apiBase={apiBase} workspaceId={workspaceId} principalId={principalId} initialVersion={result.runtimeVersion} questions={questions} />
+          <ReviewClient initialVersion={result.runtimeVersion} questions={questions} />
         </section>
         <section className="panel panel-critical">
           <h2>격리·동기화 문제</h2>
