@@ -37,14 +37,16 @@ SELECT format('CREATE DATABASE %I', :'dbname') \gexec
 SQL
 
 echo "Restoring $DUMP"
+# ACLs are restored with the data so the runtime API, worker, model gateway and
+# auditor recover their exact least-privilege grants. Object ownership remains
+# portable because the backup was produced with --no-owner.
 cat "$DUMP" | dc exec -T postgres pg_restore \
   --username "$POSTGRES_USER" \
   --dbname "$POSTGRES_DB" \
   --no-owner \
-  --no-acl \
   --exit-on-error
 
-echo "Reapplying migration and role credentials"
+echo "Reapplying migration checks and role credentials"
 dc run --rm migrate
 
 echo "Restarting services"
