@@ -123,8 +123,9 @@ export class PgCwosV2StateStore implements CwosV2StateStore {
     const prospective: V2RuntimeEnvelope = { ...structuredClone(next), version: expectedVersion + 1 };
     validateEnvelope(prospective);
     return this.scope(workspaceId, async (db) => {
-      // SELECT ... FOR UPDATE cannot lock a row that does not exist. The transaction-level
-      // advisory lock serializes the first insert as well as subsequent CAS updates.
+      // One transaction-scoped advisory lock serializes first insert, CAS update,
+      // audit-head read and append for this workspace. The append-only audit table
+      // therefore needs SELECT/INSERT only; no row-update privilege is granted.
       await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [workspaceId]);
 
       const current = await db.query<{ version: string | number; state_hash: string }>(
@@ -144,7 +145,7 @@ export class PgCwosV2StateStore implements CwosV2StateStore {
       }
 
       const previous = await db.query<{ sequence: string | number; event_hash: string }>(
-        "SELECT sequence,event_hash FROM cwos_v2_audit_events WHERE workspace_id=$1 ORDER BY sequence DESC LIMIT 1 FOR UPDATE",
+        "SELECT sequence,event_hash FROM cwos_v2_audit_events WHERE workspace_id=$1 ORDER BY sequence DESC LIMIT 1",
         [workspaceId],
       );
       const prior = previous.rows[0];
