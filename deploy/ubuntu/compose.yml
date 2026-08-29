@@ -1,0 +1,111 @@
+name: ai-crm-pm
+
+x-app-image: &app-image
+  image: ai-crm-pm:2.5.0
+  build:
+    context: ../..
+    dockerfile: deploy/ubuntu/Dockerfile
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_crm}
+      POSTGRES_USER: ${POSTGRES_USER:-ai_crm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ai_crm} -d ${POSTGRES_DB:-ai_crm}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  migrate:
+    <<: *app-image
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ADMIN_DATABASE_URL: postgresql://${POSTGRES_USER:-ai_crm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ai_crm}
+      RUNTIME_API_DB_PASSWORD: ${RUNTIME_API_DB_PASSWORD:?RUNTIME_API_DB_PASSWORD is required}
+      RUNTIME_WORKER_DB_PASSWORD: ${RUNTIME_WORKER_DB_PASSWORD:?RUNTIME_WORKER_DB_PASSWORD is required}
+      MODEL_GATEWAY_DB_PASSWORD: ${MODEL_GATEWAY_DB_PASSWORD:?MODEL_GATEWAY_DB_PASSWORD is required}
+      AUDIT_VERIFIER_DB_PASSWORD: ${AUDIT_VERIFIER_DB_PASSWORD:?AUDIT_VERIFIER_DB_PASSWORD is required}
+    command: ["bash", "deploy/ubuntu/scripts/migrate.sh"]
+
+  api:
+    <<: *app-image
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3001
+      DATABASE_URL: postgresql://ai_crm_runtime_api:${RUNTIME_API_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-ai_crm}
+      CWOS_DATABASE_URL: postgresql://ai_crm_runtime_api:${RUNTIME_API_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-ai_crm}
+      ADMIN_DATABASE_URL: postgresql://${POSTGRES_USER:-ai_crm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ai_crm}
+      MODEL_GATEWAY_DATABASE_URL: postgresql://ai_crm_runtime_model_gateway:${MODEL_GATEWAY_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-ai_crm}
+      AUTH_API_KEY: ${AUTH_API_KEY:?AUTH_API_KEY is required}
+      API_AUTH_TOKEN: ${AUTH_API_KEY}
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_AUTH_MODE: ${AZURE_OPENAI_AUTH_MODE:-api-key}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-08-01-preview}
+      AZURE_OPENAI_ASSUME_ZERO_RETENTION: ${AZURE_OPENAI_ASSUME_ZERO_RETENTION:-0}
+    expose:
+      - "3001"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3001/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    command: ["pnpm", "exec", "tsx", "apps/api/src/server.ts"]
+
+  web:
+    <<: *app-image
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      API_BASE_URL: http://api:3001
+      WORKSPACE_ID: ${WORKSPACE_ID:?WORKSPACE_ID is required}
+      OPERATOR_PRINCIPAL_ID: ${OPERATOR_PRINCIPAL_ID:?OPERATOR_PRINCIPAL_ID is required}
+      API_AUTH_TOKEN: ${AUTH_API_KEY}
+    ports:
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3000/capture"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    command: ["pnpm", "--filter", "@ai-crm/web", "exec", "next", "start", "-H", "0.0.0.0", "-p", "3000"]
+
+  worker:
+    <<: *app-image
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://ai_crm_runtime_worker:${RUNTIME_WORKER_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-ai_crm}
+      ADMIN_DATABASE_URL: postgresql://${POSTGRES_USER:-ai_crm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ai_crm}
+      WORKER_INTERVAL_MS: ${WORKER_INTERVAL_MS:-60000}
+    command: ["pnpm", "--filter", "@ai-crm/worker", "start"]
+
+volumes:
+  postgres-data:
+    name: ai-crm-pm-postgres-data
