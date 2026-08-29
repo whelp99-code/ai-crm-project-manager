@@ -13,12 +13,13 @@ mkdir -p "$BACKUP_DIR"
 umask 077
 
 echo "Creating PostgreSQL backup: $DUMP"
+# Keep ACLs so runtime roles retain the exact least-privilege table grants after
+# a disaster restore. Object ownership stays portable via --no-owner.
 dc exec -T postgres pg_dump \
   --username "$POSTGRES_USER" \
   --dbname "$POSTGRES_DB" \
   --format custom \
-  --no-owner \
-  --no-acl > "$DUMP"
+  --no-owner > "$DUMP"
 
 checksum="$(sha256sum "$DUMP" | awk '{print $1}')"
 source_commit="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -30,7 +31,9 @@ cat > "$MANIFEST" <<EOF
   "sourceCommit": "$source_commit",
   "database": "$POSTGRES_DB",
   "dump": "$(basename "$DUMP")",
-  "sha256": "$checksum"
+  "sha256": "$checksum",
+  "aclIncluded": true,
+  "ownerIncluded": false
 }
 EOF
 chmod 600 "$DUMP" "$MANIFEST"
