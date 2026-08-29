@@ -96,7 +96,7 @@ function normalizeWhitespace(value: string): string {
 function normalizeEntity(value: string): string {
   return normalizeWhitespace(value)
     .toLocaleLowerCase("ko-KR")
-    .replace(/\b(?:주식회사|유한회사|inc\.?|corp\.?|co\.?\s*,?\s*ltd\.?)\b/gi, "")
+    .replace(/(?:주식회사|유한회사|\b(?:inc\.?|corp\.?|co\.?\s*,?\s*ltd\.?)\b)/gi, "")
     .replace(/[()[\]{}<>.,'"`~!@#$%^&*+=|\\/:;?-]/g, "")
     .replace(/\s+/g, "")
     .trim();
@@ -1361,13 +1361,14 @@ export class CustomerWorkIntelligenceService {
     }
 
     for (const finding of findings) this.managerFindings.set(finding.id, finding);
-    const sevenDays = asOfMs + 7 * 86_400_000;
+    const asOfDayMs = Date.parse(`${input.asOf.slice(0, 10)}T00:00:00.000Z`);
+    const sevenDays = asOfDayMs + 7 * 86_400_000;
     let incoming7d = 0n;
     let outgoing7d = 0n;
     for (const item of input.financialItems) {
       if (["SETTLED", "CANCELLED"].includes(item.lifecycle)) continue;
       const date = Date.parse(`${item.expectedDate}T00:00:00.000Z`);
-      if (date < asOfMs || date > sevenDays) continue;
+      if (date < asOfDayMs || date > sevenDays) continue;
       if (item.direction === "IN") incoming7d += BigInt(item.grossAmountKrw);
       else outgoing7d += BigInt(item.grossAmountKrw);
     }
@@ -1507,7 +1508,7 @@ export class CustomerWorkIntelligenceService {
           prompt: "이 입력은 어느 고객과 관련 있나요?",
           options: context.accounts.slice(0, 5).map((item) => ({ id: item.id, label: item.name, value: item.id })),
         });
-      } else if (candidate.kind === "ENGAGEMENT_LINK" || candidate.targetId === null && candidate.value.engagementId === null) {
+      } else if (candidate.kind === "ENGAGEMENT_LINK") {
         drafts.push({
           priority: 95,
           candidate,
