@@ -78,6 +78,7 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    working_dir: /app/apps/web
     environment:
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"
