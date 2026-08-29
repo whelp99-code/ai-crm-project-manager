@@ -68,6 +68,27 @@ jobs:
           test -n "$dump"
           RESTORE_CONFIRM=RESTORE_AI_CRM_PM bash deploy/ubuntu/scripts/restore.sh "$dump"
 
+      - name: Prove captured state survived destructive restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          source deploy/ubuntu/.env
+          set +a
+          restored=$(docker compose --env-file deploy/ubuntu/.env -f deploy/ubuntu/compose.yml \
+            exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At \
+            -v workspace_id="$WORKSPACE_ID" <<'SQL'
+          SELECT CASE
+            WHEN version >= 2
+             AND state->'capture'->'sources' @> '[{"id":"ubuntu-ci-capture-1"}]'::jsonb
+            THEN 1 ELSE 0 END
+          FROM public.cwos_v25_automation_snapshots
+          WHERE workspace_id = :'workspace_id'::uuid;
+          SQL
+          )
+          test "$restored" = "1"
+          echo "PASS  captured state survived backup and destructive restore"
+
       - name: Final verification
         run: bash deploy/ubuntu/scripts/verify.sh
 
