@@ -1,5 +1,7 @@
 import { CaptureClient } from "./capture-client";
 
+export const dynamic = "force-dynamic";
+
 export default function CapturePage() {
   const workspaceId = process.env.WORKSPACE_ID;
   const principalId = process.env.OPERATOR_PRINCIPAL_ID ?? process.env.DEMO_PRINCIPAL_ID;
