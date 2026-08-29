@@ -11,7 +11,6 @@ import {
   copy,
   deterministicHash,
   mapById,
-  normalizeText,
   required,
   sorted,
   type AutomationActor,
