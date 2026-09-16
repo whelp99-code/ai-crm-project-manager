@@ -1,0 +1,37 @@
+name: CWOS matching verification
+on:
+  push:
+    branches: [fix/cwos-matching-hardening-20260916]
+  pull_request:
+    paths:
+      - 'packages/domain/src/customer-work-os*'
+      - 'packages/domain/src/customer-work-os*/**'
+      - 'packages/domain/test/customer-work-os*'
+      - 'scripts/cwos-matching*'
+      - '.github/workflows/cwos-matching-verification.yml'
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Archive exact source, without secrets or working files
+        run: git archive --format=tar.gz --output=cwos-reviewed-source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cwos-reviewed-source-${{ github.sha }}
+          path: cwos-reviewed-source.tar.gz
+          retention-days: 3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Execute matching regression when implementation is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f scripts/cwos-matching-test.mjs ]; then
+            node scripts/cwos-matching-test.mjs
+          else
+            echo 'Implementation not yet present; source snapshot only, not a product verification pass.'
+          fi
