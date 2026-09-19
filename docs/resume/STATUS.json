@@ -1,0 +1,55 @@
+{
+  "project": "AI-CRM+PM",
+  "workername": "AI-CRM+PM",
+  "product": "JM AI-Native Customer Work OS",
+  "checkpointDate": "2026-09-19",
+  "releaseDecision": "BLOCKED_NOT_DEPLOYED",
+  "checkpointOnly": true,
+  "runtimeChangesAppliedToThisBranch": false,
+  "targetExecution": {
+    "connectorProjectId": "ai-crmpm",
+    "observedBranch": "pilot/cwos-pilot-01",
+    "dirtyPathCount": 27,
+    "projectSelect": "BLOCKED_BY_SAFETY_CHECK",
+    "shell": "NOT_EXECUTED_LEASE_REQUIRED",
+    "hostname": null,
+    "head": null,
+    "remote": null,
+    "containers": null,
+    "ports": null,
+    "writesThisSession": 0,
+    "databaseActionsThisSession": 0
+  },
+  "candidate": {
+    "environment": "CHATGPT_ISOLATED_CONTAINER_NOT_TARGET_UBUNTU",
+    "sourceBranch": "review/cwos-resume-20260919",
+    "sourceCommit": "7b7067ea00d9c562516458ac77cff1d6e0859d78",
+    "sourceCommitExistsOnGithub": "NOT_ESTABLISHED",
+    "sourceDelivery": "AI_CRM_PM_RESUME_20260919.zip in the conversation and Library",
+    "nativeSelectedSourceTests": {"pass":153,"fail":0,"skip":0,"repetitions":2},
+    "readOnlyAuditTests": {"pass":13,"fail":0,"skip":0,"repetitions":2},
+    "syntheticMatchingCases": {"total":1000,"scope":"DETERMINISTIC_RULES_NOT_LIVE_AI"},
+    "missingOptionalRealPdfFixtures": 2,
+    "fullMonorepoTypecheck": "NOT_RUN",
+    "lockedDependencyInstall": "NOT_COMPLETED",
+    "independentReviewer": false
+  },
+  "handoff": {
+    "originalManifestFiles": 71,
+    "matchingOriginalPostimages": 71,
+    "originalChecksumsVerified": 17,
+    "serverPathsCompared": 1,
+    "comparedPath": "package.json",
+    "classification": "CONFLICT_NEITHER_BEFORE_NOR_AFTER_HASH",
+    "serverPathsNotCompared": 70,
+    "blanketApplyAllowed": false
+  },
+  "bundles": {
+    "A": "PARTIAL_LOCAL_PROTECTION_AND_SCHEMA_ONLY_CAPTURE_GATEWAY_NOT_CONNECTED",
+    "B": "PARTIAL_LOCAL_SYNC_CORE_ONLY_GRAPH_NOT_CONNECTED",
+    "C": "NOT_MIGRATED",
+    "D": "PARTIAL_LOCAL_CLARIFICATION_FIX_FULL_UI_NOT_VERIFIED",
+    "E": "SELECTED_LOCAL_TESTS_ONLY_REAL_BUILD_PG_E2E_DEPLOY_NOT_RUN"
+  },
+  "allRequestedWorkCompleted": false
+}

@@ -1,0 +1,53 @@
+name: CWOS verification toolchain
+on:
+  push:
+    branches: [fix/cwos-matching-hardening-20260916]
+    paths: [.github/workflows/cwos-toolchain-preparation.yml]
+  pull_request:
+    paths: [.github/workflows/cwos-toolchain-preparation.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+      - name: Fetch lockfile-pinned public dependencies
+        run: |
+          set -euo pipefail
+          npm install --global pnpm@9.15.0
+          mkdir -p "$RUNNER_TEMP/cwos-tools"
+          pnpm fetch --frozen-lockfile --store-dir "$RUNNER_TEMP/cwos-tools/pnpm-store"
+          cd "$RUNNER_TEMP/cwos-tools"
+          npm pack pnpm@9.15.0 --ignore-scripts
+          sha256sum pnpm-9.15.0.tgz > toolchain-checksums.txt
+      - name: Prepare PostgreSQL and browser test dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-16 postgresql-client-16
+          mkdir -p "$RUNNER_TEMP/cwos-tools/pg/bin" "$RUNNER_TEMP/cwos-tools/pg/lib" "$RUNNER_TEMP/cwos-tools/pg/share"
+          cp -a /usr/lib/postgresql/16/bin/. "$RUNNER_TEMP/cwos-tools/pg/bin/"
+          cp -a /usr/lib/postgresql/16/lib/. "$RUNNER_TEMP/cwos-tools/pg/lib/"
+          cp -a /usr/share/postgresql/16/. "$RUNNER_TEMP/cwos-tools/pg/share/"
+          for bin in postgres initdb pg_ctl pg_dump pg_restore psql; do
+            ldd "/usr/lib/postgresql/16/bin/$bin" | awk '/=> \/.* \(/ {print $3}' | while read -r lib; do cp -Ln "$lib" "$RUNNER_TEMP/cwos-tools/pg/lib/" || test -e "$RUNNER_TEMP/cwos-tools/pg/lib/$(basename "$lib")"; done
+          done
+          pnpm install --frozen-lockfile --store-dir "$RUNNER_TEMP/cwos-tools/pnpm-store"
+          PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/cwos-tools/browsers" pnpm --filter @ai-crm/web exec playwright install chromium
+          git rev-parse HEAD > "$RUNNER_TEMP/cwos-tools/review-source.txt"
+          cp pnpm-lock.yaml "$RUNNER_TEMP/cwos-tools/source-lock.yaml"
+      - name: Archive tools only, no credentials or user data
+        run: tar -C "$RUNNER_TEMP" -czf cwos-verification-tools.tar.gz cwos-tools
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cwos-verification-tools-${{ github.sha }}
+          path: cwos-verification-tools.tar.gz
+          retention-days: 1
+          if-no-files-found: error
