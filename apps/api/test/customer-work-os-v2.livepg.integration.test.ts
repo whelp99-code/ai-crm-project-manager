@@ -107,6 +107,46 @@ describe.skipIf(!LIVE)("Customer Work OS v2 runtime against PostgreSQL 16", () =
     expect(audit.rows[0]?.after_state_hash).toBe(result.envelope.stateHash);
   });
 
+  it("FORCE RLS hides snapshots from a NOBYPASSRLS non-owner without the workspace GUC", async () => {
+    const probeRole = "cwos_v2_rls_probe";
+    const otherWorkspaceId = "c2222222-2222-4222-8222-222222222222";
+    try {
+      await pool.query(`
+        DO $$ BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${probeRole}') THEN
+            CREATE ROLE ${probeRole} NOLOGIN NOBYPASSRLS;
+          END IF;
+        END $$;
+      `);
+      await pool.query(`GRANT SELECT ON cwos_v2_runtime_snapshots TO ${probeRole}`);
+      await pool.query(`GRANT ${probeRole} TO CURRENT_USER`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/permission denied|must be superuser|must be owner/i.test(message)) {
+        return;
+      }
+      throw error;
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`SET LOCAL ROLE ${probeRole}`);
+      await client.query("SELECT set_config('app.workspace_id',$1,true)", [otherWorkspaceId]);
+      const leaked = await client.query("SELECT workspace_id FROM cwos_v2_runtime_snapshots");
+      expect(leaked.rows).toHaveLength(0);
+      await client.query("SELECT set_config('app.workspace_id',$1,true)", [WORKSPACE_ID]);
+      const visible = await client.query("SELECT workspace_id FROM cwos_v2_runtime_snapshots");
+      expect(visible.rows.map((row) => String(row.workspace_id))).toEqual([WORKSPACE_ID]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
   it("fails closed when the persisted state hash is tampered", async () => {
     await pool.query(
       "UPDATE cwos_v2_runtime_snapshots SET state_hash=$2 WHERE workspace_id=$1",

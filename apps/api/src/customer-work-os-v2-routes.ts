@@ -39,10 +39,25 @@ function header(request: FastifyRequest, name: string): string {
   return text.trim();
 }
 
+function optionalHeader(request: FastifyRequest, name: string): string | undefined {
+  const value = request.headers[name];
+  const text = Array.isArray(value) ? value[0] : value;
+  if (typeof text !== "string" || !text.trim()) return undefined;
+  return text.trim();
+}
+
+/** Bind the CWOS actor from explicit headers. Kind is never defaulted to human. */
 function actor(request: FastifyRequest): V2Actor {
-  const kind = (request.headers["x-principal-kind"] ?? "human") as PrincipalKind;
+  const kind = header(request, "x-principal-kind") as PrincipalKind;
   if (!["human", "ai", "service"].includes(kind)) {
     throw new CustomerWorkOsV2Error("INVALID_HEADER", "x-principal-kind is invalid");
+  }
+  const botId = optionalHeader(request, "x-bot-id");
+  if (botId && kind === "human") {
+    throw new CustomerWorkOsV2Error(
+      "HUMAN_SPOOF",
+      "bot clients cannot bind a human principal",
+    );
   }
   return {
     principalId: header(request, "x-principal-id"),
@@ -103,6 +118,7 @@ function status(error: CustomerWorkOsV2Error): number {
       "SUPPORT_ACCESS_DENIED",
       "PRINCIPAL_REQUIRED",
       "PRINCIPAL_KIND_MISMATCH",
+      "HUMAN_SPOOF",
       "MEMBERSHIP_REQUIRED",
       "BOOTSTRAP_REQUIRED",
       "INVALID_BOOTSTRAP_PRINCIPAL",
