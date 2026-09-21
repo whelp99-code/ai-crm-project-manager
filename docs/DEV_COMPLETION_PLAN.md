@@ -22,3 +22,5 @@ apps/web typecheck: Done
 npm notice run ai-crm-project-manager@2.0.0 typecheck
 npm notice run pnpm -r --if-present run typecheck
 
+
+`npm test` fails: vitest config load — `@esbuild/darwin-arm64` present, need `@esbuild/linux-x64` (node_modules copied from Mac). `pnpm rebuild` blocked by store-dir/major version.
