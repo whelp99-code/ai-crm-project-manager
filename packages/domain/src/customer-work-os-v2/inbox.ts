@@ -37,6 +37,7 @@ export class UnifiedInboxService {
     assertHuman(actor); assertWorkspace(actor.workspaceId, input.workspaceId);
     const provider = required(input.provider, "provider"); const mailbox = required(input.mailbox, "mailbox"); const sourceLocator = required(input.sourceLocator, "sourceLocator"); const workItemId = required(input.workItemId, "workItemId");
     const duplicate = [...this.mailWorkLinks.values()].find((item) => item.workspaceId === input.workspaceId && item.provider === provider && item.mailbox === mailbox && item.sourceLocator === sourceLocator && item.linkStatus !== "CORRECTED");
+    if (duplicate && duplicate.workItemId === workItemId) return copy(duplicate);
     if (duplicate && duplicate.workItemId !== workItemId) {
       if (!input.correctionReason?.trim()) throw new CustomerWorkOsV2Error("CORRECTION_REASON_REQUIRED", "correcting a mail work mapping requires a reason");
       const corrected = { ...duplicate, correctionReason: input.correctionReason.trim(), linkStatus: "CORRECTED" as const, version: duplicate.version + 1 };
