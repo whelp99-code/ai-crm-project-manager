@@ -2,7 +2,11 @@ import type { ActionType } from "@ai-crm/contracts";
 import {
   AUTO_SCHEMA,
   canonicalize,
+  canonicalHashOf,
   evaluatePolicy,
+  POLICY_MATRIX_VERSION,
+  POLICY_VERSION,
+  type PolicyTier,
   type CanonicalValue,
 } from "@ai-crm/policy-engine";
 import {
@@ -32,7 +36,40 @@ export interface Binding {
   resourceVersion: number;
   payloadHash: string;
   policyVersion: number;
+  /** Hash of the server-derived finance context, when the action is finance-sensitive. */
+  trustedContextHash?: string;
 }
+
+/** Server-only daily-gate facts; never accepted on AuthorizationRequest. */
+export interface TrustedFinancePolicyContext {
+  workspaceId: string;
+  effectiveDate: string;
+  tier: PolicyTier;
+  matrixVersion: number;
+  packVersion: number;
+  financePolicyVersion: number;
+  evidenceHash: string;
+  validUntil: string;
+}
+
+export interface GovernanceOptions {
+  financePolicyContext?: (workspaceId: string) => TrustedFinancePolicyContext | undefined;
+  now?: () => Date;
+  expectedFinanceMatrixVersion?: number;
+  expectedFinancePackVersion?: number;
+  expectedFinancePolicyVersion?: number;
+}
+
+type FinanceContextFailureReason =
+  | "FINANCE_CONTEXT_ABSENT"
+  | "FINANCE_CONTEXT_WORKSPACE_MISMATCH"
+  | "FINANCE_CONTEXT_DATE_MISMATCH"
+  | "FINANCE_CONTEXT_TIER_INVALID"
+  | "FINANCE_CONTEXT_MATRIX_MISMATCH"
+  | "FINANCE_CONTEXT_PACK_MISMATCH"
+  | "FINANCE_CONTEXT_POLICY_MISMATCH"
+  | "FINANCE_CONTEXT_EVIDENCE_INVALID"
+  | "FINANCE_CONTEXT_STALE";
 
 export interface AuthorizationRequest {
   command: string;
@@ -155,8 +192,56 @@ export class GovernanceAuthorizationService {
   constructor(
     private readonly registry: ActionRegistry,
     state: GovernanceState = initialState(),
+    private readonly options: GovernanceOptions = {},
   ) {
     this.state = structuredClone(state);
+  }
+
+  private trustedFinanceContext(workspaceId: string): {
+    tier: PolicyTier;
+    contextHash?: string;
+    audit: CanonicalValue;
+  } {
+    const context = this.options.financePolicyContext?.(workspaceId);
+    const now = this.options.now?.() ?? new Date();
+    const expectedDate = new Date(now.getTime() + 9 * 60 * 60 * 1_000).toISOString().slice(0, 10);
+    const expectedMatrixVersion = this.options.expectedFinanceMatrixVersion ?? POLICY_MATRIX_VERSION;
+    const expectedPackVersion = this.options.expectedFinancePackVersion ?? POLICY_VERSION;
+    const expectedFinancePolicyVersion = this.options.expectedFinancePolicyVersion ?? POLICY_VERSION;
+    let failure: FinanceContextFailureReason | undefined;
+    if (!context) failure = "FINANCE_CONTEXT_ABSENT";
+    else if (context.workspaceId !== workspaceId) failure = "FINANCE_CONTEXT_WORKSPACE_MISMATCH";
+    else if (!/^\d{4}-\d{2}-\d{2}$/.test(context.effectiveDate) || context.effectiveDate !== expectedDate) failure = "FINANCE_CONTEXT_DATE_MISMATCH";
+    else if (!(["conservative", "eligible", "risk_tiered"] as const).includes(context.tier)) failure = "FINANCE_CONTEXT_TIER_INVALID";
+    else if (!Number.isInteger(context.matrixVersion) || context.matrixVersion !== expectedMatrixVersion) failure = "FINANCE_CONTEXT_MATRIX_MISMATCH";
+    else if (!Number.isInteger(context.packVersion) || context.packVersion !== expectedPackVersion) failure = "FINANCE_CONTEXT_PACK_MISMATCH";
+    else if (!Number.isInteger(context.financePolicyVersion) || context.financePolicyVersion !== expectedFinancePolicyVersion) failure = "FINANCE_CONTEXT_POLICY_MISMATCH";
+    else if (!/^[a-f0-9]{64}$/i.test(context.evidenceHash)) failure = "FINANCE_CONTEXT_EVIDENCE_INVALID";
+    else if (!Number.isFinite(Date.parse(context.validUntil)) || Date.parse(context.validUntil) <= now.getTime()) failure = "FINANCE_CONTEXT_STALE";
+    if (failure) {
+      return {
+        tier: "conservative",
+        audit: {
+          source: "fallback",
+          selectedTier: "conservative",
+          matrixVersion: expectedMatrixVersion,
+          machineReason: failure,
+          humanReason: "Trusted finance context is absent, stale, or mismatched; conservative control applied.",
+        },
+      };
+    }
+    const trusted = context as TrustedFinancePolicyContext;
+    const contextHash = canonicalHashOf("governance.trusted_finance_context", {
+      workspaceId: trusted.workspaceId, effectiveDate: trusted.effectiveDate, tier: trusted.tier,
+      matrixVersion: trusted.matrixVersion, packVersion: trusted.packVersion,
+      financePolicyVersion: trusted.financePolicyVersion, evidenceHash: trusted.evidenceHash,
+      validUntil: trusted.validUntil,
+    });
+    return {
+      tier: trusted.tier,
+      contextHash,
+      audit: { source: "trusted_server", tier: trusted.tier, effectiveDate: trusted.effectiveDate, matrixVersion: trusted.matrixVersion, packVersion: trusted.packVersion, financePolicyVersion: trusted.financePolicyVersion, evidenceHash: trusted.evidenceHash, validUntil: trusted.validUntil },
+    };
   }
 
   snapshot(): GovernanceState {
@@ -303,7 +388,8 @@ export class GovernanceAuthorizationService {
   previewAuthorize(request: AuthorizationRequest): GovernancePreview<AuthorizationResult> {
     return this.previewTransact((draft) => {
       const actionType = this.registry.resolve(request.command);
-      const policy = evaluatePolicy({ actionType, payload: request.payload });
+      const financeContext = actionType === "FINANCE_VERIFY" ? this.trustedFinanceContext(request.workspaceId) : undefined;
+      const policy = evaluatePolicy({ actionType, payload: request.payload, ...(financeContext ? { policyTier: financeContext.tier } : {}) });
       if (policy.requiredControl === "BLOCK") {
         throw new GovernanceError("POLICY_BLOCKED", policy.reason);
       }
@@ -313,11 +399,16 @@ export class GovernanceAuthorizationService {
         resourceVersion: request.resourceVersion,
         payloadHash: policy.canonicalHash,
         policyVersion: policy.policyVersion,
+        ...(financeContext?.contextHash ? { trustedContextHash: financeContext.contextHash } : {}),
       };
       this.appendAudit(draft, request.workspaceId, "POLICY_DECIDED", request.resourceId, {
         actionType,
         requiredControl: policy.requiredControl,
+        decisionReason: policy.reason,
+        policyTier: policy.policyTier,
+        matrixVersion: policy.matrixVersion,
         payloadHash: policy.canonicalHash,
+        ...(financeContext ? { trustedFinanceContext: financeContext.audit } : {}),
       });
       if (policy.requiredControl === "REQUIRE_APPROVAL" || policy.requiredControl === "CHECKPOINT") {
         const id = this.nextId(draft, "control");
@@ -438,6 +529,12 @@ export class GovernanceAuthorizationService {
       const control = draft.controls[controlId];
       if (!control || control.status !== "APPROVED") {
         throw new GovernanceError("CONTROL_NOT_APPROVED", `control cannot be consumed: ${controlId}`);
+      }
+      if (control.actionType === "FINANCE_VERIFY" && control.trustedContextHash !== undefined) {
+        const current = this.trustedFinanceContext(control.workspaceId);
+        if (current.contextHash !== control.trustedContextHash || binding.trustedContextHash !== control.trustedContextHash) {
+          throw new GovernanceError("STALE_CONTROL_FINANCE_CONTEXT", "trusted finance policy context has changed, expired, or does not match");
+        }
       }
       for (const key of ["workspaceId", "resourceId", "resourceVersion", "payloadHash", "policyVersion"] as const) {
         if (control[key] !== binding[key]) {
@@ -722,4 +819,3 @@ export {
   type PgQueryable as GovernancePgQueryable,
   type PgQueryResult as GovernancePgQueryResult,
 } from "./pg-governance-adapter.js";
-

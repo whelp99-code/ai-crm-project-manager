@@ -244,4 +244,71 @@ describe("DailyGate", () => {
     g.changePolicyVersion(2);
     expect(g.status()).toMatchObject({ streak: 0, tier: "conservative", policyVersion: 2 });
   });
+
+  it("fails closed on an unknown or mismatched persisted pack version while preserving the hydrated day boundary", () => {
+    const g = gate();
+    const result = g.restoreState({
+      streak: 90,
+      tier: "risk_tiered",
+      lastDateEpoch: 20_000,
+      activatedMatrixVersion: 7,
+    });
+
+    expect(result).toMatchObject({
+      reset: true,
+      reason: "persisted_pack_version_missing",
+      fromPackVersion: undefined,
+      toPackVersion: 1,
+      prior: { streak: 90, tier: "risk_tiered", activatedMatrixVersion: 7 },
+      resetState: { streak: 0, tier: "conservative", lastDateEpoch: 20_000, activatedMatrixVersion: undefined, packVersion: 1 },
+    });
+    expect(g.snapshotState()).toEqual({
+      streak: 0,
+      tier: "conservative",
+      lastDateEpoch: 20_000,
+      activatedMatrixVersion: undefined,
+      packVersion: 1,
+    });
+
+    const mismatch = g.restoreState({
+      streak: 12,
+      tier: "eligible",
+      lastDateEpoch: 20_001,
+      packVersion: 2,
+    });
+    expect(mismatch).toMatchObject({
+      reset: true,
+      reason: "pack_version_mismatch",
+      fromPackVersion: 2,
+      toPackVersion: 1,
+    });
+  });
+
+  it("restores exactly only when the persisted pack version is the live positive version and clears risk activation on a policy bump", () => {
+    const g = gate();
+    const result = g.restoreState({
+      streak: 91,
+      tier: "risk_tiered",
+      lastDateEpoch: 20_000,
+      activatedMatrixVersion: 7,
+      packVersion: 1,
+    });
+    expect(result).toEqual({ reset: false });
+    expect(g.snapshotState()).toEqual({
+      streak: 91,
+      tier: "risk_tiered",
+      lastDateEpoch: 20_000,
+      activatedMatrixVersion: 7,
+      packVersion: 1,
+    });
+
+    g.changePolicyVersion(2);
+    expect(g.snapshotState()).toEqual({
+      streak: 0,
+      tier: "conservative",
+      lastDateEpoch: 20_000,
+      activatedMatrixVersion: undefined,
+      packVersion: 2,
+    });
+  });
 });

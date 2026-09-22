@@ -239,7 +239,7 @@ check_function_and_guc() {
   # Confirm GUC name used by the function body.
   local src
   src="$(psql_q -c "SELECT pg_get_functiondef('public.app_current_workspace_id'::regproc)")"
-  if printf '%s' "${src}" | grep -q "app.workspace_id"; then
+  if [[ "${src}" == *"app.workspace_id"* ]]; then
     record PASS "GUC name" "app.workspace_id (via current_setting)"
   else
     record FAIL "GUC name" "app.workspace_id not found in function body"
@@ -1042,7 +1042,7 @@ SQL
     p6b_b_projects=1 p6b_b_entries=1 p6b_b_recons=1 p6b_b_finexc=1 p6b_b_gatestate=1 p6b_b_dayrecords=1 \
     p6b_isolation_ok=1
   do
-    printf '%s\n' "${out}" | grep -q "${marker}" || ok=0
+    [[ $'\n'"${out}"$'\n' == *$'\n'"${marker}"$'\n'* ]] || ok=0
   done
 
   if [[ "${ok}" == "1" ]]; then

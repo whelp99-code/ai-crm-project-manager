@@ -34,6 +34,26 @@ export interface DayRecord {
   tierAfter: FinanceTier;
 }
 
+export interface DailyGatePersistedState {
+  streak: number;
+  tier: FinanceTier;
+  lastDateEpoch?: number | undefined;
+  activatedMatrixVersion?: number | undefined;
+  /** Absent only for a legacy state row written before migration 0020. */
+  packVersion?: number | undefined;
+}
+
+export interface DailyGateVersionDriftReset {
+  reset: true;
+  reason: "persisted_pack_version_missing" | "pack_version_mismatch";
+  fromPackVersion: number | undefined;
+  toPackVersion: number;
+  prior: DailyGatePersistedState;
+  resetState: DailyGatePersistedState;
+}
+
+export type DailyGateRestoreResult = { reset: false } | DailyGateVersionDriftReset;
+
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MS_PER_DAY = 86_400_000;
 const SEOUL_OFFSET_MS = 9 * 3_600_000;
@@ -114,34 +134,27 @@ export class DailyGate {
    * a persisted `finance_daily_gate_state` row, bypassing `recordDay`
    * entirely. Replaying every historical day through `recordDay` would
    * double-backfill missing-day gaps and would trip `OUT_OF_ORDER` on the
-   * first re-fed date, so hydrate MUST call this instead. `policyVersion`
-   * is never restored from here — the constructor reconstructs it from the
-   * live `pack.packVersion`.
-   *
-   * KNOWN RESIDUAL (architect P2): a pack-version CHANGE across a restart is
-   * NOT detected here. `finance_daily_gate_state` does not persist the pack/
-   * policy version, and `restoreState` OVERWRITES streak/tier AFTER the
-   * constructor, so a constructor-time reset (§4 rule 5: pack change resets
-   * the streak) is clobbered by the persisted (old-pack) streak on hydrate.
-   * This is currently latent because `changePolicyVersion` has NO runtime
-   * callsite (packs do not change via a wired route today). Follow-up: persist
-   * `pack_version` in `finance_daily_gate_state` (new migration) and, on
-   * hydrate, reset streak=0 + demote eligible→conservative when the persisted
-   * version differs from the live `pack.packVersion` BEFORE `restoreState`.
+   * first re-fed date. It compares the row's persisted pack version with the
+   * live constructor version; absent legacy values and mismatches fail closed
+   * without losing the day boundary or hydrated records.
    */
-  restoreState(state: {
-    streak: number;
-    tier: FinanceTier;
-    lastDateEpoch?: number;
-    activatedMatrixVersion?: number;
-  }): void {
+  restoreState(state: DailyGatePersistedState): DailyGateRestoreResult {
     if (!Number.isInteger(state.streak) || state.streak < 0) {
       throw new FinanceDomainError("INVALID_INPUT", "streak must be a non-negative integer");
     }
-    this.streak = state.streak;
-    this.tier = state.tier;
-    this.lastDateEpoch = state.lastDateEpoch;
-    this.activatedMatrixVersion = state.activatedMatrixVersion;
+    const prior = { ...state };
+    if (state.packVersion === undefined) {
+      const resetState = this.versionResetState(state.lastDateEpoch);
+      this.applyState(resetState);
+      return { reset: true, reason: "persisted_pack_version_missing", fromPackVersion: undefined, toPackVersion: this.policyVersion, prior, resetState };
+    }
+    if (!Number.isInteger(state.packVersion) || state.packVersion < 1 || state.packVersion !== this.policyVersion) {
+      const resetState = this.versionResetState(state.lastDateEpoch);
+      this.applyState(resetState);
+      return { reset: true, reason: "pack_version_mismatch", fromPackVersion: state.packVersion, toPackVersion: this.policyVersion, prior, resetState };
+    }
+    this.applyState(state);
+    return { reset: false };
   }
 
   /**
@@ -149,17 +162,13 @@ export class DailyGate {
    * `status()` but also exposes `lastDateEpoch`/`activatedMatrixVersion`,
    * which `status()` intentionally omits from the public HTTP surface.
    */
-  snapshotState(): {
-    streak: number;
-    tier: FinanceTier;
-    lastDateEpoch: number | undefined;
-    activatedMatrixVersion: number | undefined;
-  } {
+  snapshotState(): DailyGatePersistedState {
     return {
       streak: this.streak,
       tier: this.tier,
       lastDateEpoch: this.lastDateEpoch,
       activatedMatrixVersion: this.activatedMatrixVersion,
+      packVersion: this.policyVersion,
     };
   }
 
@@ -194,7 +203,7 @@ export class DailyGate {
   previewRecordDay(day: DayInput): {
     records: DayRecord[];
     finalRecord: DayRecord;
-    state: { streak: number; tier: FinanceTier; lastDateEpoch: number | undefined; activatedMatrixVersion: number | undefined };
+    state: DailyGatePersistedState;
   } {
     this.assertDayInput(day);
     const newEpoch = epochDay(day.date);
@@ -254,7 +263,7 @@ export class DailyGate {
       qualifying = true;
     }
     const finalRecord = apply(day.date, qualifying, reason);
-    return { records, finalRecord, state: { streak, tier, lastDateEpoch, activatedMatrixVersion } };
+    return { records, finalRecord, state: { streak, tier, lastDateEpoch, activatedMatrixVersion, packVersion: this.policyVersion } };
   }
 
   /** PG-FIRST fail-closed dual-write hook: commits an already-validated (`previewRecordDay`) result. */
@@ -282,7 +291,8 @@ export class DailyGate {
     }
     this.policyVersion = newVersion;
     this.streak = 0;
-    if (this.tier === "eligible") this.tier = "conservative";
+    this.tier = "conservative";
+    this.activatedMatrixVersion = undefined;
   }
 
   /**
@@ -293,7 +303,7 @@ export class DailyGate {
   previewActivateRiskTier(
     approvedMatrixVersion: number,
     approverPrincipalId: string,
-  ): { streak: number; tier: FinanceTier; lastDateEpoch: number | undefined; activatedMatrixVersion: number | undefined } {
+  ): DailyGatePersistedState {
     if (this.tier !== "eligible") {
       const activated = this.activatedMatrixVersion !== undefined ? `, matrix version ${this.activatedMatrixVersion} already active` : "";
       throw new FinanceDomainError(
@@ -307,7 +317,7 @@ export class DailyGate {
     if (!approverPrincipalId.trim()) {
       throw new FinanceDomainError("INVALID_INPUT", "approverPrincipalId is required");
     }
-    return { streak: this.streak, tier: "risk_tiered", lastDateEpoch: this.lastDateEpoch, activatedMatrixVersion: approvedMatrixVersion };
+    return { streak: this.streak, tier: "risk_tiered", lastDateEpoch: this.lastDateEpoch, activatedMatrixVersion: approvedMatrixVersion, packVersion: this.policyVersion };
   }
 
   /** PG-FIRST fail-closed dual-write hook: commits an already-validated (`previewActivateRiskTier`) state. */
@@ -351,6 +361,17 @@ export class DailyGate {
     if (Number.isNaN(Date.parse(day.receivedAt))) {
       throw new FinanceDomainError("INVALID_INPUT", `receivedAt is not a valid ISO timestamp: ${day.receivedAt}`);
     }
+  }
+
+  private versionResetState(lastDateEpoch: number | undefined): DailyGatePersistedState {
+    return { streak: 0, tier: "conservative", lastDateEpoch, activatedMatrixVersion: undefined, packVersion: this.policyVersion };
+  }
+
+  private applyState(state: DailyGatePersistedState): void {
+    this.streak = state.streak;
+    this.tier = state.tier;
+    this.lastDateEpoch = state.lastDateEpoch;
+    this.activatedMatrixVersion = state.activatedMatrixVersion;
   }
 
 }

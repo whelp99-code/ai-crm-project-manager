@@ -22,8 +22,20 @@
  * from the live `FinancePackConfig.packVersion` at boot.
  */
 
+import { createHash, randomUUID } from "node:crypto";
 import type { Reconciliation, FinanceException, StatementRowRef } from "./reconciliation.js";
-import type { DayRecord, FinanceTier } from "./daily-gate.js";
+import type { DailyGatePersistedState, DayRecord, FinanceTier } from "./daily-gate.js";
+
+/** Exact governance canonical-object serialization for audit chain material. */
+function stableAuditStringify(value: unknown): string {
+  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableAuditStringify).join(",")}]`;
+  if (typeof value === "object") {
+    const objectValue = value as Record<string, unknown>;
+    return `{${Object.keys(objectValue).sort().map((key) => `${JSON.stringify(key)}:${stableAuditStringify(objectValue[key])}`).join(",")}}`;
+  }
+  throw new Error("DAILY_GATE_AUDIT_NON_CANONICAL_VALUE");
+}
 
 export interface PgQueryResult<T = unknown> {
   rows: T[];
@@ -348,12 +360,7 @@ class PgFinanceReconciliationRepository implements FinanceReconciliationReposito
 // Daily-gate state + day-record repository
 // ---------------------------------------------------------------------------
 
-export interface DailyGateStateInput {
-  streak: number;
-  tier: FinanceTier;
-  lastDateEpoch?: number | undefined;
-  activatedMatrixVersion?: number | undefined;
-}
+export interface DailyGateStateInput extends DailyGatePersistedState {}
 
 export interface DailyGateStateRow {
   workspace_id: string;
@@ -361,7 +368,16 @@ export interface DailyGateStateRow {
   tier: string;
   last_date_epoch: string | number | null;
   activated_matrix_version: string | number | null;
+  pack_version: string | number | null;
   version: number;
+}
+
+export interface DailyGateVersionTransition {
+  reason: "persisted_pack_version_missing" | "pack_version_mismatch";
+  fromPackVersion?: number | undefined;
+  toPackVersion: number;
+  prior: DailyGateStateInput;
+  resetState?: DailyGateStateInput;
 }
 
 export interface AppendDayRecordInput {
@@ -370,6 +386,16 @@ export interface AppendDayRecordInput {
   reason?: string;
   streakAfter: number;
   tierAfter: FinanceTier;
+}
+
+export interface DailyGateEvidenceInput {
+  date: string; controllerId: string; evidenceId: string; evidenceHash: string; evidenceSignature: string;
+  metrics: { importsCompleted: boolean; entriesBalanced: boolean; openFinanceExceptions: number };
+  receivedAt: string; matrixVersion: number; policyVersion: number; packVersion: number;
+  resultingStreak: number; resultingTier: FinanceTier; provenance: unknown;
+}
+export interface DailyGateActivationInput {
+  date: string; evidenceHash: string; cfoId: string; approvalId: string; approvalHash: string; approvalSignature: string; approvedAt: string; expiresAt: string;
 }
 
 export interface DayRecordRow {
@@ -396,6 +422,13 @@ export interface DailyGateRepository {
    * its own recorded history after a restart.
    */
   appendDayRecordWithState(workspaceId: string, record: AppendDayRecordInput, state: DailyGateStateInput): Promise<void>;
+  recordDayWithGovernance(workspaceId: string, record: AppendDayRecordInput, state: DailyGateStateInput, evidence: DailyGateEvidenceInput): Promise<void>;
+  activateRiskTierWithGovernance(workspaceId: string, state: DailyGateStateInput, activation: DailyGateActivationInput): Promise<void>;
+  listDailyGateEvidence(workspaceId: string): Promise<DailyGateEvidenceInput[]>;
+  listDailyGateActivations(workspaceId: string): Promise<DailyGateActivationInput[]>;
+  /** Atomically persists a conservative version-drift reset and immutable proof. */
+  resetDailyGateStateWithAudit(workspaceId: string, state: DailyGateStateInput, transition: DailyGateVersionTransition): Promise<void>;
+  listDailyGateVersionTransitions(workspaceId: string): Promise<DailyGateVersionTransition[]>;
   listDayRecords(workspaceId: string): Promise<DayRecord[]>;
   /** Hydrate-on-boot admin path: every persisted state row across all workspaces. */
   listAllDailyGateStates(): Promise<Array<{ workspaceId: string } & DailyGateStateInput>>;
@@ -408,6 +441,7 @@ function mapDailyGateStateRow(row: DailyGateStateRow): DailyGateStateInput {
     tier: row.tier as FinanceTier,
     ...(row.last_date_epoch !== null ? { lastDateEpoch: Number(row.last_date_epoch) } : {}),
     ...(row.activated_matrix_version !== null ? { activatedMatrixVersion: Number(row.activated_matrix_version) } : {}),
+    ...(row.pack_version !== null && row.pack_version !== undefined ? { packVersion: Number(row.pack_version) } : {}),
   };
 }
 
@@ -428,6 +462,11 @@ function mapDayRecordRow(row: DayRecordRow): DayRecord {
 export class InMemoryDailyGateRepository implements DailyGateRepository {
   private readonly states = new Map<string, DailyGateStateInput>();
   private readonly dayRecords = new Map<string, DayRecord>();
+  private readonly versionTransitions = new Map<string, DailyGateVersionTransition[]>();
+  private readonly evidence = new Map<string, DailyGateEvidenceInput>();
+  private readonly activations = new Map<string, DailyGateActivationInput>();
+  private readonly evidenceTokens = new Set<string>();
+  private readonly approvalTokens = new Set<string>();
 
   async saveDailyGateState(workspaceId: string, state: DailyGateStateInput): Promise<void> {
     this.states.set(workspaceId, { ...state });
@@ -439,7 +478,11 @@ export class InMemoryDailyGateRepository implements DailyGateRepository {
   }
 
   async appendDayRecord(workspaceId: string, record: AppendDayRecordInput): Promise<void> {
-    this.dayRecords.set(`${workspaceId}\0${record.date}`, {
+    const key = `${workspaceId}\0${record.date}`;
+    if (this.dayRecords.has(key)) {
+      throw new Error("DUPLICATE_DAILY_GATE_RECORD");
+    }
+    this.dayRecords.set(key, {
       date: record.date,
       qualifying: record.qualifying,
       streakAfter: record.streakAfter,
@@ -454,6 +497,36 @@ export class InMemoryDailyGateRepository implements DailyGateRepository {
   ): Promise<void> {
     await this.appendDayRecord(workspaceId, record);
     await this.saveDailyGateState(workspaceId, state);
+  }
+  async recordDayWithGovernance(workspaceId: string, record: AppendDayRecordInput, state: DailyGateStateInput, evidence: DailyGateEvidenceInput): Promise<void> {
+    const key = `${workspaceId}\0${evidence.date}`;
+    if (this.evidence.has(key) || this.evidenceTokens.has(`${workspaceId}\0${evidence.evidenceId}`) || this.evidenceTokens.has(`${workspaceId}\0${evidence.evidenceHash}`)) throw new Error("DAILY_GATE_REPLAY");
+    await this.appendDayRecordWithState(workspaceId, record, state);
+    this.evidence.set(key, structuredClone(evidence));
+    this.evidenceTokens.add(`${workspaceId}\0${evidence.evidenceId}`); this.evidenceTokens.add(`${workspaceId}\0${evidence.evidenceHash}`);
+  }
+  async activateRiskTierWithGovernance(workspaceId: string, state: DailyGateStateInput, activation: DailyGateActivationInput): Promise<void> {
+    const key = `${workspaceId}\0${activation.date}`;
+    if (this.activations.has(key) || this.approvalTokens.has(`${workspaceId}\0${activation.approvalId}`) || this.approvalTokens.has(`${workspaceId}\0${activation.approvalHash}`)) throw new Error("DAILY_GATE_REPLAY");
+    this.activations.set(key, structuredClone(activation));
+    this.approvalTokens.add(`${workspaceId}\0${activation.approvalId}`); this.approvalTokens.add(`${workspaceId}\0${activation.approvalHash}`);
+    await this.saveDailyGateState(workspaceId, state);
+  }
+  async listDailyGateEvidence(workspaceId: string): Promise<DailyGateEvidenceInput[]> { return [...this.evidence.entries()].filter(([key]) => key.startsWith(`${workspaceId}\0`)).map(([, item]) => structuredClone(item)); }
+  async listDailyGateActivations(workspaceId: string): Promise<DailyGateActivationInput[]> { return [...this.activations.entries()].filter(([key]) => key.startsWith(`${workspaceId}\0`)).map(([, item]) => structuredClone(item)); }
+
+  async resetDailyGateStateWithAudit(
+    workspaceId: string,
+    state: DailyGateStateInput,
+    transition: DailyGateVersionTransition,
+  ): Promise<void> {
+    const audit = { ...transition, resetState: { ...state }, prior: { ...transition.prior } };
+    this.states.set(workspaceId, { ...state });
+    this.versionTransitions.set(workspaceId, [...(this.versionTransitions.get(workspaceId) ?? []), audit]);
+  }
+
+  async listDailyGateVersionTransitions(workspaceId: string): Promise<DailyGateVersionTransition[]> {
+    return structuredClone(this.versionTransitions.get(workspaceId) ?? []);
   }
 
   async listDayRecords(workspaceId: string): Promise<DayRecord[]> {
@@ -503,13 +576,14 @@ class PgDailyGateRepository implements DailyGateRepository {
 
   private async upsertDailyGateState(db: PgQueryable, workspaceId: string, state: DailyGateStateInput): Promise<void> {
     await db.query(
-      `INSERT INTO finance_daily_gate_state (workspace_id, streak, tier, last_date_epoch, activated_matrix_version, version)
-         VALUES ($1,$2,$3,$4,$5,1)
+      `INSERT INTO finance_daily_gate_state (workspace_id, streak, tier, last_date_epoch, activated_matrix_version, pack_version, version)
+         VALUES ($1,$2,$3,$4,$5,$6,1)
          ON CONFLICT (workspace_id) DO UPDATE SET
            streak = EXCLUDED.streak,
            tier = EXCLUDED.tier,
            last_date_epoch = EXCLUDED.last_date_epoch,
            activated_matrix_version = EXCLUDED.activated_matrix_version,
+           pack_version = EXCLUDED.pack_version,
            version = finance_daily_gate_state.version + 1,
            updated_at = now()`,
       [
@@ -518,6 +592,7 @@ class PgDailyGateRepository implements DailyGateRepository {
         state.tier,
         state.lastDateEpoch ?? null,
         state.activatedMatrixVersion ?? null,
+        state.packVersion ?? null,
       ],
     );
   }
@@ -535,12 +610,63 @@ class PgDailyGateRepository implements DailyGateRepository {
   }
 
   private async insertDayRecord(db: PgQueryable, workspaceId: string, record: AppendDayRecordInput): Promise<void> {
-    await db.query(
+    const result = await db.query(
       `INSERT INTO finance_day_records (workspace_id, date, qualifying, reason, streak_after, tier_after)
          VALUES ($1,$2,$3,$4,$5,$6)
-         ON CONFLICT (workspace_id, date) DO NOTHING`,
+         ON CONFLICT (workspace_id, date) DO NOTHING
+         RETURNING workspace_id`,
       [workspaceId, record.date, record.qualifying, record.reason ?? null, record.streakAfter, record.tierAfter],
     );
+    if (result.rowCount !== 1) throw new Error("DUPLICATE_DAILY_GATE_RECORD");
+  }
+
+  private async appendAudit(db: PgQueryable, workspaceId: string, kind: string, subjectId: string, keys: Record<string, string>): Promise<void> {
+    await db.query(`INSERT INTO audit_chain_heads (workspace_id, head_sequence) VALUES ($1,0) ON CONFLICT (workspace_id) DO NOTHING`, [workspaceId]);
+    const head = await db.query<{ head_sequence: string | number; head_event_hash: string | null }>(`SELECT head_sequence, head_event_hash FROM audit_chain_heads WHERE workspace_id = $1 FOR UPDATE`, [workspaceId]);
+    const sequence = Number(head.rows[0]?.head_sequence ?? 0) + 1;
+    const previousHash = head.rows[0]?.head_event_hash ?? "0".repeat(64);
+    const data = { ...keys };
+    const material = `${workspaceId}\0${sequence}\0${kind}\0${subjectId}\0${stableAuditStringify(data)}\0${previousHash}`;
+    const eventHash = createHash("sha256").update(material, "utf8").digest("hex");
+    const inserted = await db.query<{ id: string }>(
+      `INSERT INTO audit_events (workspace_id, sequence, event_type, payload, previous_event_hash, event_hash, correlation_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+      [workspaceId, sequence, kind, JSON.stringify({ subjectId, data }), previousHash, eventHash, randomUUID()],
+    );
+    const eventId = inserted.rows[0]?.id;
+    if (!eventId) throw new Error("DAILY_GATE_AUDIT_INSERT_FAILED");
+    await db.query(`INSERT INTO outbox_events (workspace_id, audit_event_id, event_type, partition_key, payload, status) VALUES ($1,$2,$3,$4,$5,'PENDING')`, [workspaceId, eventId, kind, workspaceId, JSON.stringify({ workspaceId, eventId, kind })]);
+    await db.query(`UPDATE audit_chain_heads SET head_sequence=$2, head_event_id=$3, head_event_hash=$4, updated_at=now() WHERE workspace_id=$1`, [workspaceId, sequence, eventId, eventHash]);
+  }
+
+  async recordDayWithGovernance(workspaceId: string, record: AppendDayRecordInput, state: DailyGateStateInput, evidence: DailyGateEvidenceInput): Promise<void> {
+    await this.scoped(workspaceId, async (db) => {
+      const replay = await db.query(`SELECT 1 FROM finance_daily_gate_evidence WHERE workspace_id=$1 AND (business_date=$2 OR evidence_id=$3 OR evidence_hash=$4) FOR UPDATE`, [workspaceId, evidence.date, evidence.evidenceId, evidence.evidenceHash]);
+      if (replay.rows.length > 0) throw new Error("DAILY_GATE_REPLAY");
+      await db.query(`INSERT INTO finance_daily_gate_evidence (workspace_id,business_date,controller_principal_id,controller_role,evidence_id,evidence_hash,evidence_signature,metrics,received_at,matrix_version,policy_version,pack_version,resulting_streak,resulting_tier,provenance) VALUES ($1,$2,$3,'CONTROLLER',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, [workspaceId, evidence.date, evidence.controllerId, evidence.evidenceId, evidence.evidenceHash, evidence.evidenceSignature, JSON.stringify(evidence.metrics), evidence.receivedAt, evidence.matrixVersion, evidence.policyVersion, evidence.packVersion, evidence.resultingStreak, evidence.resultingTier, JSON.stringify(evidence.provenance)]);
+      await this.appendAudit(db, workspaceId, "FINANCE_DAILY_GATE_EVIDENCE", evidence.evidenceId, { workspaceId, evidenceId: evidence.evidenceId, evidenceHash: evidence.evidenceHash, kind: "daily_gate_evidence" });
+      await this.insertDayRecord(db, workspaceId, record);
+      await this.upsertDailyGateState(db, workspaceId, state);
+    });
+  }
+
+  async activateRiskTierWithGovernance(workspaceId: string, state: DailyGateStateInput, activation: DailyGateActivationInput): Promise<void> {
+    await this.scoped(workspaceId, async (db) => {
+      const replay = await db.query(`SELECT 1 FROM finance_daily_gate_activations WHERE workspace_id=$1 AND (business_date=$2 OR approval_id=$3 OR approval_hash=$4) FOR UPDATE`, [workspaceId, activation.date, activation.approvalId, activation.approvalHash]);
+      if (replay.rows.length > 0) throw new Error("DAILY_GATE_REPLAY");
+      await db.query(`INSERT INTO finance_daily_gate_activations (workspace_id,business_date,evidence_hash,cfo_principal_id,approval_id,approval_hash,approval_signature,approved_at,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [workspaceId, activation.date, activation.evidenceHash, activation.cfoId, activation.approvalId, activation.approvalHash, activation.approvalSignature, activation.approvedAt, activation.expiresAt]);
+      await this.appendAudit(db, workspaceId, "FINANCE_DAILY_GATE_ACTIVATION", activation.approvalId, { workspaceId, approvalId: activation.approvalId, approvalHash: activation.approvalHash, kind: "daily_gate_activation" });
+      await this.upsertDailyGateState(db, workspaceId, state);
+    });
+  }
+
+  async listDailyGateEvidence(workspaceId: string): Promise<DailyGateEvidenceInput[]> {
+    const result = await this.scoped(workspaceId, (db) => db.query<{ business_date: Date | string; controller_principal_id: string; evidence_id: string; evidence_hash: string; evidence_signature: string; metrics: DailyGateEvidenceInput["metrics"]; received_at: Date | string; matrix_version: number; policy_version: number; pack_version: number; resulting_streak: number; resulting_tier: FinanceTier; provenance: unknown }>(`SELECT business_date,controller_principal_id,evidence_id,evidence_hash,evidence_signature,metrics,received_at,matrix_version,policy_version,pack_version,resulting_streak,resulting_tier,provenance FROM finance_daily_gate_evidence WHERE workspace_id=$1 ORDER BY business_date ASC`, [workspaceId]));
+    return result.rows.map((row) => ({ date: toDateString(row.business_date), controllerId: row.controller_principal_id, evidenceId: row.evidence_id, evidenceHash: row.evidence_hash, evidenceSignature: row.evidence_signature, metrics: structuredClone(row.metrics), receivedAt: toIso(row.received_at), matrixVersion: Number(row.matrix_version), policyVersion: Number(row.policy_version), packVersion: Number(row.pack_version), resultingStreak: Number(row.resulting_streak), resultingTier: row.resulting_tier, provenance: row.provenance }));
+  }
+  async listDailyGateActivations(workspaceId: string): Promise<DailyGateActivationInput[]> {
+    const result = await this.scoped(workspaceId, (db) => db.query<{ business_date: Date | string; evidence_hash: string; cfo_principal_id: string; approval_id: string; approval_hash: string; approval_signature: string; approved_at: Date | string; expires_at: Date | string }>(`SELECT business_date,evidence_hash,cfo_principal_id,approval_id,approval_hash,approval_signature,approved_at,expires_at FROM finance_daily_gate_activations WHERE workspace_id=$1 ORDER BY business_date ASC`, [workspaceId]));
+    return result.rows.map((row) => ({ date: toDateString(row.business_date), evidenceHash: row.evidence_hash, cfoId: row.cfo_principal_id, approvalId: row.approval_id, approvalHash: row.approval_hash, approvalSignature: row.approval_signature, approvedAt: new Date(row.approved_at).toISOString(), expiresAt: new Date(row.expires_at).toISOString() }));
   }
 
   async appendDayRecord(workspaceId: string, record: AppendDayRecordInput): Promise<void> {
@@ -562,6 +688,39 @@ class PgDailyGateRepository implements DailyGateRepository {
       await this.insertDayRecord(db, workspaceId, record);
       await this.upsertDailyGateState(db, workspaceId, state);
     });
+  }
+
+  async resetDailyGateStateWithAudit(
+    workspaceId: string,
+    state: DailyGateStateInput,
+    transition: DailyGateVersionTransition,
+  ): Promise<void> {
+    await this.scoped(workspaceId, async (db) => {
+      await this.upsertDailyGateState(db, workspaceId, state);
+      await db.query(
+        `INSERT INTO finance_daily_gate_version_transitions
+          (workspace_id, reason, from_pack_version, to_pack_version, prior_streak, prior_tier, prior_last_date_epoch, prior_activated_matrix_version, reset_streak, reset_tier, reset_last_date_epoch, reset_activated_matrix_version)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [workspaceId, transition.reason, transition.fromPackVersion ?? null, transition.toPackVersion,
+          transition.prior.streak, transition.prior.tier, transition.prior.lastDateEpoch ?? null, transition.prior.activatedMatrixVersion ?? null,
+          state.streak, state.tier, state.lastDateEpoch ?? null, state.activatedMatrixVersion ?? null],
+      );
+    });
+  }
+
+  async listDailyGateVersionTransitions(workspaceId: string): Promise<DailyGateVersionTransition[]> {
+    const result = await this.scoped(workspaceId, (db) => db.query<{
+      reason: DailyGateVersionTransition["reason"]; from_pack_version: string | number | null; to_pack_version: string | number;
+      prior_streak: number; prior_tier: FinanceTier; prior_last_date_epoch: string | number | null; prior_activated_matrix_version: string | number | null;
+      reset_streak: number; reset_tier: FinanceTier; reset_last_date_epoch: string | number | null; reset_activated_matrix_version: string | number | null;
+    }>(`SELECT reason, from_pack_version, to_pack_version, prior_streak, prior_tier, prior_last_date_epoch, prior_activated_matrix_version, reset_streak, reset_tier, reset_last_date_epoch, reset_activated_matrix_version FROM finance_daily_gate_version_transitions WHERE workspace_id = $1 ORDER BY id ASC`, [workspaceId]));
+    return result.rows.map((row) => ({
+      reason: row.reason,
+      ...(row.from_pack_version !== null ? { fromPackVersion: Number(row.from_pack_version) } : {}),
+      toPackVersion: Number(row.to_pack_version),
+      prior: { streak: row.prior_streak, tier: row.prior_tier, ...(row.prior_last_date_epoch !== null ? { lastDateEpoch: Number(row.prior_last_date_epoch) } : {}), ...(row.prior_activated_matrix_version !== null ? { activatedMatrixVersion: Number(row.prior_activated_matrix_version) } : {}) },
+      resetState: { streak: row.reset_streak, tier: row.reset_tier, ...(row.reset_last_date_epoch !== null ? { lastDateEpoch: Number(row.reset_last_date_epoch) } : {}), ...(row.reset_activated_matrix_version !== null ? { activatedMatrixVersion: Number(row.reset_activated_matrix_version) } : {}), packVersion: Number(row.to_pack_version) },
+    }));
   }
 
   async listDayRecords(workspaceId: string): Promise<DayRecord[]> {

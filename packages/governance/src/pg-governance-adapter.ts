@@ -365,6 +365,7 @@ export function controlToPersisted(control: ControlRequest): PersistedControlSha
   if (control.decidedByPrincipalId !== undefined) {
     shape.decidedByPrincipalId = control.decidedByPrincipalId;
   }
+  if (control.trustedContextHash !== undefined) shape.trustedContextHash = control.trustedContextHash;
   return shape;
 }
 
@@ -382,6 +383,7 @@ export function intentToPersisted(intent: ExecutionIntent): PersistedIntentShape
     leaseEpoch: intent.leaseEpoch,
   };
   if (intent.controlId !== undefined) shape.controlId = intent.controlId;
+  if (intent.trustedContextHash !== undefined) shape.trustedContextHash = intent.trustedContextHash;
   if (intent.leaseDeadline !== undefined) shape.leaseDeadline = intent.leaseDeadline;
   if (intent.leaseToken !== undefined) shape.leaseToken = intent.leaseToken;
   return shape;
@@ -402,6 +404,7 @@ export function controlFromPersisted(shape: PersistedControlShape): ControlReque
   if (shape.decidedByPrincipalId !== undefined) {
     control.decidedByPrincipalId = shape.decidedByPrincipalId;
   }
+  if (shape.trustedContextHash !== undefined) control.trustedContextHash = shape.trustedContextHash;
   return control;
 }
 
@@ -419,6 +422,7 @@ export function intentFromPersisted(shape: PersistedIntentShape): ExecutionInten
     leaseEpoch: shape.leaseEpoch,
   };
   if (shape.controlId !== undefined) intent.controlId = shape.controlId;
+  if (shape.trustedContextHash !== undefined) intent.trustedContextHash = shape.trustedContextHash;
   if (shape.leaseDeadline !== undefined) intent.leaseDeadline = shape.leaseDeadline;
   if (shape.leaseToken !== undefined) intent.leaseToken = shape.leaseToken;
   return intent;
@@ -433,6 +437,7 @@ export function mapControlRow(row: {
   resource_version: number;
   payload_hash: string;
   policy_version: number;
+  trusted_context_hash?: string | null;
   requester_principal_id: string;
   decided_by_principal_id?: string | null;
   status: string;
@@ -452,6 +457,7 @@ export function mapControlRow(row: {
   if (row.decided_by_principal_id) {
     shape.decidedByPrincipalId = row.decided_by_principal_id;
   }
+  if (row.trusted_context_hash) shape.trustedContextHash = row.trusted_context_hash;
   return shape;
 }
 
@@ -465,6 +471,7 @@ export function mapIntentRow(row: {
   resource_version: number;
   payload_hash: string;
   policy_version: number;
+  trusted_context_hash?: string | null;
   lease_deadline?: Date | string | null;
   lease_epoch: number;
   lease_token?: string | null;
@@ -486,6 +493,7 @@ export function mapIntentRow(row: {
   if (deadline !== undefined) shape.leaseDeadline = deadline;
   if (row.lease_token) shape.leaseToken = row.lease_token;
   if (row.control_id) shape.controlId = row.control_id;
+  if (row.trusted_context_hash) shape.trustedContextHash = row.trusted_context_hash;
   return shape;
 }
 /** Raw `outbox_events` row shape as returned by `claimPendingOutbox`'s SELECT. */
@@ -801,6 +809,7 @@ interface OrchGovernanceControlRow {
   resource_version: number;
   payload_hash: string;
   policy_version: number;
+  trusted_context_hash: string | null;
   requester_principal_id: string;
   decided_by_principal_id: string | null;
   status: string;
@@ -816,6 +825,7 @@ interface OrchGovernanceIntentRow {
   resource_version: number;
   payload_hash: string;
   policy_version: number;
+  trusted_context_hash: string | null;
   lease_deadline: Date | string | null;
   lease_epoch: number;
   lease_token: string | null;
@@ -853,9 +863,9 @@ class PgGovernanceRepository implements GovernanceRepository {
       db.query(
         `INSERT INTO orch_governance_controls (
            id, workspace_id, action_type, kind, resource_id, resource_version,
-           payload_hash, policy_version, requester_principal_id,
+           payload_hash, policy_version, trusted_context_hash, requester_principal_id,
            decided_by_principal_id, status, created_at, updated_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now())
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now(),now())
          ON CONFLICT (id) DO UPDATE SET
            action_type = EXCLUDED.action_type,
            kind = EXCLUDED.kind,
@@ -863,6 +873,7 @@ class PgGovernanceRepository implements GovernanceRepository {
            resource_version = EXCLUDED.resource_version,
            payload_hash = EXCLUDED.payload_hash,
            policy_version = EXCLUDED.policy_version,
+           trusted_context_hash = EXCLUDED.trusted_context_hash,
            requester_principal_id = EXCLUDED.requester_principal_id,
            decided_by_principal_id = EXCLUDED.decided_by_principal_id,
            status = EXCLUDED.status,
@@ -876,6 +887,7 @@ class PgGovernanceRepository implements GovernanceRepository {
           control.resourceVersion,
           control.payloadHash,
           control.policyVersion,
+          control.trustedContextHash ?? null,
           control.requesterPrincipalId,
           control.decidedByPrincipalId ?? null,
           control.status,
@@ -900,9 +912,9 @@ class PgGovernanceRepository implements GovernanceRepository {
       db.query(
         `INSERT INTO orch_governance_intents (
            id, workspace_id, action_type, status, idempotency_key, resource_id,
-           resource_version, payload_hash, policy_version, lease_deadline,
+           resource_version, payload_hash, policy_version, trusted_context_hash, lease_deadline,
            lease_epoch, lease_token, control_id, created_at, updated_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now(),now())
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),now())
          ON CONFLICT (id) DO UPDATE SET
            action_type = EXCLUDED.action_type,
            status = EXCLUDED.status,
@@ -911,6 +923,7 @@ class PgGovernanceRepository implements GovernanceRepository {
            resource_version = EXCLUDED.resource_version,
            payload_hash = EXCLUDED.payload_hash,
            policy_version = EXCLUDED.policy_version,
+           trusted_context_hash = EXCLUDED.trusted_context_hash,
            lease_deadline = EXCLUDED.lease_deadline,
            lease_epoch = EXCLUDED.lease_epoch,
            lease_token = EXCLUDED.lease_token,
@@ -926,6 +939,7 @@ class PgGovernanceRepository implements GovernanceRepository {
           intent.resourceVersion,
           intent.payloadHash,
           intent.policyVersion,
+          intent.trustedContextHash ?? null,
           intent.leaseDeadline ?? null,
           intent.leaseEpoch,
           intent.leaseToken ?? null,

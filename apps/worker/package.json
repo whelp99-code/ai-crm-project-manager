@@ -11,7 +11,7 @@
   "scripts": {
     "typecheck": "tsc -b --noEmit",
     "test": "vitest run",
-    "start": "node --experimental-strip-types src/main.ts"
+    "start": "tsx src/main.ts"
   },
   "dependencies": {
     "@ai-crm/contracts": "workspace:*",

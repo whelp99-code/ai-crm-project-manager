@@ -28,13 +28,16 @@ import { createHash } from "node:crypto";
 /** Bumped whenever POLICY_MATRIX semantics change. */
 export const POLICY_VERSION = 1 as const;
 
+/** Version of the active tiered matrix set. Kept distinct from canonicalization. */
+export const POLICY_MATRIX_VERSION = 1 as const;
+
 export const REQUIRED_CONTROLS = ["ALLOW", "CHECKPOINT", "REQUIRE_APPROVAL", "BLOCK"] as const;
 export type RequiredControl = (typeof REQUIRED_CONTROLS)[number];
 
 /** Required controls a mapped (known) action type may resolve to; BLOCK is reserved for unmapped input. */
 type MappedControl = Exclude<RequiredControl, "BLOCK">;
 
-interface PolicyMatrixEntry {
+export interface PolicyMatrixEntry {
   readonly control: MappedControl;
   readonly reason: string;
 }
@@ -137,6 +140,54 @@ export const POLICY_MATRIX: Readonly<Record<ActionType, PolicyMatrixEntry>> = Ob
     reason: "Posting to the ledger is a durable financial record; always requires human approval.",
   },
 } satisfies Record<ActionType, PolicyMatrixEntry>);
+
+/**
+ * Server-selected finance policy tiers.  These matrices are data, not a
+ * caller-controlled policy hint: transport must select a tier from trusted
+ * workspace state before it calls `evaluatePolicy`.
+ */
+export const POLICY_TIERS = ["conservative", "eligible", "risk_tiered"] as const;
+export type PolicyTier = (typeof POLICY_TIERS)[number];
+
+function frozenMatrix(overrides: Partial<Record<ActionType, PolicyMatrixEntry>>): Readonly<Record<ActionType, PolicyMatrixEntry>> {
+  return Object.freeze(Object.fromEntries(
+    ACTION_TYPES.map((actionType) => [
+      actionType,
+      Object.freeze({ ...(overrides[actionType] ?? POLICY_MATRIX[actionType]) }),
+    ]),
+  ) as Record<ActionType, PolicyMatrixEntry>);
+}
+
+/** Immutable, version-1 matrices. All non-finance rows preserve POLICY_MATRIX. */
+export const POLICY_MATRICES: Readonly<Record<PolicyTier, Readonly<Record<ActionType, PolicyMatrixEntry>>>> = Object.freeze({
+  conservative: frozenMatrix({
+    FINANCE_VERIFY: Object.freeze({
+      control: "REQUIRE_APPROVAL",
+      reason: "Conservative finance tier requires independent human approval for verification.",
+    }),
+  }),
+  eligible: frozenMatrix({
+    FINANCE_VERIFY: Object.freeze({
+      control: "CHECKPOINT",
+      reason: "Eligible finance tier permits verification only through an operator checkpoint.",
+    }),
+  }),
+  risk_tiered: frozenMatrix({
+    FINANCE_VERIFY: Object.freeze({
+      control: "ALLOW",
+      reason: "Active risk-tiered finance policy permits bounded verification without a control.",
+    }),
+  }),
+});
+
+/** Explicit version registry; callers must select a supported immutable set. */
+export const VERSIONED_POLICY_MATRICES = Object.freeze({
+  [POLICY_MATRIX_VERSION]: POLICY_MATRICES,
+} as const);
+
+export function policyMatrixForTier(tier: PolicyTier): Readonly<Record<ActionType, PolicyMatrixEntry>> {
+  return POLICY_MATRICES[tier];
+}
 
 /** Action types whose required control must never be downgraded below REQUIRE_APPROVAL. */
 export const PROTECTED_ACTION_TYPES: ReadonlySet<ActionType> = new Set(
@@ -502,10 +553,14 @@ export interface PolicyInput {
   /** Server-derived action type; never trust a caller-supplied classification override. */
   readonly actionType: string;
   readonly payload: unknown;
+  /** Trusted server-selected tier; public transports must never populate this from a request body. */
+  readonly policyTier?: PolicyTier;
 }
 
 export interface PolicyResult {
   readonly policyVersion: number;
+  readonly matrixVersion: number;
+  readonly policyTier: PolicyTier;
   readonly actionType: string;
   readonly requiredControl: RequiredControl;
   readonly reason: string;
@@ -524,6 +579,8 @@ export function evaluatePolicy(input: PolicyInput, payloadSchema: FieldSchema = 
   if (!parsed.success) {
     return {
       policyVersion: POLICY_VERSION,
+      matrixVersion: POLICY_MATRIX_VERSION,
+      policyTier: input.policyTier ?? "conservative",
       actionType: input.actionType,
       requiredControl: "BLOCK",
       reason: `unknown or unmapped action type "${input.actionType}"`,
@@ -532,9 +589,11 @@ export function evaluatePolicy(input: PolicyInput, payloadSchema: FieldSchema = 
   }
 
   const canonicalHash = canonicalHashOf(input.actionType, input.payload, payloadSchema);
-  const entry = POLICY_MATRIX[parsed.data];
+  const entry = input.policyTier === undefined ? POLICY_MATRIX[parsed.data] : policyMatrixForTier(input.policyTier)[parsed.data];
   return {
     policyVersion: POLICY_VERSION,
+    matrixVersion: POLICY_MATRIX_VERSION,
+    policyTier: input.policyTier ?? "conservative",
     actionType: parsed.data,
     requiredControl: entry.control,
     reason: entry.reason,

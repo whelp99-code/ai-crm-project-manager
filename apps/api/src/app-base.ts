@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import {
   CrmDomainError,
@@ -47,6 +47,7 @@ import {
 } from "@ai-crm/finance/pg-finance-ledger-adapter";
 import {
   createPgDailyGateRepository,
+  InMemoryDailyGateRepository,
   createPgFinanceReconciliationRepository,
   type DailyGateRepository,
   type FinanceReconciliationRepository,
@@ -88,7 +89,7 @@ import {
   type ReportRepository,
 } from "@ai-crm/reports/pg-reports-adapter";
 import { ReportDomainError, ReportService, type FinalReport, type FinalReportSnapshot } from "@ai-crm/reports";
-import { canonicalHashOf } from "@ai-crm/policy-engine";
+import { canonicalHashOf, POLICY_MATRIX_VERSION } from "@ai-crm/policy-engine";
 import {
   NaturalCommandError,
   NaturalCommandService,
@@ -313,6 +314,12 @@ export interface CreateAppOptions {
    */
   financePack?: FinancePackConfig;
   /**
+   * Server-only source of daily-gate control facts. HTTP callers may submit
+   * only a business date; metrics, provenance, identities and approval facts
+   * are derived here and signed by the server before a gate can mutate.
+   */
+  dailyGateControlPlane?: DailyGateControlPlane;
+  /**
    * Non-prod bootstrap only: acknowledges an unsigned/pilot `financePack`.
    * Tests may omit this and still inject `financePack` as an explicit fixture.
    * Production loaders must not set this. See `docs/ops/finance-pack-pilot.md`
@@ -412,6 +419,48 @@ export interface CreateAppOptions {
   pgNotify?: boolean;
   /** Overrides the LISTEN/NOTIFY channel name. Defaults to `ai_crm_agent_events`. Test-only knob. */
   pgNotifyChannel?: string;
+}
+
+export interface DailyGateHumanActor {
+  id: string;
+  workspaceId: string;
+  role: string;
+  kind: "HUMAN";
+  active: boolean;
+}
+
+export interface DailyGateProvenance {
+  refs: readonly string[];
+  digests: readonly string[];
+  observedAt: string;
+  expiresAt: string;
+}
+
+export interface DailyGateControlPlane {
+  dayFacts(input: { workspaceId: string; date: string }): Promise<{
+    actor: DailyGateHumanActor;
+    metrics: { importsCompleted: boolean; entriesBalanced: boolean; openFinanceExceptions: number };
+    receivedAt: string;
+    provenance: DailyGateProvenance;
+    matrixVersion: number;
+    matrixActive: boolean;
+    policyVersion: number;
+    packVersion: number;
+    evidenceId: string;
+    evidenceSecret: string;
+  }>;
+  activationFacts(input: { workspaceId: string; date: string; controllerId: string; evidenceHash: string }): Promise<{
+    actor: DailyGateHumanActor;
+    matrixVersion: number;
+    matrixActive: boolean;
+    policyVersion: number;
+    packVersion: number;
+    approvalId: string;
+    approvedAt: string;
+    expiresAt: string;
+    evidenceSecret: string;
+  }>;
+  now?: () => Date;
 }
 
 /** Runtime decoration attached to the Fastify instance for tests / ops. */
@@ -544,7 +593,41 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   const ledger = financePack ? new LedgerService(financePack) : undefined;
   const reconciliation = financePack ? new ReconciliationService(financePack) : undefined;
   const dailyGates = new Map<string, DailyGate>();
-  const governance = new GovernanceAuthorizationService(new ActionRegistry(GOVERNANCE_COMMANDS));
+  const dailyGateEvidence = new Map<string, { hash: string; controllerId: string; matrixVersion: number; policyVersion: number; packVersion: number; streak: number; date: string; validUntil: string }>();
+  const governance = new GovernanceAuthorizationService(new ActionRegistry(GOVERNANCE_COMMANDS), undefined, {
+    // The authorization request never carries a tier or evidence. This seam
+    // reads only the server-owned DailyGate/evidence state established by the
+    // signed control-plane routes above; missing or stale facts deliberately
+    // make GovernanceAuthorizationService fall back to conservative policy.
+    financePolicyContext: (workspaceId) => {
+      const gate = dailyGates.get(workspaceId);
+      const evidence = [...dailyGateEvidence.entries()]
+        .filter(([key]) => key.startsWith(`${workspaceId}\0`))
+        .map(([, value]) => value)
+        .sort((a, b) => b.date.localeCompare(a.date))[0];
+      if (!gate || !evidence) return undefined;
+      const status = gate.status();
+      const persisted = gate.snapshotState();
+      const matrixVersion = status.tier === "risk_tiered" ? persisted.activatedMatrixVersion : evidence.matrixVersion;
+      if (matrixVersion === undefined) return undefined;
+      return {
+        workspaceId,
+        effectiveDate: evidence.date,
+        tier: status.tier,
+        matrixVersion,
+        packVersion: evidence.packVersion,
+        financePolicyVersion: evidence.policyVersion,
+        evidenceHash: evidence.hash,
+        validUntil: evidence.validUntil,
+      };
+    },
+    now: () => options.dailyGateControlPlane?.now?.() ?? new Date(),
+    expectedFinanceMatrixVersion: POLICY_MATRIX_VERSION,
+    ...(financePack ? {
+      expectedFinancePackVersion: financePack.packVersion,
+      expectedFinancePolicyVersion: financePack.packVersion,
+    } : {}),
+  });
   const aiOrchestrator = new AiOrchestrator({ minorThreshold: options.aiMinorThreshold ?? 0 });
   const reports = new ReportService();
   const modelServicePrincipalId = options.modelServicePrincipalId ?? "principal-model-gateway";
@@ -682,6 +765,10 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   let notifyBridge: PgNotifyBridge | undefined;
   const notifyChannel = options.pgNotifyChannel ?? PG_NOTIFY_CHANNEL;
   let persistenceMode: AiCrmRuntime["persistenceMode"] = "memory";
+
+  // Memory mode remains a real repository-backed surface: it exercises the
+  // same collision preflight and preserves day state for the process lifetime.
+  dailyGateRepo = new InMemoryDailyGateRepository();
 
   if (!pool && resolvedDatabaseUrl) {
     // Synchronous mode marker; Pool opens in onReady (dynamic `pg` import).
@@ -1343,8 +1430,8 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
         }
         // Rebuild one DailyGate per workspace observed in the persisted state —
         // NEVER replay recordDay (would double-backfill missing-day gaps and trip
-        // OUT_OF_ORDER). policyVersion is reconstructed from the LIVE pack, not
-        // from any persisted column (finance_daily_gate_state has none).
+        // OUT_OF_ORDER). Restore compares the persisted version with the LIVE
+        // finance pack and uses the runtime-scoped repository to audit any reset.
         if (financePack) {
           const dayRecordsByWorkspace = new Map<string, DayRecord[]>();
           for (const row of allDayRecords) {
@@ -1354,14 +1441,47 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
           }
           for (const state of allGateStates) {
             const restored = new DailyGate(financePack, state.workspaceId, financePack.packVersion);
-            restored.restoreState({
+            const restore = restored.restoreState({
               streak: state.streak,
               tier: state.tier,
               ...(state.lastDateEpoch !== undefined ? { lastDateEpoch: state.lastDateEpoch } : {}),
               ...(state.activatedMatrixVersion !== undefined ? { activatedMatrixVersion: state.activatedMatrixVersion } : {}),
+              ...(state.packVersion !== undefined ? { packVersion: state.packVersion } : {}),
             });
             restored.hydrateDayRecords(dayRecordsByWorkspace.get(state.workspaceId) ?? []);
+            if (restore.reset) {
+              await dailyGateRepo.resetDailyGateStateWithAudit(state.workspaceId, restore.resetState, {
+                reason: restore.reason,
+                ...(restore.fromPackVersion !== undefined ? { fromPackVersion: restore.fromPackVersion } : {}),
+                toPackVersion: restore.toPackVersion,
+                prior: restore.prior,
+              });
+            }
             dailyGates.set(state.workspaceId, restored);
+            // Activation after restart must bind the persisted immutable
+            // evidence, never a fresh caller assertion.
+            const evidenceRows = await hDailyGateRepo.listDailyGateEvidence(state.workspaceId);
+            const activationRows = await hDailyGateRepo.listDailyGateActivations(state.workspaceId);
+            for (const evidence of evidenceRows) {
+              const provenance = typeof evidence.provenance === "object" && evidence.provenance !== null
+                ? evidence.provenance as { expiresAt?: unknown }
+                : undefined;
+              const evidenceExpiry = typeof provenance?.expiresAt === "string" ? provenance.expiresAt : "";
+              const activation = activationRows.find((item) => item.date === evidence.date && item.evidenceHash === evidence.evidenceHash);
+              const expiries = [evidenceExpiry, activation?.expiresAt]
+                .filter((value): value is string => typeof value === "string" && Number.isFinite(Date.parse(value)))
+                .sort((left, right) => Date.parse(left) - Date.parse(right));
+              dailyGateEvidence.set(`${state.workspaceId}\0${evidence.date}`, {
+                hash: evidence.evidenceHash,
+                controllerId: evidence.controllerId,
+                matrixVersion: evidence.matrixVersion,
+                policyVersion: evidence.policyVersion,
+                packVersion: evidence.packVersion,
+                streak: evidence.resultingStreak,
+                date: evidence.date,
+                validUntil: expiries[0] ?? "",
+              });
+            }
           }
         }
         // Audit restart-sourcing (N-13 / D3, closes the N-08 residual):
@@ -1540,6 +1660,34 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     }
     return gate;
   }
+
+  function requireDailyGateControlPlane(): DailyGateControlPlane {
+    if (!options.dailyGateControlPlane) {
+      throw new FinanceDomainError("DAILY_GATE_CONTROL_PLANE_UNAVAILABLE", "daily-gate control-plane facts are required");
+    }
+    return options.dailyGateControlPlane;
+  }
+
+  function assertDailyGateActor(actor: DailyGateHumanActor, workspaceId: string, role: "CONTROLLER" | "CFO"): void {
+    if (actor.kind !== "HUMAN" || !actor.active || actor.workspaceId !== workspaceId || actor.role !== role || !actor.id.trim()) {
+      throw new FinanceDomainError("DAILY_GATE_UNAUTHORIZED_ACTOR", `an active ${role} human in the workspace is required`);
+    }
+  }
+
+  function assertControlProvenance(provenance: DailyGateProvenance, now: Date): void {
+    const observedAt = Date.parse(provenance.observedAt);
+    const expiresAt = Date.parse(provenance.expiresAt);
+    if (!Array.isArray(provenance.refs) || provenance.refs.length === 0 || provenance.refs.some((ref) => !ref.trim()) ||
+      !Array.isArray(provenance.digests) || provenance.digests.length === 0 || provenance.digests.some((digest) => !/^[a-f0-9]{64}$/i.test(digest)) ||
+      !Number.isFinite(observedAt) || !Number.isFinite(expiresAt) || observedAt > now.getTime() || expiresAt <= now.getTime()) {
+      throw new FinanceDomainError("DAILY_GATE_INVALID_PROVENANCE", "daily-gate provenance is missing, stale, or unsigned");
+    }
+  }
+
+  function signDailyGateEnvelope(secret: string, action: string, payload: unknown): string {
+    if (!secret.trim()) throw new FinanceDomainError("DAILY_GATE_EVIDENCE_SECRET_REQUIRED", "daily-gate server evidence secret is required");
+    return createHmac("sha256", secret).update(canonicalHashOf(action, payload), "utf8").digest("hex");
+  }
   const projectsByCustomer = new Map<string, string[]>();
   const imports = new ImportService({
     CRM: (batch, row) => {
@@ -1608,6 +1756,7 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     ) {
       const unsetCode =
         error.code === "FINANCE_PACK_UNSET" ||
+        error.code === "DAILY_GATE_CONTROL_PLANE_UNAVAILABLE" ||
         error.code === "MODEL_GATEWAY_UNSET" ||
         error.code === "MODEL_UNAVAILABLE";
       const notFound =
@@ -2238,8 +2387,13 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
 
   app.post("/api/finance/daily-gate/days", async (request, reply) => {
     const ws = workspace(request);
-    const body = objectBody(request.body);
     const gate = dailyGate(ws);
+    const body = objectBody(request.body);
+    if (Object.keys(body).length !== 1 || typeof body.date !== "string") {
+      throw new FinanceDomainError("INVALID_INPUT", "daily-gate days accepts only date; controller fields and metrics are server-derived");
+    }
+    const date = body.date;
+    const controlPlane = requireDailyGateControlPlane();
     // PG-FIRST fail-closed (Q1/D3): compute the validated day record (+ any
     // gap-filled "missing" days) and the resulting machine state WITHOUT
     // touching memory, persist to PG first (a PG failure throws/5xx BEFORE
@@ -2247,14 +2401,31 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
     // memory — inside the per-workspace mutex. Mirrors the ledger draft
     // route above.
     const record = await withWorkspaceMutex(ws, async () => {
+      const control = await controlPlane.dayFacts({ workspaceId: ws, date });
+      const now = controlPlane.now?.() ?? new Date();
+      assertDailyGateActor(control.actor, ws, "CONTROLLER");
+      assertControlProvenance(control.provenance, now);
+      if (!control.matrixActive || !Number.isInteger(control.matrixVersion) || control.matrixVersion < 1 || !Number.isInteger(control.policyVersion) || control.policyVersion < 1 || control.policyVersion !== financePack?.packVersion || control.packVersion !== financePack?.packVersion || !control.evidenceId.trim()) {
+        throw new FinanceDomainError("DAILY_GATE_CONTROL_MISMATCH", "daily-gate matrix, policy, or accounting pack facts are not active");
+      }
+      const replayKey = `${ws}\0${date}`;
+      if (dailyGateEvidence.has(replayKey)) {
+        throw new FinanceDomainError("DAILY_GATE_REPLAY", "daily-gate evidence for this workspace day was already recorded");
+      }
       const preview = gate.previewRecordDay({
-        date: text(body, "date"),
-        importsCompleted: body.importsCompleted === true,
-        entriesBalanced: body.entriesBalanced === true,
-        openFinanceExceptions: numberValue(body, "openFinanceExceptions"),
-        receivedAt: text(body, "receivedAt"),
-        ...(body.backfilled === true ? { backfilled: true } : {}),
+        date,
+        importsCompleted: control.metrics.importsCompleted,
+        entriesBalanced: control.metrics.entriesBalanced,
+        openFinanceExceptions: control.metrics.openFinanceExceptions,
+        receivedAt: control.receivedAt,
       });
+      const evidenceHash = canonicalHashOf("finance.daily_gate.evidence", {
+        workspaceId: ws, date, metrics: control.metrics, receivedAt: control.receivedAt,
+        provenance: control.provenance, resultingStreak: preview.state.streak, tier: preview.state.tier,
+        matrixVersion: control.matrixVersion, policyVersion: control.policyVersion, packVersion: control.packVersion,
+        controllerId: control.actor.id, controllerRole: control.actor.role, evidenceId: control.evidenceId,
+      });
+      const evidenceSignature = signDailyGateEnvelope(control.evidenceSecret, "finance.daily_gate.evidence.signature", { evidenceHash, workspaceId: ws });
       if (dailyGateRepo) {
         // Atomic pair (P2 fix): day record + resulting machine state (streak/
         // tier/lastDateEpoch always change on recordDay) commit inside ONE
@@ -2262,25 +2433,66 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
         // A mid-way PG failure never leaves a day record without its state
         // update (or vice versa), which would otherwise diverge the
         // DailyGate machine state from its own recorded history on restart.
-        await dailyGateRepo.appendDayRecordWithState(ws, preview.finalRecord, preview.state);
+        try {
+          await dailyGateRepo.recordDayWithGovernance(ws, preview.finalRecord, preview.state, {
+            date, controllerId: control.actor.id, evidenceId: control.evidenceId, evidenceHash, evidenceSignature,
+            metrics: control.metrics, receivedAt: control.receivedAt,
+            matrixVersion: control.matrixVersion, policyVersion: control.policyVersion, packVersion: control.packVersion,
+            resultingStreak: preview.state.streak, resultingTier: preview.state.tier, provenance: control.provenance,
+          });
+        } catch (error) {
+          if (error instanceof Error && (error.message === "DAILY_GATE_REPLAY" || error.message === "DUPLICATE_DAILY_GATE_RECORD" || (error as Error & { code?: string }).code === "23505")) throw new FinanceDomainError("DAILY_GATE_REPLAY", "daily-gate evidence was already used");
+          throw error;
+        }
       }
-      return gate.commitRecordDay(preview);
+      const committed = gate.commitRecordDay(preview);
+      dailyGateEvidence.set(replayKey, { hash: evidenceHash, controllerId: control.actor.id, matrixVersion: control.matrixVersion, policyVersion: control.policyVersion, packVersion: control.packVersion, streak: preview.state.streak, date, validUntil: control.provenance.expiresAt });
+      return committed;
     });
     return reply.status(201).send(record);
   });
 
   app.post("/api/finance/daily-gate/activate-risk-tier", async (request) => {
     const ws = workspace(request);
-    const body = objectBody(request.body);
     const gate = dailyGate(ws);
+    const body = objectBody(request.body);
+    if (Object.keys(body).length !== 1 || typeof body.date !== "string") {
+      throw new FinanceDomainError("INVALID_INPUT", "risk-tier activation accepts only date; approval facts are server-derived");
+    }
+    const date = body.date;
+    const controlPlane = requireDailyGateControlPlane();
     // PG-FIRST fail-closed (Q1/D3): same preview->PG-write->commit split,
     // inside the per-workspace mutex, as the daily-gate route above.
     const status = await withWorkspaceMutex(ws, async () => {
-      const state = gate.previewActivateRiskTier(numberValue(body, "approvedMatrixVersion"), text(body, "approverPrincipalId"));
+      const evidence = dailyGateEvidence.get(`${ws}\0${date}`);
+      if (!evidence) throw new FinanceDomainError("DAILY_GATE_EVIDENCE_NOT_FOUND", "latest daily-gate evidence is required before activation");
+      const control = await controlPlane.activationFacts({ workspaceId: ws, date, controllerId: evidence.controllerId, evidenceHash: evidence.hash });
+      const now = controlPlane.now?.() ?? new Date();
+      assertDailyGateActor(control.actor, ws, "CFO");
+      if (control.actor.id === evidence.controllerId || !control.matrixActive || !control.approvalId.trim() || !control.evidenceSecret.trim() || !Number.isInteger(control.matrixVersion) || control.matrixVersion !== evidence.matrixVersion || control.policyVersion !== evidence.policyVersion || control.packVersion !== evidence.packVersion || Date.parse(control.approvedAt) > now.getTime() || Date.parse(control.expiresAt) <= now.getTime()) {
+        throw new FinanceDomainError("DAILY_GATE_INVALID_APPROVAL", "daily-gate approval is stale, mismatched, or not independently approved by CFO");
+      }
+      const approvalHash = canonicalHashOf("finance.daily_gate.approval", { workspaceId: ws, date, evidenceHash: evidence.hash, streak: evidence.streak, matrixVersion: evidence.matrixVersion, policyVersion: evidence.policyVersion, packVersion: evidence.packVersion, controllerId: evidence.controllerId, cfoId: control.actor.id, approvalId: control.approvalId, approvedAt: control.approvedAt, expiresAt: control.expiresAt });
+      const approvalSignature = signDailyGateEnvelope(control.evidenceSecret, "finance.daily_gate.approval.signature", { approvalHash, workspaceId: ws });
+      if (dailyGateRepo && (await dailyGateRepo.listDailyGateActivations(ws)).some((item) => item.date === date || item.approvalId === control.approvalId || item.approvalHash === approvalHash)) {
+        throw new FinanceDomainError("DAILY_GATE_REPLAY", "daily-gate approval was already used");
+      }
+      const state = gate.previewActivateRiskTier(control.matrixVersion, control.actor.id);
       if (dailyGateRepo) {
-        await dailyGateRepo.saveDailyGateState(ws, state);
+        try {
+          await dailyGateRepo.activateRiskTierWithGovernance(ws, state, {
+            date, evidenceHash: evidence.hash, cfoId: control.actor.id, approvalId: control.approvalId,
+            approvalHash, approvalSignature, approvedAt: control.approvedAt, expiresAt: control.expiresAt,
+          });
+        } catch (error) {
+          if (error instanceof Error && (error.message === "DAILY_GATE_REPLAY" || (error as Error & { code?: string }).code === "23505")) throw new FinanceDomainError("DAILY_GATE_REPLAY", "daily-gate approval was already used");
+          throw error;
+        }
       }
       gate.commitActivateRiskTier(state);
+      evidence.validUntil = Date.parse(evidence.validUntil) <= Date.parse(control.expiresAt)
+        ? evidence.validUntil
+        : control.expiresAt;
       return gate.status();
     });
     return status;
@@ -2379,6 +2591,11 @@ function renderPrometheus(metrics: MetricsSnapshot): string {
       payloadHash: text(body, "payloadHash"),
       policyVersion: numberValue(body, "policyVersion"),
     };
+    // Context binding is deliberately copied from the server-side control,
+    // never accepted from the request body. `previewConsumeControl` then
+    // compares it to freshly-resolved trusted daily-gate context.
+    const existingControl = governance.getControl(ws, request.params.controlId);
+    if (existingControl.trustedContextHash !== undefined) binding.trustedContextHash = existingControl.trustedContextHash;
     // PG-FIRST fail-closed (D3): see /api/governance/authorize doc — same
     // preview/PG-audit-append/commit split for the consume (control ->
     // intent) transition, inside the per-workspace mutex (P6-b G002 / PG-D

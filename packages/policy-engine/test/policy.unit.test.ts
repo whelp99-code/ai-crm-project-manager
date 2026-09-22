@@ -4,6 +4,7 @@ import {
   AUTO_SCHEMA,
   CANONICALIZATION_SCHEMA_VERSION,
   POLICY_MATRIX,
+  POLICY_MATRIX_VERSION,
   POLICY_VERSION,
   PROTECTED_ACTION_TYPES,
   PolicyCanonicalizationError,
@@ -28,6 +29,19 @@ const ALWAYS_REQUIRE_APPROVAL: readonly ActionType[] = [
 ];
 
 describe("POLICY_MATRIX", () => {
+  it("exposes immutable conservative, eligible, and risk-tiered matrices with finance verification controls", async () => {
+    const policy = await import("../src/index.js");
+    expect(policy.POLICY_MATRICES.conservative.FINANCE_VERIFY.control).toBe("REQUIRE_APPROVAL");
+    expect(policy.POLICY_MATRICES.eligible.FINANCE_VERIFY.control).toBe("CHECKPOINT");
+    expect(policy.POLICY_MATRICES.risk_tiered.FINANCE_VERIFY.control).toBe("ALLOW");
+    expect(Object.isFrozen(policy.POLICY_MATRICES)).toBe(true);
+    expect(policy.VERSIONED_POLICY_MATRICES[POLICY_MATRIX_VERSION]).toBe(policy.POLICY_MATRICES);
+    for (const matrix of Object.values(policy.POLICY_MATRICES)) {
+      for (const actionType of policy.PROTECTED_ACTION_TYPES) {
+        expect(matrix[actionType].control).toBe("REQUIRE_APPROVAL");
+      }
+    }
+  });
   it("has exactly one explicit row per registered ACTION_TYPES entry, no more, no less", () => {
     expect(Object.keys(POLICY_MATRIX).sort()).toEqual([...ACTION_TYPES].sort());
   });
@@ -65,6 +79,7 @@ describe("evaluatePolicy: known action types", () => {
     for (const type of ACTION_TYPES) {
       const result = evaluatePolicy({ actionType: type, payload: { note: "x" } });
       expect(result.policyVersion).toBe(POLICY_VERSION);
+      expect(result.matrixVersion).toBe(POLICY_MATRIX_VERSION);
       expect(result.actionType).toBe(type);
       expect(result.requiredControl).toBe(POLICY_MATRIX[type].control);
       expect(result.reason).toBe(POLICY_MATRIX[type].reason);
