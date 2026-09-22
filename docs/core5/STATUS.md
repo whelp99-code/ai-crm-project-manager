@@ -1,9 +1,10 @@
-## BLOCKED — test runner host platform (2026-09-22)
+## Vitest host remasure (2026-09-22)
 
-The targeted Vitest suites cannot start on this Linux x64 host because the
-checkout's existing `node_modules` contains only `@esbuild/darwin-arm64`.
-Vite fails before collecting tests. This is an external dependency-install
-condition; no install loop or node_modules replacement was attempted.
+Dropped `@esbuild/linux-x64@0.21.5` into `node_modules` (not committed).
+Focused suites now collect:
+- `apps/api/test/customer-work-os-v2-readiness.security.test.ts` — 2 passed, rc=0
+- `packages/domain/test/customer-work-os-v2-mail-followup.unit.test.ts` — 2 passed, rc=0
+Full `pnpm test` was not re-run. Live PG RLS still needs `LIVE_PG_TEST=1`.
 
 The earlier `.git/index.lock` EROFS was a Codex sandbox restriction, not a
 read-only disk. The owner confirmed Git metadata is writable and authorized
