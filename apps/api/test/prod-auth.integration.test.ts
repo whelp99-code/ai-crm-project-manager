@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { ModelClient } from "@ai-crm/model-gateway";
 import { createApp } from "../src/app.js";
+import { InMemoryCwosV2StateStore } from "../src/customer-work-os-v2-runtime.js";
 
 /**
  * G-05: production-mode fail-closed auth posture.
@@ -62,7 +63,21 @@ function planClient(): ModelClient {
 }
 
 async function ready(options: Parameters<typeof createApp>[0] = {}): Promise<FastifyInstance> {
-  const instance = createApp(options);
+  const hasApiKey = Boolean(options.authApiKey || process.env.AUTH_API_KEY || process.env.API_AUTH_TOKEN);
+  const productionFixture = process.env.NODE_ENV === "production"
+    ? {
+        customerWorkOsV2Store: new InMemoryCwosV2StateStore(),
+        ...(hasApiKey ? {
+          customerWorkOsV2ActorBinding: {
+            workspaceId: WS,
+            principalId: OPERATOR,
+            kind: "human" as const,
+            stepUpVerified: false,
+          },
+        } : {}),
+      }
+    : {};
+  const instance = createApp({ ...productionFixture, ...options });
   app = instance;
   await instance.ready();
   return instance;

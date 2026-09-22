@@ -117,6 +117,14 @@ describe("CWOS v2 API-key operator binding", () => {
     return instance;
   }
 
+  it("refuses production boot with an API key but no trusted actor binding", () => {
+    expect(() => createApp({
+      authApiKey: key,
+      customerWorkOsV2Profile: "production",
+      customerWorkOsV2Store: new InMemoryCwosV2StateStore(),
+    })).toThrowError(/CWOS_V2_ACTOR_BINDING_REQUIRED_IN_PROD/);
+  });
+
   it("requires the API key on CWOS v2 reads", async () => {
     const instance = await boundApp();
     try {
@@ -175,6 +183,33 @@ describe("CWOS v2 API-key operator binding", () => {
       });
       expect(response.statusCode).toBe(403);
       expect(response.json()).toMatchObject({ error: "UNTRUSTED_STEP_UP" });
+    } finally { await instance.close(); }
+  });
+
+  it("does not grant bootstrap step-up when the server binding says false", async () => {
+    const instance = createApp({
+      authApiKey: key,
+      customerWorkOsV2ActorBinding: { ...binding, stepUpVerified: false },
+    });
+    await instance.ready();
+    try {
+      const override = await instance.inject({
+        method: "POST",
+        url: "/api/cwos/v2/commands",
+        headers: bootstrapHeaders({ "x-step-up": "true" }),
+        payload: bootstrapPayload(),
+      });
+      expect(override.statusCode).toBe(403);
+      expect(override.json()).toMatchObject({ error: "UNTRUSTED_STEP_UP" });
+
+      const response = await instance.inject({
+        method: "POST",
+        url: "/api/cwos/v2/commands",
+        headers: bootstrapHeaders(),
+        payload: bootstrapPayload(),
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toMatchObject({ error: "STEP_UP_REQUIRED" });
     } finally { await instance.close(); }
   });
 

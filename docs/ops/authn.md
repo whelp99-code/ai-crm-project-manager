@@ -27,8 +27,10 @@ the key check.
 
 ### CWOS v2 pilot operator binding
 
-CWOS v2 supports a stricter single-operator pilot mode. Configure all three
-server-side values together with the API key:
+CWOS v2 uses a fail-closed single-operator binding in production API-key
+mode. Configure all three server-side values together with the API key;
+production refuses to boot with `CWOS_V2_ACTOR_BINDING_REQUIRED_IN_PROD` when
+the API key exists but this binding does not:
 
 ```bash
 CWOS_V2_OPERATOR_WORKSPACE_ID=<workspace UUID>
@@ -44,10 +46,14 @@ with 403 `UNTRUSTED_STEP_UP`. `stepUpVerified` comes only from
 `CWOS_V2_OPERATOR_STEP_UP_VERIFIED`, so the bootstrap command can use step-up
 authority without trusting a request header.
 
+`CWOS_V2_OPERATOR_STEP_UP_VERIFIED=0` does not grant bootstrap authority: a
+header-matched bootstrap fails with `STEP_UP_REQUIRED`, and adding
+`x-step-up: true` is still rejected as `UNTRUSTED_STEP_UP`.
+
 This is an explicit one-key/one-human/one-workspace pilot boundary, not OIDC
 and not a multi-user identity system. A binding without an API key fails boot;
-a partial environment binding also fails boot. Dev mode without a binding
-retains the existing explicit-header behavior for tests and local development.
+a partial environment binding also fails boot. Deliberate test/development
+standalone fixtures without a binding retain explicit-header behavior.
 
 ## Env
 
@@ -59,7 +65,7 @@ retains the existing explicit-header behavior for tests and local development.
 | `CWOS_V2_OPERATOR_PRINCIPAL_ID` | api | Human principal bound to the pilot API key |
 | `CWOS_V2_OPERATOR_STEP_UP_VERIFIED` | api | Server-side `0` or `1`; caller headers cannot override it |
 
-Production / Gate B pilot should set one of these. Never commit real values.
+Production / Gate B must set one API key and all three CWOS v2 binding values. Never commit real values.
 
 ## Tests
 
@@ -68,8 +74,9 @@ wrong/missing key → 401; agent without principal still fails; dev mode without
 key still accepts principal headers.
 
 `apps/api/test/customer-work-os-v2-auth.security.test.ts` — a bound pilot key
-rejects forged principal/workspace and caller-asserted step-up, while a
-header-matched bootstrap succeeds using only the server-side step-up value.
+rejects forged principal/workspace and caller-asserted step-up, refuses
+production API-key boot without a binding, denies bootstrap when the
+server-bound step-up value is false, and succeeds only when it is true.
 
 ## Production fail-closed (G-07)
 

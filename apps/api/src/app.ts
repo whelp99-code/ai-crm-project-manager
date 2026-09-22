@@ -58,7 +58,12 @@ function hasConfiguredApiKey(options: CustomerWorkOsV2AppOptions): boolean {
 
 export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInstance {
   const actorBinding = configuredActorBinding(options);
-  if (actorBinding && !hasConfiguredApiKey(options)) {
+  const apiKeyConfigured = hasConfiguredApiKey(options);
+  const profile = options.customerWorkOsV2Profile ?? (process.env.NODE_ENV === "production" ? "production" : process.env.NODE_ENV === "test" ? "test" : "development");
+  if (profile === "production" && apiKeyConfigured && !actorBinding) {
+    throw new Error("[CWOS_V2_ACTOR_BINDING_REQUIRED_IN_PROD] production API-key mode requires a trusted CWOS v2 operator binding");
+  }
+  if (actorBinding && !apiKeyConfigured) {
     throw new Error("[CWOS_V2_ACTOR_BINDING_REQUIRES_API_KEY] trusted operator binding requires AUTH_API_KEY/API_AUTH_TOKEN");
   }
   const app = createBaseApp(options);
