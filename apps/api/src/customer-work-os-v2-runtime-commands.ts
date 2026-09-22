@@ -141,6 +141,7 @@ export function executeV2Command(
   command: string,
   payload: unknown,
   actor: V2Actor,
+  now = new Date().toISOString(),
 ): unknown {
   const input = record(payload);
   switch (command) {
@@ -220,6 +221,19 @@ export function executeV2Command(
         sender: str(input, "sender"),
         promptInjectionSuspected: bool(input, "promptInjectionSuspected"),
       });
+    case "mail.inbox.receive":
+      return platform.inbox.receiveMail({
+        id: str(input, "id"), workspaceId: actor.workspaceId, provider: str(input, "provider"), mailbox: str(input, "mailbox"), sourceLocator: str(input, "sourceLocator"), providerEventId: str(input, "providerEventId"), receivedAt: str(input, "receivedAt"),
+        ...(input.event && typeof input.event === "object" && !Array.isArray(input.event) ? { event: { ...(input.event as Record<string, unknown>), workspaceId: actor.workspaceId, source: str(input, "provider") as never, id: str(input.event as Record<string, unknown>, "id"), providerEventId: str(input, "providerEventId"), occurredAt: str(input.event as Record<string, unknown>, "occurredAt"), subject: str(input.event as Record<string, unknown>, "subject"), bodyDigest: str(input.event as Record<string, unknown>, "bodyDigest"), sender: str(input.event as Record<string, unknown>, "sender"), promptInjectionSuspected: bool(input.event as Record<string, unknown>, "promptInjectionSuspected") } } : {}),
+      }, now);
+    case "mail.mapWork":
+      return platform.inbox.mapWork({ id: str(input, "id"), workspaceId: actor.workspaceId, provider: str(input, "provider"), mailbox: str(input, "mailbox"), sourceLocator: str(input, "sourceLocator"), sourceEventId: str(input, "sourceEventId"), workItemId: str(input, "workItemId"), ...(typeof input.correctionReason === "string" ? { correctionReason: input.correctionReason } : {}) }, actor, now);
+    case "work.followUp":
+      return platform.followUps.upsert({
+        id: str(input, "id"), workspaceId: actor.workspaceId, sourceEventId: str(input, "sourceEventId"), workItemId: str(input, "workItemId"),
+        mailHandling: str(input, "mailHandling") as never, customerWork: str(input, "customerWork") as never, nextOwner: str(input, "nextOwner"),
+        dueAt: typeof input.dueAt === "string" ? input.dueAt : null, evidenceRefs: strings(input, "evidenceRefs"), ...(typeof input.correctionReason === "string" ? { correctionReason: input.correctionReason } : {}),
+      }, actor);
     case "connectors.register":
       return platform.connectors.register(
         {

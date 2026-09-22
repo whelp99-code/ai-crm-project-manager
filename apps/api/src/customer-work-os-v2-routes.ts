@@ -17,6 +17,8 @@ export interface CustomerWorkOsV2RouteOptions {
   now?: () => string;
   /** Explicit only: route registration never reads DATABASE_URL on its own. */
   databaseUrl?: string;
+  /** Runtime profile controls whether the in-memory store is an allowed fallback. */
+  profile?: "test" | "development" | "production";
 }
 
 interface RawConnection {
@@ -163,15 +165,35 @@ export function registerCustomerWorkOsV2Routes(
   app: FastifyInstance,
   options: CustomerWorkOsV2RouteOptions = {},
 ): CustomerWorkOsV2RuntimeManager {
+  const profile = options.profile ?? (process.env.NODE_ENV === "production" ? "production" : process.env.NODE_ENV === "test" ? "test" : "development");
+  const databaseUrl = options.databaseUrl?.trim();
+  const explicitStore = options.store !== undefined;
+  if (profile === "production" && !explicitStore && !databaseUrl) {
+    throw new Error("[CWOS_STORAGE_REQUIRED_IN_PROD] production Customer Work OS requires databaseUrl or an explicit store; refusing memory mode");
+  }
+  let storageMode: "memory" | "postgres" = databaseUrl && !explicitStore ? "postgres" : "memory";
+  let dbProbe: "not_configured" | "ok" | "failed" = storageMode === "postgres" ? "failed" : "not_configured";
+  let schemaVersion: string | null = null;
+  let recentProcessingState: "unknown" | "idle" | "database_unavailable" = storageMode === "postgres" ? "unknown" : "idle";
   let runtime = new CustomerWorkOsV2RuntimeManager(options.store ?? new InMemoryCwosV2StateStore(), options.now);
   let rawPool: RawPool | undefined;
-  const databaseUrl = options.databaseUrl?.trim();
 
   if (!options.store && databaseUrl) {
     app.addHook("onReady", async () => {
       const pg = await import("pg");
       rawPool = new pg.Pool({ connectionString: databaseUrl }) as unknown as RawPool;
       await rawPool.query("SELECT 1");
+      const migrationRows = (await rawPool.query(
+        "SELECT id FROM schema_migrations ORDER BY id DESC",
+      )) as { rows: Array<{ id: string }> };
+      const applied = new Set(migrationRows.rows.map((row) => row.id));
+      const requiredMigration = "0019_customer_work_os_v2_runtime";
+      if (!applied.has(requiredMigration)) {
+        throw new Error(`[CWOS_SCHEMA_NOT_READY] required migration ${requiredMigration} is not applied`);
+      }
+      schemaVersion = migrationRows.rows[0]?.id ?? requiredMigration;
+      dbProbe = "ok";
+      recentProcessingState = "idle";
       runtime = new CustomerWorkOsV2RuntimeManager(new PgCwosV2StateStore(scopedPool(rawPool)), options.now);
     });
   }
@@ -203,10 +225,17 @@ export function registerCustomerWorkOsV2Routes(
         workspaceId: authenticatedActor.workspaceId,
         runtimeVersion: envelope.version,
         stateHash: envelope.stateHash,
+        storageMode,
+        dbProbe,
+        schemaVersion,
+        recentProcessingState,
         openFindings,
         completedMilestones: milestones,
         releaseManifests: envelope.state.releaseManifests.length,
-        ready: envelope.state.releaseManifests.length > 0 && openFindings === 0,
+        ready:
+          dbProbe === "ok" || storageMode === "memory"
+            ? envelope.state.releaseManifests.length > 0 && openFindings === 0
+            : false,
       });
     } catch (error) {
       return sendKnownError(reply, error);

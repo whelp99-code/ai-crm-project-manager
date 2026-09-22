@@ -9,4 +9,5 @@ export * from "./ai.js";
 export * from "./portal.js";
 export * from "./admin.js";
 export * from "./operations.js";
+export * from "./follow-up.js";
 export * from "./platform.js";

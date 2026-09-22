@@ -91,7 +91,7 @@ export class CustomerWorkOsV2RuntimeManager {
       }
       const platform = new CustomerWorkOsV2Platform(input.workspaceId);
       platform.hydrateState(current.state);
-      const result = executeV2Command(platform, input.command, input.payload, input.actor);
+      const result = executeV2Command(platform, input.command, input.payload, input.actor, this.now());
       const state = platform.exportState();
       const stateHash = customerWorkOsV2StateHash(state);
       const createdAt = this.now();

@@ -5,6 +5,7 @@ import { ReadFirstConnectorService, type ConnectorState } from "./connectors.js"
 import { DynamicGraphRuntime, type GraphState } from "./graphs.js";
 import { IdentityTeamService, type IdentityState } from "./identity.js";
 import { UnifiedInboxService, type InboxState } from "./inbox.js";
+import { FollowUpService, type FollowUpState } from "./follow-up.js";
 import { ProductionReadinessService, type OperationsState } from "./operations.js";
 import { PortalMobileService, type PortalState } from "./portal.js";
 import { PsaCapacityService, type PsaState } from "./psa.js";
@@ -56,6 +57,7 @@ export interface CustomerWorkOsV2State {
   identity: IdentityState;
   psa: PsaState;
   inbox: InboxState;
+  followUps: FollowUpState;
   connectors: ConnectorState;
   graphs: GraphState;
   ai: AiCouncilState;
@@ -159,6 +161,7 @@ export class CustomerWorkOsV2Platform {
   readonly identity = new IdentityTeamService();
   readonly psa = new PsaCapacityService();
   readonly inbox = new UnifiedInboxService();
+  readonly followUps = new FollowUpService();
   readonly connectors = new ReadFirstConnectorService();
   readonly graphs = new DynamicGraphRuntime();
   readonly ai = new AiCouncilService();
@@ -334,6 +337,7 @@ export class CustomerWorkOsV2Platform {
       identity: this.identity.exportState(),
       psa: this.psa.exportState(),
       inbox: this.inbox.exportState(),
+      followUps: this.followUps.exportState(),
       connectors: this.connectors.exportState(),
       graphs: this.graphs.exportState(),
       ai: this.ai.exportState(),
@@ -394,6 +398,7 @@ export class CustomerWorkOsV2Platform {
     this.identity.hydrateState(copy(input.identity));
     this.psa.hydrateState(copy(input.psa));
     this.inbox.hydrateState(copy(input.inbox));
+    this.followUps.hydrateState(copy(input.followUps ?? { schemaVersion: 1, items: [] }));
     this.connectors.hydrateState(copy(input.connectors));
     this.graphs.hydrateState(copy(input.graphs));
     this.ai.hydrateState(copy(input.ai));

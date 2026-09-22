@@ -4,6 +4,7 @@ import {
   type CreateAppOptions,
 } from "./app-base.js";
 import { registerCustomerWorkOsV2Routes } from "./customer-work-os-v2-routes.js";
+import type { CwosV2StateStore } from "./customer-work-os-v2-runtime.js";
 
 export * from "./app-base.js";
 
@@ -15,7 +16,12 @@ export * from "./app-base.js";
  * auth/onRoute/onClose hooks while avoiding a second API server or mutation
  * gateway.
  */
-export function createApp(options: CreateAppOptions = {}): FastifyInstance {
+export type CustomerWorkOsV2AppOptions = CreateAppOptions & {
+  customerWorkOsV2Store?: CwosV2StateStore;
+  customerWorkOsV2Profile?: "test" | "development" | "production";
+};
+
+export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInstance {
   const app = createBaseApp(options);
   const configuredDatabaseUrl =
     typeof options.databaseUrl === "string" && options.databaseUrl.trim()
@@ -25,7 +31,11 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
         : undefined;
   registerCustomerWorkOsV2Routes(
     app,
-    configuredDatabaseUrl ? { databaseUrl: configuredDatabaseUrl } : {},
+    {
+      ...(configuredDatabaseUrl ? { databaseUrl: configuredDatabaseUrl } : {}),
+      ...(options.customerWorkOsV2Store ? { store: options.customerWorkOsV2Store } : {}),
+      ...(options.customerWorkOsV2Profile ? { profile: options.customerWorkOsV2Profile } : {}),
+    },
   );
   return app;
 }
