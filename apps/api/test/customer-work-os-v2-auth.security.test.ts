@@ -4,6 +4,7 @@ import {
   CustomerWorkOsV2RuntimeManager,
   InMemoryCwosV2StateStore,
 } from "../src/customer-work-os-v2-runtime.js";
+import { createApp } from "../src/app.js";
 import { createStandaloneCustomerWorkOsV2App } from "../src/customer-work-os-v2-routes.js";
 
 const workspaceId = "workspace-v2-auth";
@@ -75,5 +76,119 @@ describe("CWOS v2 auth principal binding", () => {
         stepUpVerified: false,
       }),
     ).rejects.toMatchObject({ code: "PRINCIPAL_KIND_MISMATCH" });
+  });
+});
+
+describe("CWOS v2 API-key operator binding", () => {
+  const key = "pilot-operator-key";
+  const binding = {
+    workspaceId: "workspace-pilot-bound",
+    principalId: "operator-pilot-bound",
+    kind: "human" as const,
+    stepUpVerified: true,
+  };
+
+  function bootstrapHeaders(overrides: Record<string, string> = {}): Record<string, string> {
+    return {
+      "x-api-key": key,
+      "x-workspace-id": binding.workspaceId,
+      "x-principal-id": binding.principalId,
+      "x-principal-kind": binding.kind,
+      "idempotency-key": "pilot-operator-bootstrap",
+      "content-type": "application/json",
+      ...overrides,
+    };
+  }
+
+  function bootstrapPayload(principalId = binding.principalId) {
+    return {
+      command: "identity.registerPrincipal",
+      expectedVersion: 0,
+      payload: { id: principalId, kind: "human", displayName: "Pilot Operator", active: true },
+    };
+  }
+
+  async function boundApp() {
+    const instance = createApp({
+      authApiKey: key,
+      customerWorkOsV2ActorBinding: binding,
+    });
+    await instance.ready();
+    return instance;
+  }
+
+  it("requires the API key on CWOS v2 reads", async () => {
+    const instance = await boundApp();
+    try {
+      const response = await instance.inject({
+        method: "GET",
+        url: "/api/cwos/v2/state",
+        headers: bootstrapHeaders({ "x-api-key": "" }),
+      });
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).toMatchObject({ error: "UNAUTHENTICATED" });
+    } finally { await instance.close(); }
+  });
+
+  it("rejects a server actor binding without API-key authentication", () => {
+    expect(() => createApp({ customerWorkOsV2ActorBinding: binding })).toThrowError(
+      /CWOS_V2_ACTOR_BINDING_REQUIRES_API_KEY/,
+    );
+  });
+
+  it("rejects a forged principal even with the valid API key", async () => {
+    const instance = await boundApp();
+    try {
+      const response = await instance.inject({
+        method: "POST",
+        url: "/api/cwos/v2/commands",
+        headers: bootstrapHeaders({ "x-principal-id": "forged-operator", "x-step-up": "true" }),
+        payload: bootstrapPayload("forged-operator"),
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toMatchObject({ error: "ACTOR_BINDING_MISMATCH" });
+    } finally { await instance.close(); }
+  });
+
+  it("rejects a forged workspace even with the valid API key", async () => {
+    const instance = await boundApp();
+    try {
+      const response = await instance.inject({
+        method: "POST",
+        url: "/api/cwos/v2/commands",
+        headers: bootstrapHeaders({ "x-workspace-id": "workspace-forged" }),
+        payload: bootstrapPayload(),
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toMatchObject({ error: "ACTOR_BINDING_MISMATCH" });
+    } finally { await instance.close(); }
+  });
+
+  it("rejects caller-asserted step-up instead of trusting the header", async () => {
+    const instance = await boundApp();
+    try {
+      const response = await instance.inject({
+        method: "POST",
+        url: "/api/cwos/v2/commands",
+        headers: bootstrapHeaders({ "x-step-up": "true" }),
+        payload: bootstrapPayload(),
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toMatchObject({ error: "UNTRUSTED_STEP_UP" });
+    } finally { await instance.close(); }
+  });
+
+  it("uses the server-side binding for a header-matched bootstrap without x-step-up", async () => {
+    const instance = await boundApp();
+    try {
+      const response = await instance.inject({
+        method: "POST",
+        url: "/api/cwos/v2/commands",
+        headers: bootstrapHeaders(),
+        payload: bootstrapPayload(),
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ runtimeVersion: 1 });
+    } finally { await instance.close(); }
   });
 });

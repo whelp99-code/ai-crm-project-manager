@@ -12,9 +12,18 @@ import {
   type V2PgQueryable,
 } from "./customer-work-os-v2-runtime.js";
 
+export interface CustomerWorkOsV2ActorBinding {
+  workspaceId: string;
+  principalId: string;
+  kind: "human";
+  stepUpVerified: boolean;
+}
+
 export interface CustomerWorkOsV2RouteOptions {
   store?: CwosV2StateStore;
   now?: () => string;
+  /** Trusted server-side identity associated with the configured API key. */
+  actorBinding?: CustomerWorkOsV2ActorBinding;
   /** Explicit only: route registration never reads DATABASE_URL on its own. */
   databaseUrl?: string;
   /** Runtime profile controls whether the in-memory store is an allowed fallback. */
@@ -48,23 +57,49 @@ function optionalHeader(request: FastifyRequest, name: string): string | undefin
   return text.trim();
 }
 
-/** Bind the CWOS actor from explicit headers. Kind is never defaulted to human. */
-function actor(request: FastifyRequest): V2Actor {
-  const kind = header(request, "x-principal-kind") as PrincipalKind;
-  if (!["human", "ai", "service"].includes(kind)) {
+/** Bind the CWOS actor from headers in dev, or from authenticated server config in API-key mode. */
+function actor(request: FastifyRequest, binding?: CustomerWorkOsV2ActorBinding): V2Actor {
+  const claimedKind = header(request, "x-principal-kind") as PrincipalKind;
+  if (!["human", "ai", "service"].includes(claimedKind)) {
     throw new CustomerWorkOsV2Error("INVALID_HEADER", "x-principal-kind is invalid");
   }
+  const claimedPrincipalId = header(request, "x-principal-id");
+  const claimedWorkspaceId = header(request, "x-workspace-id");
   const botId = optionalHeader(request, "x-bot-id");
-  if (botId && kind === "human") {
+
+  if (binding) {
+    if (
+      claimedPrincipalId !== binding.principalId ||
+      claimedWorkspaceId !== binding.workspaceId ||
+      claimedKind !== binding.kind
+    ) {
+      throw new CustomerWorkOsV2Error(
+        "ACTOR_BINDING_MISMATCH",
+        "request actor does not match the server-bound API-key operator",
+      );
+    }
+    if (optionalHeader(request, "x-step-up")) {
+      throw new CustomerWorkOsV2Error(
+        "UNTRUSTED_STEP_UP",
+        "x-step-up is not accepted when step-up authority is server-bound",
+      );
+    }
+    if (botId) {
+      throw new CustomerWorkOsV2Error("HUMAN_SPOOF", "bot clients cannot bind a human principal");
+    }
+    return { ...binding };
+  }
+
+  if (botId && claimedKind === "human") {
     throw new CustomerWorkOsV2Error(
       "HUMAN_SPOOF",
       "bot clients cannot bind a human principal",
     );
   }
   return {
-    principalId: header(request, "x-principal-id"),
-    workspaceId: header(request, "x-workspace-id"),
-    kind,
+    principalId: claimedPrincipalId,
+    workspaceId: claimedWorkspaceId,
+    kind: claimedKind,
     stepUpVerified: String(request.headers["x-step-up"] ?? "").toLowerCase() === "true",
   };
 }
@@ -124,6 +159,8 @@ function status(error: CustomerWorkOsV2Error): number {
       "MEMBERSHIP_REQUIRED",
       "BOOTSTRAP_REQUIRED",
       "INVALID_BOOTSTRAP_PRINCIPAL",
+      "ACTOR_BINDING_MISMATCH",
+      "UNTRUSTED_STEP_UP",
     ].includes(error.code)
   ) {
     return 403;
@@ -205,7 +242,7 @@ export function registerCustomerWorkOsV2Routes(
 
   app.get("/api/cwos/v2/state", async (request, reply) => {
     try {
-      const authenticatedActor = actor(request);
+      const authenticatedActor = actor(request, options.actorBinding);
       const envelope = await runtime.readAuthorized(authenticatedActor);
       return reply.status(200).send(envelope);
     } catch (error) {
@@ -215,7 +252,7 @@ export function registerCustomerWorkOsV2Routes(
 
   app.get("/api/cwos/v2/readiness", async (request, reply) => {
     try {
-      const authenticatedActor = actor(request);
+      const authenticatedActor = actor(request, options.actorBinding);
       const envelope = await runtime.readAuthorized(authenticatedActor);
       const openFindings = envelope.state.findings.filter((item) => item.status === "OPEN").length;
       const milestones = envelope.state.milestones
@@ -244,7 +281,7 @@ export function registerCustomerWorkOsV2Routes(
 
   app.post("/api/cwos/v2/commands", async (request, reply) => {
     try {
-      const authenticatedActor = actor(request);
+      const authenticatedActor = actor(request, options.actorBinding);
       const input = body(request.body);
       const command = input.command;
       const expectedVersion = input.expectedVersion;
