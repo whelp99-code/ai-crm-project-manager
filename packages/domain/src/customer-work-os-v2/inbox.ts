@@ -59,6 +59,19 @@ export class UnifiedInboxService {
     const receipt: MailInboxReceipt = { ...copy(input), id: required(input.id, "receipt.id"), provider: required(input.provider, "provider"), mailbox: required(input.mailbox, "mailbox"), sourceLocator: required(input.sourceLocator, "sourceLocator"), providerEventId: required(input.providerEventId, "providerEventId"), receivedAt: required(input.receivedAt, "receivedAt"), version: 1 };
     this.mailInboxReceipts.set(receipt.id, receipt); this.enqueue({ id: `outbox-inbox-${receipt.id}`, workspaceId: receipt.workspaceId, kind: "INBOX_RECEIVED", workItemId: null, sourceEventId: input.event?.id ?? null, linkId: null, status: "PENDING", createdAt, version: 1 }); return copy(receipt);
   }
+  pendingMailOutbox(workspaceId: string): MailOutboxEvent[] {
+    assertWorkspace(workspaceId, workspaceId);
+    return sorted([...this.mailOutbox.values()].filter((item) => item.workspaceId === workspaceId && item.status === "PENDING"));
+  }
+  markMailOutboxEmitted(workspaceId: string, id: string): MailOutboxEvent {
+    const item = this.mailOutbox.get(required(id, "outbox.id"));
+    if (!item) throw new CustomerWorkOsV2Error("OUTBOX_NOT_FOUND", "mail outbox event not found");
+    assertWorkspace(workspaceId, item.workspaceId);
+    if (item.status === "EMITTED") return copy(item);
+    const next: MailOutboxEvent = { ...item, status: "EMITTED", version: item.version + 1 };
+    this.mailOutbox.set(item.id, next);
+    return copy(next);
+  }
   private enqueue(event: MailOutboxEvent): void { if (!this.mailOutbox.has(event.id)) this.mailOutbox.set(event.id, event); }
   exportState(): InboxState { return { schemaVersion: 1, events: sorted(this.events.values()), attachments: sorted(this.attachments.values()), links: sorted(this.links.values()), drafts: sorted(this.drafts.values()), mailWorkLinks: sorted(this.mailWorkLinks.values()), mailInboxReceipts: sorted(this.mailInboxReceipts.values()), mailOutbox: sorted(this.mailOutbox.values()) }; }
   hydrateState(input: InboxState): void { if (input.schemaVersion !== 1) throw new CustomerWorkOsV2Error("UNSUPPORTED_STATE", "unsupported inbox state"); this.events = mapValues(input.events, "sourceEvent"); this.attachments = mapValues(input.attachments, "attachment"); this.links = mapValues(input.links, "inboxLink"); this.drafts = mapValues(input.drafts, "inboxDraft"); this.mailWorkLinks = mapValues(input.mailWorkLinks ?? [], "mailWorkLink"); this.mailInboxReceipts = mapValues(input.mailInboxReceipts ?? [], "mailInboxReceipt"); this.mailOutbox = mapValues(input.mailOutbox ?? [], "mailOutbox"); }

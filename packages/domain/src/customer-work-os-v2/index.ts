@@ -3,6 +3,7 @@ export * from "./shared.js";
 export * from "./identity.js";
 export * from "./psa.js";
 export * from "./inbox.js";
+export * from "./company-memory-donor.js";
 export * from "./connectors.js";
 export * from "./graphs.js";
 export * from "./ai.js";
