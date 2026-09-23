@@ -79,7 +79,10 @@ export class PgCwosV2StateStore implements CwosV2StateStore {
         "PostgreSQL v2 state access requires a transaction-scoped workspace context",
       );
     }
-    return this.pool.withWorkspaceScope(workspaceId, fn);
+    return this.pool.withWorkspaceScope(workspaceId, async (db) => {
+      await db.query("SELECT set_config('app.workspace_id',$1,true)", [workspaceId]);
+      return fn(db);
+    });
   }
 
   async load(workspaceId: string): Promise<V2RuntimeEnvelope | undefined> {
@@ -123,8 +126,9 @@ export class PgCwosV2StateStore implements CwosV2StateStore {
     const prospective: V2RuntimeEnvelope = { ...structuredClone(next), version: expectedVersion + 1 };
     validateEnvelope(prospective);
     return this.scope(workspaceId, async (db) => {
-      // SELECT ... FOR UPDATE cannot lock a row that does not exist. The transaction-level
+      // SELECT ... FOR UPDATE cannot lock a missing first snapshot. The transaction-level
       // advisory lock serializes the first insert as well as subsequent CAS updates.
+      // Append-only audit is SELECT/INSERT for the runtime role; FOR UPDATE needs UPDATE.
       await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [workspaceId]);
 
       const current = await db.query<{ version: string | number; state_hash: string }>(
@@ -144,7 +148,7 @@ export class PgCwosV2StateStore implements CwosV2StateStore {
       }
 
       const previous = await db.query<{ sequence: string | number; event_hash: string }>(
-        "SELECT sequence,event_hash FROM cwos_v2_audit_events WHERE workspace_id=$1 ORDER BY sequence DESC LIMIT 1 FOR UPDATE",
+        "SELECT sequence,event_hash FROM cwos_v2_audit_events WHERE workspace_id=$1 ORDER BY sequence DESC LIMIT 1",
         [workspaceId],
       );
       const prior = previous.rows[0];
