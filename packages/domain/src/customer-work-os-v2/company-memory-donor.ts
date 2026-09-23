@@ -19,6 +19,7 @@ const REQUEST_DOMAIN = Buffer.from("second-brain/company-memory-request/v1\0");
 const CANONICAL_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CLOSED_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const CLOSED_ERROR = /^[A-Z][A-Z0-9_]{0,127}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 
 export const MAIL_COMPANY_MEMORY_ADAPTER_STATUS = "not_implemented" as const;
@@ -359,6 +360,22 @@ function signedRequest(input: {
   return { request, digest, candidateId: candidate };
 }
 
+function closedCliErrorCode(stderr: Uint8Array): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(stderr).toString("utf8").trim());
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const record = parsed as Record<string, unknown>;
+    if (Object.keys(record).length !== 1) return undefined;
+    const error = record.error;
+    if (typeof error !== "string") return undefined;
+    const code = error.normalize("NFC").trim();
+    if (!CLOSED_ERROR.test(code)) return undefined;
+    return code;
+  } catch {
+    return undefined;
+  }
+}
+
 function parseReceipt(stdout: Uint8Array): Record<string, unknown> | undefined {
   try {
     const parsed: unknown = JSON.parse(Buffer.from(stdout).toString("utf8").trim());
@@ -437,7 +454,9 @@ async function publishOne(input: {
   } catch {
     return { status: "pending", code: "COMPANY_TRANSPORT_FAILED" };
   }
-  if (result.exitCode !== 0) return { status: "pending", code: "COMPANY_RECEIPT_REQUIRED" };
+  if (result.exitCode !== 0) {
+    return { status: "pending", code: closedCliErrorCode(result.stderr) ?? "COMPANY_RECEIPT_REQUIRED" };
+  }
 
   const receipt = parseReceipt(result.stdout);
   if (

@@ -440,6 +440,7 @@ async function runOnce(runtime: WorkerRuntime): Promise<void> {
           emitted: donor.result.emitted.length,
           pending: donor.result.pending.length,
           rejected: donor.result.rejected.length,
+          rejectedCodes: donor.result.rejected.map((item) => item.code),
         }),
       );
     }

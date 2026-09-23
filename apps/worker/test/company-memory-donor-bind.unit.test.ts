@@ -93,6 +93,11 @@ fs.writeFileSync(path.join(__dirname, "sb-invoked.txt"), "remember\\n");
 process.exit(99);
 `;
 
+const STUB_CONFIG_INVALID = `#!/usr/bin/env node
+process.stderr.write(JSON.stringify({ error: "COMPANY_CONFIG_INVALID" }) + "\\n");
+process.exit(2);
+`;
+
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "crm-donor-bind-"));
 }
@@ -359,6 +364,27 @@ describe("worker company-memory donor bind", () => {
     }
   });
 
+  it("keeps the outbox pending and returns the closed sb-company reject code", async () => {
+    const dir = tempDir();
+    try {
+      const env = completeEnv(dir);
+      env.COMPANY_MEMORY_SB_COMPANY = writeExecutable(dir, "sb-company", STUB_CONFIG_INVALID);
+      const outbox = pendingOutbox();
+      const ran = await runBoundCompanyMemoryDonorTick(env, { now: NOW, outbox });
+      expect(ran.skipped).toBe(false);
+      if (ran.skipped) throw new Error("expected donor tick");
+      expect(ran.result.attempted).toBe(1);
+      expect(ran.result.emitted).toEqual([]);
+      expect(ran.result.pending).toEqual(["outbox-inbox-receipt-1"]);
+      expect(ran.result.rejected).toEqual([
+        { id: "outbox-inbox-receipt-1", code: "COMPANY_CONFIG_INVALID" },
+      ]);
+      expect(outbox.emitted).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("does not bind personal memory APIs and is wired into the worker process", () => {
     const bindSource = readFileSync(BIND_SOURCE, "utf8");
     const mainSource = readFileSync(MAIN_SOURCE, "utf8");
@@ -368,5 +394,6 @@ describe("worker company-memory donor bind", () => {
     expect(mainSource).toContain("runBoundCompanyMemoryDonorTick");
     expect(mainSource).toMatch(/runBoundCompanyMemoryDonorTick\([\s\S]*queryable/);
     expect(mainSource).toContain("outboxNotifier");
+    expect(mainSource).toContain("rejectedCodes");
   });
 });

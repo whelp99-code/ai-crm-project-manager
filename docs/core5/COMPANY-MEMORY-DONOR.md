@@ -10,7 +10,10 @@ only after `sb-company` exit 0 and a matching workspace, request digest,
 operation, candidate ID, and resulting state (`candidate` for receive).
 
 Timeout, non-zero exit, malformed stdout, or receipt mismatch leave the row
-`PENDING`. Replay of an already-emitted row is a no-op.
+`PENDING`. Replay of an already-emitted row is a no-op. The worker tick logs
+closed reject codes only (`rejectedCodes`); it does not log request bodies,
+receipts, or secrets. A closed `{"error":"CODE"}` from `sb-company` stderr is
+surfaced as that code; otherwise the row is `COMPANY_RECEIPT_REQUIRED`.
 
 ## CRM-only outbox interface
 

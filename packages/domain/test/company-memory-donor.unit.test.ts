@@ -70,6 +70,7 @@ function capturingTransport(options?: {
   exitCode?: number;
   mutate?: (receipt: Record<string, unknown>) => Record<string, unknown>;
   stdout?: Uint8Array;
+  stderr?: Uint8Array;
 }): CapturingTransport {
   const requests: Uint8Array[] = [];
   const rememberCalls: unknown[] = [];
@@ -82,13 +83,17 @@ function capturingTransport(options?: {
     async invoke(canonicalRequest: Uint8Array) {
       requests.push(canonicalRequest);
       if (options?.stdout) {
-        return { exitCode: options.exitCode ?? 0, stdout: options.stdout, stderr: new Uint8Array() };
+        return {
+          exitCode: options.exitCode ?? 0,
+          stdout: options.stdout,
+          stderr: options.stderr ?? new Uint8Array(),
+        };
       }
       if (options?.exitCode !== undefined && options.exitCode !== 0) {
         return {
           exitCode: options.exitCode,
           stdout: new Uint8Array(),
-          stderr: Buffer.from('{"error":"COMPANY_AUTHORITY_REQUIRED"}'),
+          stderr: options.stderr ?? Buffer.from('{"error":"COMPANY_AUTHORITY_REQUIRED"}'),
         };
       }
       const envelope = JSON.parse(Buffer.from(canonicalRequest).toString("utf8")) as {
@@ -281,6 +286,7 @@ describe("CRM company-memory donor publisher", () => {
     });
     expect(denied.emitted).toEqual([]);
     expect(denied.pending).toEqual(["outbox-inbox-receipt-1"]);
+    expect(denied.rejected).toEqual([{ id: "outbox-inbox-receipt-1", code: "COMPANY_AUTHORITY_REQUIRED" }]);
     expect(pendingPlatform.inbox.exportState().mailOutbox[0]?.status).toBe("PENDING");
 
     const mismatchPlatform = seedInbox();
@@ -295,7 +301,44 @@ describe("CRM company-memory donor publisher", () => {
       now: NOW,
     });
     expect(mismatch.emitted).toEqual([]);
+    expect(mismatch.rejected).toEqual([{ id: "outbox-inbox-receipt-1", code: "COMPANY_RECEIPT_MISMATCH" }]);
     expect(mismatchPlatform.inbox.exportState().mailOutbox[0]?.status).toBe("PENDING");
+  });
+
+  it("surfaces closed sb-company stderr codes and ignores bodies", async () => {
+    const { signer } = createSigner();
+
+    const configInvalid = capturingTransport({
+      exitCode: 2,
+      stderr: Buffer.from('{"error":"COMPANY_CONFIG_INVALID"}\n'),
+    });
+    const configDenied = await publishCompanyMemoryDonor({
+      context: CONTEXT,
+      signer,
+      transport: configInvalid,
+      outbox: createCrmMailOutboxDonorPort(seedInbox().inbox, () => SOURCE),
+      now: NOW,
+    });
+    expect(configDenied.emitted).toEqual([]);
+    expect(configDenied.rejected).toEqual([
+      { id: "outbox-inbox-receipt-1", code: "COMPANY_CONFIG_INVALID" },
+    ]);
+
+    const noisy = capturingTransport({
+      exitCode: 2,
+      stderr: Buffer.from(
+        '{"error":"not a code","body":"secret inbox text","token":"sk-live"}\n',
+      ),
+    });
+    const noisyDenied = await publishCompanyMemoryDonor({
+      context: CONTEXT,
+      signer,
+      transport: noisy,
+      outbox: createCrmMailOutboxDonorPort(seedInbox().inbox, () => SOURCE),
+      now: NOW,
+    });
+    expect(noisyDenied.rejected.map((item) => item.code)).toEqual(["COMPANY_RECEIPT_REQUIRED"]);
+    expect(JSON.stringify(noisyDenied)).not.toMatch(/secret inbox text|sk-live/);
   });
 
   it("does not implement the Mail product adapter", () => {
