@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@ai-crm/contracts": "workspace:*",
+    "@ai-crm/domain": "workspace:*",
     "@ai-crm/governance": "workspace:*",
     "pg": "^8.13.1"
   },

@@ -14,6 +14,7 @@ and does **not** perform remote connector dispatch.
 | Durable tick | `runDurableWorkerTick(runtime, nowIso)` (`src/main.ts`) |
 | Outbox drain tick | `runDurableOutboxDrainTick(runtime, options?)` (`src/main.ts` / `src/outbox.ts`) |
 | Outbox consumer tick | `runDurableOutboxConsumerTick(runtime, options?)` (`src/main.ts` / `src/outbox-consumer.ts`) |
+| Company-memory donor bind | `loadCompanyMemoryDonorBind` / `runBoundCompanyMemoryDonorTick` (`src/company-memory-donor-bind.ts`) |
 | Runtime builder | `loadGovernance(env?)` (`src/main.ts`) |
 | CLI | `src/main.ts` (`pnpm --filter @ai-crm/worker start`) |
 
@@ -328,6 +329,7 @@ WORKER_NOW_ISO=2026-01-01T00:01:00.000Z pnpm --filter @ai-crm/worker start
 | `WORKER_NOW_ISO` | worker | Optional fixed ISO clock |
 | `DATABASE_URL` | worker | Optional. When set, worker hydrates governance from and dual-writes recovered leases to the shared `orch_governance_*` tables (same SoR as `apps/api`), and also runs the outbox drain tick (`runDurableOutboxDrainTick`) and outbox consumer tick (`runDurableOutboxConsumerTick`) each tick. When unset, worker stays in-memory (no durability across restarts, no outbox drain/consume). When `ADMIN_DATABASE_URL` is also set, `DATABASE_URL` becomes the `withWorkspaceScope`-scoped pool used ONLY for per-workspace `saveIntent` — production should point it at a NOBYPASSRLS runtime role (e.g. `ai_crm_runtime_worker`). |
 | `ADMIN_DATABASE_URL` | worker | Optional (G-01 MEDIUM 4 role separation, mirrors `apps/api`'s `ADMIN_DATABASE_URL`). When set, opens a second pool used for cross-workspace admin reads/writes — hydrate (`listAllControls`/`listAllIntents`), outbox drain (`claimPendingOutbox`/`markOutboxPublished`), and outbox consume (`listConsumableOutbox`/`applyOutboxConsumed`) — so `DATABASE_URL` no longer needs BYPASSRLS. **Production MUST set this** to a cross-workspace-capable role. Falls back to the single `DATABASE_URL` pool for both concerns when unset (dev-only fallback; the docker superuser DSN bypasses RLS by design). |
+| `COMPANY_MEMORY_SB_COMPANY` / `COMPANY_MEMORY_SB_COMPANY_CONFIG` / `COMPANY_MEMORY_SIGNING_KEY_FILE` / `COMPANY_MEMORY_AUTHORITY_FILE` | worker | Optional together. Absent = donor tick skipped. All four required or the worker fails closed at boot. Command must be an absolute `sb-company` path; personal `sb` is rejected. Does not write personal memory or talk to loopback :4311. |}
 
 ## Boundaries
 

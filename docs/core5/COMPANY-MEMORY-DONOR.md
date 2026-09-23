@@ -1,6 +1,6 @@
 # CRM company-memory donor
 
-Status: CRM-side publisher implemented in-process. Not deployed. No live company-memory writes. No production bind.
+Status: CRM-side publisher implemented in-process. Worker tick is env-gated and off by default. No live company-memory writes.
 
 This repository publishes toward the Second Brain `sb-company` contract
 (`second-brain-app/docs/core5/COMPANY-MEMORY-DONOR-CONTRACT.md`). The donor
@@ -29,8 +29,15 @@ Entry points:
 
 The publisher never calls `sb remember`, `/api/remember`, `sb_remember`,
 personal search, or a personal vault. Transport is an injected
-`CompanyMemoryCliTransport` (`sb-company` stdin/stdout shape only). Worker
-`main.ts` does not invoke this tick.
+`CompanyMemoryCliTransport` (`sb-company` stdin/stdout shape only).
+
+Worker bind (`apps/worker/src/company-memory-donor-bind.ts`) is explicit-env
+only: `COMPANY_MEMORY_SB_COMPANY`, `COMPANY_MEMORY_SB_COMPANY_CONFIG`,
+`COMPANY_MEMORY_SIGNING_KEY_FILE`, `COMPANY_MEMORY_AUTHORITY_FILE`. Absent =
+skipped. Incomplete, unknown, or missing files fail closed at worker boot.
+The command must be an absolute `sb-company` path; personal `sb` is rejected.
+The worker process does not attach a live CWOS mail outbox, so even a complete
+env set cannot emit company rows until an outbox is injected (tests do that).
 
 ## Mail adapter
 

@@ -17,9 +17,14 @@ validation have not passed. `pnpm run typecheck` and `git diff --check` passed.
 CRM-only `sb-company` donor publisher is in
 `packages/domain/src/customer-work-os-v2/company-memory-donor.ts` with focused
 unit tests. Outbox acknowledgement is fail-closed (matching receipt required).
-Mail product adapter is explicitly not implemented. No worker production bind,
-live company writes, personal `sb remember`, or shared signing key.
+Mail product adapter is explicitly not implemented. No live company writes,
+personal `sb remember`, or shared signing key.
 See `docs/core5/COMPANY-MEMORY-DONOR.md`.
+
+Worker bind is env-gated in `apps/worker/src/company-memory-donor-bind.ts`:
+command + key files must all be present or the tick stays disabled. Incomplete
+or unknown `COMPANY_MEMORY_*` fails closed. Personal `sb` is rejected. Default
+worker process.env does not enable the donor (including loopback :4311).
 
 ## Progress
 
