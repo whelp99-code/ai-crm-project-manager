@@ -27,7 +27,8 @@ or unknown `COMPANY_MEMORY_*` fails closed. Personal `sb` is rejected. Default
 worker process.env does not enable the donor (including loopback :4311).
 When `DATABASE_URL` is set, the tick reads `cwos_v2_mail_outbox` and fails
 closed if the schema/queryable is unavailable. Empty outbox is used only when
-no DB.
+no DB. `mail.inbox.receive` now dual-writes keys-only receipt and
+`INBOX_RECEIVED` outbox rows into those tables on PostgreSQL CAS.
 
 ## Progress
 

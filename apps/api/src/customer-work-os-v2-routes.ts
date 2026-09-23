@@ -184,6 +184,8 @@ function status(error: CustomerWorkOsV2Error): number {
       "UNSUPPORTED_STATE",
       "PG_SCOPE_REQUIRED",
       "INVALID_CLOCK",
+      "MAIL_SCHEMA_NOT_READY",
+      "MAIL_OUTBOX_PERSIST_FAILED",
     ].includes(error.code)
   ) {
     return 503;

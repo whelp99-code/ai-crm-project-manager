@@ -41,6 +41,12 @@ governance/CWOS Postgres pool (`runtime.outboxNotifier`) and fails closed if
 that schema or queryable is unavailable. Empty outbox is used only when
 `DATABASE_URL` is unset. Tests may still inject a synthetic outbox.
 
+`mail.inbox.receive` (POST `/api/cwos/v2/commands`) is the existing CWOS v2
+write path. PostgreSQL CAS projects keys-only `cwos_v2_mail_inbox_receipts`
+and `cwos_v2_mail_outbox` rows in the same transaction. Missing schema or
+insert failure rolls the command back. Existing outbox rows are not updated
+(`ON CONFLICT DO NOTHING`) so a worker `EMITTED` ack is not clobbered.
+
 ## Mail adapter
 
 The Mail product adapter (`CwosWorkSystemAdapter` / mail-intelligence) is
