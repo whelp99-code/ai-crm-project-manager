@@ -148,6 +148,55 @@ function pendingOutbox() {
   };
 }
 
+function pendingPgRow() {
+  return {
+    id: EVENT.id,
+    workspace_id: WORKSPACE,
+    kind: EVENT.kind,
+    work_item_id: EVENT.workItemId,
+    source_event_id: EVENT.sourceEventId,
+    link_id: EVENT.linkId,
+    status: EVENT.status,
+    created_at: EVENT.createdAt,
+    version: EVENT.version,
+    provider: SOURCE.provider,
+    mailbox: SOURCE.mailbox,
+    source_locator: SOURCE.sourceLocator,
+    resolved_source_event_id: SOURCE.sourceEventId,
+  };
+}
+
+function fakeCwosQueryable(options: {
+  missingTable?: boolean;
+  queryError?: Error;
+  rows?: Record<string, unknown>[];
+}) {
+  const statements: string[] = [];
+  const updates: unknown[][] = [];
+  return {
+    statements,
+    updates,
+    async query(text: string, params?: unknown[]) {
+      statements.push(text);
+      if (options.queryError) throw options.queryError;
+      if (text.includes("to_regclass")) {
+        return {
+          rows: [{ outbox_reg: options.missingTable ? null : "cwos_v2_mail_outbox" }],
+          rowCount: 1,
+        };
+      }
+      if (/\bupdate\b/i.test(text)) {
+        updates.push([...(params ?? [])]);
+        return { rows: [], rowCount: 1 };
+      }
+      if (text.includes("cwos_v2_mail_outbox")) {
+        return { rows: options.rows ?? [], rowCount: (options.rows ?? []).length };
+      }
+      throw new Error(`unexpected donor outbox sql: ${text}`);
+    },
+  };
+}
+
 describe("worker company-memory donor bind", () => {
   it("stays disabled when donor env is absent", async () => {
     expect(loadCompanyMemoryDonorBind({})).toEqual({ enabled: false });
@@ -228,6 +277,88 @@ describe("worker company-memory donor bind", () => {
     }
   });
 
+  it("keeps an empty outbox when donor env is complete and DATABASE_URL is absent", async () => {
+    const dir = tempDir();
+    try {
+      const env = completeEnv(dir);
+      const ran = await runBoundCompanyMemoryDonorTick(env, { now: NOW });
+      expect(ran.skipped).toBe(false);
+      if (ran.skipped) throw new Error("expected donor tick");
+      expect(ran.result).toEqual({ attempted: 0, emitted: [], pending: [], rejected: [] });
+      expect(existsSync(join(dir, "invoked.json"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when DATABASE_URL is set but CWOS outbox cannot be bound", async () => {
+    const dir = tempDir();
+    try {
+      const env: Record<string, string> = {
+        ...completeEnv(dir),
+        DATABASE_URL: "postgres://unit.test/crm",
+      };
+      await expect(runBoundCompanyMemoryDonorTick(env, { now: NOW })).rejects.toThrowError(
+        /COMPANY_MEMORY_OUTBOX_UNAVAILABLE/,
+      );
+      expect(existsSync(join(dir, "invoked.json"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when CWOS mail outbox schema is unavailable", async () => {
+    const dir = tempDir();
+    try {
+      const env: Record<string, string> = {
+        ...completeEnv(dir),
+        DATABASE_URL: "postgres://unit.test/crm",
+      };
+      const queryable = fakeCwosQueryable({ missingTable: true });
+      await expect(
+        runBoundCompanyMemoryDonorTick(env, { now: NOW, queryable }),
+      ).rejects.toThrowError(/COMPANY_MEMORY_OUTBOX_UNAVAILABLE/);
+      expect(existsSync(join(dir, "invoked.json"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ticks pending CWOS mail outbox rows from PG when DATABASE_URL is bound", async () => {
+    const dir = tempDir();
+    try {
+      const env: Record<string, string> = {
+        ...completeEnv(dir),
+        DATABASE_URL: "postgres://unit.test/crm",
+      };
+      const queryable = fakeCwosQueryable({ rows: [pendingPgRow()] });
+      const ran = await runBoundCompanyMemoryDonorTick(env, { now: NOW, queryable });
+      expect(ran.skipped).toBe(false);
+      if (ran.skipped) throw new Error("expected donor tick");
+      expect(ran.result.attempted).toBe(1);
+      expect(ran.result.emitted).toEqual(["outbox-inbox-receipt-1"]);
+      expect(ran.result.pending).toEqual([]);
+      expect(queryable.updates).toEqual([[WORKSPACE, "outbox-inbox-receipt-1"]]);
+
+      const invoked = JSON.parse(readFileSync(join(dir, "invoked.json"), "utf8")) as {
+        argv: string[];
+        raw: string;
+      };
+      expect(invoked.argv).toEqual(["--config", env.COMPANY_MEMORY_SB_COMPANY_CONFIG]);
+      const envelope = JSON.parse(invoked.raw) as {
+        arguments: { source_system: string; source_event_id: string };
+        authority: { workspace_id: string; operation: string };
+      };
+      expect(envelope.arguments.source_system).toBe("crm");
+      expect(envelope.arguments.source_event_id).toBe(SOURCE.sourceEventId);
+      expect(envelope.authority.workspace_id).toBe(WORKSPACE);
+      expect(envelope.authority.operation).toBe("receive");
+      expect(existsSync(join(dir, "sb-invoked.txt"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("does not bind personal memory APIs and is wired into the worker process", () => {
     const bindSource = readFileSync(BIND_SOURCE, "utf8");
     const mainSource = readFileSync(MAIN_SOURCE, "utf8");
@@ -235,5 +366,7 @@ describe("worker company-memory donor bind", () => {
     expect(mainSource).not.toMatch(/sb remember|\/api\/remember|sb_remember|sb_search/i);
     expect(mainSource).toContain("loadCompanyMemoryDonorBind");
     expect(mainSource).toContain("runBoundCompanyMemoryDonorTick");
+    expect(mainSource).toMatch(/runBoundCompanyMemoryDonorTick\([\s\S]*queryable/);
+    expect(mainSource).toContain("outboxNotifier");
   });
 });

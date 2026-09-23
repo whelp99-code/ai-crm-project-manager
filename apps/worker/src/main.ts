@@ -19,6 +19,11 @@
  *                          the CRM company-memory donor. Absent = disabled.
  *                          Incomplete or unknown COMPANY_MEMORY_* fails
  *                          closed at boot. Personal `sb` is rejected.
+ *                          When DATABASE_URL is also set, the tick reads
+ *                          pending rows from cwos_v2_mail_outbox and fails
+ *                          closed if that schema/queryable is unavailable.
+ *                          Empty outbox is used only when DATABASE_URL is
+ *                          unset.
  *   ADMIN_DATABASE_URL  — optional (G-01 MEDIUM 4 role separation, mirrors
  *                          apps/api's `ADMIN_DATABASE_URL`). When set, the worker
  *                          opens a SECOND `pg` Pool for cross-workspace admin
@@ -55,6 +60,7 @@ import {
 import {
   loadCompanyMemoryDonorBind,
   runBoundCompanyMemoryDonorTick,
+  type CompanyMemoryDonorPgQueryable,
 } from "./company-memory-donor-bind.js";
 
 /** Minimal shape of a real `pg.Pool` used here (query + optional end + connect for the outbox drainer). */
@@ -423,7 +429,9 @@ async function runOnce(runtime: WorkerRuntime): Promise<void> {
   }
 
   try {
-    const donor = await runBoundCompanyMemoryDonorTick(process.env);
+    const donor = await runBoundCompanyMemoryDonorTick(process.env, {
+      queryable: runtime.outboxNotifier as CompanyMemoryDonorPgQueryable | undefined,
+    });
     if (!donor.skipped) {
       console.info(
         "worker.company_memory_donor_complete",

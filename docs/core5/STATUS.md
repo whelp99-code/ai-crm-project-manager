@@ -25,6 +25,9 @@ Worker bind is env-gated in `apps/worker/src/company-memory-donor-bind.ts`:
 command + key files must all be present or the tick stays disabled. Incomplete
 or unknown `COMPANY_MEMORY_*` fails closed. Personal `sb` is rejected. Default
 worker process.env does not enable the donor (including loopback :4311).
+When `DATABASE_URL` is set, the tick reads `cwos_v2_mail_outbox` and fails
+closed if the schema/queryable is unavailable. Empty outbox is used only when
+no DB.
 
 ## Progress
 

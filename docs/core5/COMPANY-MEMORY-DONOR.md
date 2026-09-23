@@ -36,8 +36,10 @@ only: `COMPANY_MEMORY_SB_COMPANY`, `COMPANY_MEMORY_SB_COMPANY_CONFIG`,
 `COMPANY_MEMORY_SIGNING_KEY_FILE`, `COMPANY_MEMORY_AUTHORITY_FILE`. Absent =
 skipped. Incomplete, unknown, or missing files fail closed at worker boot.
 The command must be an absolute `sb-company` path; personal `sb` is rejected.
-The worker process does not attach a live CWOS mail outbox, so even a complete
-env set cannot emit company rows until an outbox is injected (tests do that).
+When `DATABASE_URL` is set, the worker binds `cwos_v2_mail_outbox` from the
+governance/CWOS Postgres pool (`runtime.outboxNotifier`) and fails closed if
+that schema or queryable is unavailable. Empty outbox is used only when
+`DATABASE_URL` is unset. Tests may still inject a synthetic outbox.
 
 ## Mail adapter
 

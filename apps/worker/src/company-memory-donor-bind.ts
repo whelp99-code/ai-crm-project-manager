@@ -2,9 +2,10 @@
  * Env-gated worker bind for the CRM company-memory donor tick.
  *
  * Absent COMPANY_MEMORY_* → disabled. Incomplete, unknown, or unreadable
- * command/key files → fail closed. Personal `sb` is rejected. This module
- * does not write personal memory, talk to the loopback API, or invent a
- * shared signing key.
+ * command/key files → fail closed. Personal `sb` is rejected. DATABASE_URL
+ * binds the CWOS mail outbox; missing schema/queryable fails closed. Empty
+ * outbox is used only when no DB. This module does not write personal
+ * memory, talk to the loopback API, or invent a shared signing key.
  */
 import { spawn } from "node:child_process";
 import { createPrivateKey, sign } from "node:crypto";
@@ -18,6 +19,12 @@ import {
   type CompanyMemoryDonorTickResult,
   type CompanyMemoryDonorTrustedContext,
 } from "@ai-crm/domain/customer-work-os-v2";
+import {
+  resolveCompanyMemoryDonorOutbox,
+  type CompanyMemoryDonorPgQueryable,
+} from "./company-memory-donor-outbox.js";
+
+export type { CompanyMemoryDonorPgQueryable };
 
 const REQUIRED_ENV = [
   "COMPANY_MEMORY_SB_COMPANY",
@@ -92,8 +99,9 @@ export function loadCompanyMemoryDonorBind(
 export async function runBoundCompanyMemoryDonorTick(
   env: Record<string, string | undefined>,
   options: {
-    now?: Date;
-    outbox?: CompanyMemoryDonorOutbox;
+    now?: Date | undefined;
+    outbox?: CompanyMemoryDonorOutbox | undefined;
+    queryable?: CompanyMemoryDonorPgQueryable | undefined;
   } = {},
 ): Promise<BoundCompanyMemoryDonorTick> {
   const bind = loadCompanyMemoryDonorBind(env);
@@ -104,28 +112,22 @@ export async function runBoundCompanyMemoryDonorTick(
   const authority = loadAuthority(bind.authorityFile);
   const signer = loadSigner(bind.signingKeyFile, authority.keyId);
   const transport = createSbCompanyTransport(bind.command, bind.configPath);
-  const outbox = options.outbox ?? emptyOutbox();
+  const resolved = await resolveCompanyMemoryDonorOutbox({
+    databaseUrl: env.DATABASE_URL?.trim(),
+    queryable: options.queryable,
+    outbox: options.outbox,
+    workspaceId: authority.context.workspaceId,
+  });
   const now = options.now ?? new Date();
   const result = await publishCompanyMemoryDonor({
     context: authority.context,
     signer,
     transport,
-    outbox,
+    outbox: resolved.outbox,
     now,
   });
+  await resolved.persistEmitted();
   return { skipped: false, result };
-}
-
-function emptyOutbox(): CompanyMemoryDonorOutbox {
-  return {
-    listPending() {
-      return [];
-    },
-    markEmitted(workspaceId: string, id: string) {
-      void workspaceId;
-      void id;
-    },
-  };
 }
 
 function readRequired(
