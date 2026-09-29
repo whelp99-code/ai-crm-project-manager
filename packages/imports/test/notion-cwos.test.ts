@@ -284,6 +284,7 @@ describe("NotionCwosImportPlanner", () => {
 
   it("maps finance 구분, 상태 and 증거 상태 strictly and quarantines unknown or missing values", () => {
     const input = snapshot();
+    input.projects.push(projectRow("two-billed", "PRJ-TWO-BILLED", { "프로젝트 단계": "청구/수금", 매출처: ["account-customer", "account-si"] }));
     input.finance.push(
       financeRow("settled-in", { 상태: "입금완료", "증거 상태": "은행확인", "실제 처리일": "2026-11-29" }),
       financeRow("settled-out", { 구분: "매입", 상태: "출금완료", 거래처: ["account-vendor"], "예상 입금일": undefined, "예상 출금일": "2026-11-15" }),
@@ -295,7 +296,7 @@ describe("NotionCwosImportPlanner", () => {
       financeRow("missing-status", { 상태: undefined }),
       financeRow("status-conflict", { 상태: "출금완료" }),
       financeRow("unknown-evidence", { "증거 상태": "추정" }),
-      financeRow("missing-account", { 거래처: [] }),
+      financeRow("missing-account", { 거래처: [], 프로젝트: ["two-billed"] }),
       financeRow("missing-expected", { "예상 입금일": undefined }),
     );
     const plan = new NotionCwosImportPlanner().plan(input);
@@ -315,6 +316,67 @@ describe("NotionCwosImportPlanner", () => {
     expect(reasonsOf(plan, "unknown-evidence")).toEqual(["UNMAPPED_EVIDENCE_STATUS"]);
     expect(reasonsOf(plan, "missing-account")).toEqual(["MISSING_REQUIRED_FIELD"]);
     expect(reasonsOf(plan, "missing-expected")).toEqual(["MISSING_REQUIRED_FIELD"]);
+  });
+
+  it("moves 기타입금/기타출금 rows into the price_ledger out-of-scope bucket instead of quarantine", () => {
+    const input = snapshot();
+    input.finance.push(
+      financeRow("other-in", { 구분: "기타입금", 상태: "입금완료", 프로젝트: [], 거래처: [], "예상 입금일": undefined, "실제 처리일": "2026-11-01" }),
+      financeRow("other-out", { 구분: "기타출금", 상태: "출금완료", 프로젝트: ["project-1"], "예상 입금일": undefined }),
+    );
+    const plan = new NotionCwosImportPlanner().plan(input);
+    expect(plan.outOfScope).toEqual([
+      { entity: "financial_item", sourceId: "other-in", bucket: "price_ledger", sourceKind: "기타입금" },
+      { entity: "financial_item", sourceId: "other-out", bucket: "price_ledger", sourceKind: "기타출금" },
+    ]);
+    expect(reasonsOf(plan, "other-in")).toBeUndefined();
+    expect(reasonsOf(plan, "other-out")).toBeUndefined();
+    expect(plan.financialItems.map((item) => item.legacySourceId)).toEqual(["finance-in", "finance-out"]);
+    expect(plan.reconciliation.outOfScope).toEqual({ priceLedger: 2 });
+    expect(plan.reconciliation.source.finance).toBe(4);
+    expect(plan.reconciliation.quarantined).toBe(0);
+  });
+
+  it("uses 실제 처리일 as expected_date only for 입금완료/출금완료 rows and marks the source", () => {
+    const input = snapshot();
+    input.finance.push(
+      financeRow("settled-in-actual", { 상태: "입금완료", "예상 입금일": undefined, "실제 처리일": "2026-10-02" }),
+      financeRow("settled-out-actual", { 구분: "매입", 상태: "출금완료", 거래처: ["account-vendor"], "예상 입금일": undefined, "실제 처리일": "2026-10-03" }),
+      financeRow("settled-no-dates", { 상태: "입금완료", "예상 입금일": undefined }),
+      financeRow("billed-actual-only", { 상태: "청구", "예상 입금일": undefined, "실제 처리일": "2026-10-04" }),
+    );
+    const plan = new NotionCwosImportPlanner().plan(input);
+    const item = (source: string) => plan.financialItems.find((row) => row.legacySourceId === source);
+    expect(item("settled-in-actual")).toMatchObject({ lifecycle: "SETTLED", expectedDate: "2026-10-02", actualDate: "2026-10-02", provenance: { expectedDateSource: "actual_date" } });
+    expect(item("settled-out-actual")).toMatchObject({ direction: "OUT", lifecycle: "SETTLED", expectedDate: "2026-10-03", provenance: { expectedDateSource: "actual_date" } });
+    expect(item("finance-in")?.provenance).not.toHaveProperty("expectedDateSource");
+    expect(reasonsOf(plan, "settled-no-dates")).toEqual(["MISSING_REQUIRED_FIELD"]);
+    expect(reasonsOf(plan, "billed-actual-only")).toEqual(["MISSING_REQUIRED_FIELD"]);
+  });
+
+  it("derives a missing 거래처 from exactly one project 매출처/매입처 and marks the source", () => {
+    const input = snapshot();
+    input.projects.push(
+      projectRow("two-billed", "PRJ-TWO-BILLED", { "프로젝트 단계": "청구/수금", 매출처: ["account-customer", "account-si"], 매입처: ["account-vendor"] }),
+      projectRow("no-supplier", "PRJ-NO-SUPPLIER", { "프로젝트 단계": "고객발주", 매출처: ["account-si"] }),
+    );
+    input.finance.push(
+      financeRow("derived-in", { 거래처: [] }),
+      financeRow("derived-out", { 구분: "매입", 거래처: [], "예상 입금일": undefined, "예상 출금일": "2026-12-01" }),
+      financeRow("ambiguous-in", { 거래처: [], 프로젝트: ["two-billed"] }),
+      financeRow("derived-out-two-billed", { 구분: "매입", 거래처: [], 프로젝트: ["two-billed"], "예상 입금일": undefined, "예상 출금일": "2026-12-02" }),
+      financeRow("no-supplier-out", { 구분: "매입", 거래처: [], 프로젝트: ["no-supplier"], "예상 입금일": undefined, "예상 출금일": "2026-12-03" }),
+      financeRow("no-project", { 구분: "매출", 거래처: [], 프로젝트: [] }),
+    );
+    const plan = new NotionCwosImportPlanner().plan(input);
+    const item = (source: string) => plan.financialItems.find((row) => row.legacySourceId === source);
+    expect(item("derived-in")).toMatchObject({ accountSourceId: "account-customer", provenance: { accountSource: "project_party" } });
+    expect(item("derived-out")).toMatchObject({ accountSourceId: "account-vendor", provenance: { accountSource: "project_party" } });
+    expect(item("derived-out-two-billed")).toMatchObject({ accountSourceId: "account-vendor", provenance: { accountSource: "project_party" } });
+    expect(item("finance-in")?.provenance).not.toHaveProperty("accountSource");
+    expect(reasonsOf(plan, "ambiguous-in")).toEqual(["MISSING_REQUIRED_FIELD"]);
+    expect(reasonsOf(plan, "no-supplier-out")).toEqual(["MISSING_REQUIRED_FIELD"]);
+    expect(reasonsOf(plan, "no-project")).toEqual(["ORPHAN_FINANCE"]);
   });
 
   it("rejects legacy money tables and the todo board on the snapshot path", () => {
