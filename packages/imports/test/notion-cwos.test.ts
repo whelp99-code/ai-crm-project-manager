@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { NotionCwosImportPlanner, notionCwosHash, type NotionCwosSnapshot } from "../src/notion-cwos.js";
+import { NotionCwosImportError, NotionCwosImportPlanner, notionCwosHash, type NotionCwosSnapshot, type NotionSourceRow } from "../src/notion-cwos.js";
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 
@@ -10,18 +10,26 @@ function snapshot(): NotionCwosSnapshot {
     snapshotHash: "sha256:snapshot",
     capturedAt: "2026-08-14T00:00:00Z",
     accounts: [
-      { sourceId: "account-customer", properties: { "회사/조직명": "선진엔지니어링", 구분: "고객", 관계상태: "활성", 담당자: "홍길동", "대표 이메일": "hong@example.com" } },
+      { sourceId: "account-customer", properties: { "회사/조직명": "선진엔지니어링", 구분: "고객", 관계상태: "활성", 담당자: "홍길동", "대표 이메일": "hong@example.com", 자연키: "ACC-CUSTOMER" } },
       { sourceId: "account-vendor", properties: { "회사/조직명": "총판 A", 구분: "파트너", 관계상태: "활성" } },
+      { sourceId: "account-si", properties: { "회사/조직명": "원청 SI", 구분: "고객" } },
+      { sourceId: "account-maker", properties: { "회사/조직명": "제조사 M", 구분: "제조사" } },
+      { sourceId: "account-etc", properties: { "회사/조직명": "기타 조직", 구분: "기타" } },
     ],
     projects: [
       {
         sourceId: "project-1",
         properties: {
-          "프로젝트명(Title)": "선진엔지니어링 HCI 구축",
+          프로젝트명: "선진엔지니어링 HCI 구축",
           프로젝트ID: "PRJ-2026-001",
+          자연키: "PRJ-NK-001",
           상태: "진행",
+          "프로젝트 단계": "수행/검수",
           중요도: "높음",
           "고객·파트너": ["account-customer"],
+          매출처: ["account-customer"],
+          최종고객: ["account-customer"],
+          매입처: ["account-vendor"],
           파트너: ["account-vendor"],
           "다음 행동": "수정 견적 전달",
           제안제품: "HCI",
@@ -37,6 +45,7 @@ function snapshot(): NotionCwosSnapshot {
         properties: {
           활동명: "고객 미팅",
           유형: "미팅",
+          자연키: "ACT-NK-001",
           "date:활동일:start": "2026-08-14T01:00:00Z",
           요약: "HCI 교체 요구 확인",
           결정사항: "10월 검수",
@@ -55,6 +64,8 @@ function snapshot(): NotionCwosSnapshot {
           부가세: 10000000,
           합계: 110000000,
           상태: "청구",
+          "증거 상태": "교차확인",
+          자연키: "FIN-NK-IN",
           프로젝트: ["project-1"],
           거래처: ["account-customer"],
           "date:예상 입금일:start": "2026-10-31",
@@ -71,6 +82,7 @@ function snapshot(): NotionCwosSnapshot {
           부가세: 6000000,
           합계: 66000000,
           상태: "예정",
+          "증거 상태": "미확인",
           프로젝트: ["project-1"],
           거래처: ["account-vendor"],
           "date:예상 출금일:start": "2026-09-30",
@@ -81,6 +93,40 @@ function snapshot(): NotionCwosSnapshot {
   };
 }
 
+function projectRow(sourceId: string, projectKey: string, properties: Record<string, unknown>): NotionSourceRow {
+  return { sourceId, properties: { 프로젝트명: `프로젝트 ${projectKey}`, 프로젝트ID: projectKey, 최종고객: ["account-customer"], ...properties } };
+}
+
+function financeRow(sourceId: string, properties: Record<string, unknown>): NotionSourceRow {
+  return {
+    sourceId,
+    properties: {
+      거래명: `거래 ${sourceId}`,
+      구분: "매출",
+      금액: 100,
+      부가세: 10,
+      상태: "예정",
+      프로젝트: ["project-1"],
+      거래처: ["account-customer"],
+      "date:예상 입금일:start": "2026-11-30",
+      ...properties,
+    },
+  };
+}
+
+function reasonsOf(plan: ReturnType<NotionCwosImportPlanner["plan"]>, sourceId: string): string[] | undefined {
+  return plan.quarantined.find((item) => item.sourceId === sourceId)?.reasons;
+}
+
+function rejectionCode(input: NotionCwosSnapshot): string | undefined {
+  try {
+    new NotionCwosImportPlanner().plan(input);
+    return undefined;
+  } catch (error) {
+    return error instanceof NotionCwosImportError ? error.code : "UNEXPECTED";
+  }
+}
+
 describe("NotionCwosImportPlanner", () => {
   it("maps the four Notion operational databases into a deterministic read-only plan", () => {
     const planner = new NotionCwosImportPlanner();
@@ -89,7 +135,7 @@ describe("NotionCwosImportPlanner", () => {
 
     expect(first.readOnlySource).toBe(true);
     expect(first.planHash).toBe(second.planHash);
-    expect(first.accounts).toHaveLength(2);
+    expect(first.accounts).toHaveLength(5);
     expect(first.engagements).toHaveLength(1);
     expect(first.activities).toHaveLength(1);
     expect(first.financialItems).toHaveLength(2);
@@ -103,19 +149,19 @@ describe("NotionCwosImportPlanner", () => {
   it("quarantines expense rows mixed into projects and missing project keys", () => {
     const input = snapshot();
     input.projects.push(
-      { sourceId: "expense-project", properties: { "프로젝트명(Title)": "2월 카드사용료" } },
-      { sourceId: "missing-key", properties: { "프로젝트명(Title)": "정상 고객 구축", "고객·파트너": ["account-customer"] } },
+      { sourceId: "expense-project", properties: { 프로젝트명: "2월 카드사용료" } },
+      { sourceId: "missing-key", properties: { 프로젝트명: "정상 고객 구축", "프로젝트 단계": "제안/견적", "고객·파트너": ["account-customer"] } },
     );
     const plan = new NotionCwosImportPlanner().plan(input);
-    expect(plan.quarantined.find((item) => item.sourceId === "expense-project")?.reasons).toContain("MIXED_EXPENSE_PROJECT");
-    expect(plan.quarantined.find((item) => item.sourceId === "missing-key")?.reasons).toContain("MISSING_PROJECT_KEY");
+    expect(reasonsOf(plan, "expense-project")).toContain("MIXED_EXPENSE_PROJECT");
+    expect(reasonsOf(plan, "missing-key")).toContain("MISSING_PROJECT_KEY");
     expect(plan.engagements).toHaveLength(1);
   });
 
   it("quarantines duplicate accounts, duplicate project keys and unknown relations", () => {
     const input = snapshot();
     input.accounts.push({ sourceId: "duplicate-account", properties: { "회사/조직명": "  선진엔지니어링  ", 구분: "고객" } });
-    input.projects.push({ sourceId: "duplicate-project", properties: { "프로젝트명(Title)": "다른 이름", 프로젝트ID: "PRJ-2026-001", "고객·파트너": ["account-customer"] } });
+    input.projects.push({ sourceId: "duplicate-project", properties: { 프로젝트명: "다른 이름", 프로젝트ID: "PRJ-2026-001", "고객·파트너": ["account-customer"] } });
     input.activities.push({ sourceId: "unknown-activity", properties: { 활동명: "미팅", "date:활동일:start": "2026-08-15", 요약: "알 수 없는 고객", 프로젝트: ["missing-project"] } });
     const plan = new NotionCwosImportPlanner().plan(input);
     expect(plan.quarantined.some((item) => item.reasons.includes("DUPLICATE_ACCOUNT"))).toBe(true);
@@ -133,10 +179,159 @@ describe("NotionCwosImportPlanner", () => {
       { sourceId: "duplicate", properties: { ...input.finance[0]!.properties } },
     );
     const plan = new NotionCwosImportPlanner().plan(input);
-    expect(plan.quarantined.find((item) => item.sourceId === "orphan")?.reasons).toContain("ORPHAN_FINANCE");
-    expect(plan.quarantined.find((item) => item.sourceId === "bad-vat")?.reasons).toContain("VAT_MISMATCH");
-    expect(plan.quarantined.find((item) => item.sourceId === "duplicate")?.reasons).toContain("DUPLICATE_FINANCE");
+    expect(reasonsOf(plan, "orphan")).toContain("ORPHAN_FINANCE");
+    expect(reasonsOf(plan, "bad-vat")).toContain("VAT_MISMATCH");
+    expect(reasonsOf(plan, "duplicate")).toContain("DUPLICATE_FINANCE");
     expect(plan.financialItems).toHaveLength(2);
+  });
+
+  it("reads only 프로젝트 단계 and maps the owner's nine stage values without a default", () => {
+    const input = snapshot();
+    const expected: Array<[string, string]> = [
+      ["제안/견적", "PROPOSAL"],
+      ["고객발주", "CONTRACTED"],
+      ["매입발주", "DELIVERY"],
+      ["수행/검수", "DELIVERY"],
+      ["청구/수금", "BILLING"],
+      ["완료", "CLOSED"],
+      ["보류", "ON_HOLD"],
+      ["실패", "LOST"],
+    ];
+    expected.forEach(([stage], index) => input.projects.push(projectRow(`stage-${index}`, `PRJ-STAGE-${index}`, { 상태: "진행", "프로젝트 단계": stage })));
+    input.projects.push(
+      projectRow("stage-unclassified", "PRJ-STAGE-U", { "프로젝트 단계": "미분류" }),
+      projectRow("stage-unknown", "PRJ-STAGE-X", { "프로젝트 단계": "협상" }),
+      projectRow("stage-status-only", "PRJ-STAGE-S", { 상태: "완료" }),
+    );
+    const plan = new NotionCwosImportPlanner().plan(input);
+    expected.forEach(([, stage], index) => {
+      expect(plan.engagements.find((item) => item.legacySourceId === `stage-${index}`)?.stage).toBe(stage);
+    });
+    expect(reasonsOf(plan, "stage-unclassified")).toEqual(["UNMAPPED_STAGE"]);
+    expect(reasonsOf(plan, "stage-unknown")).toEqual(["UNMAPPED_STAGE"]);
+    expect(reasonsOf(plan, "stage-status-only")).toEqual(["MISSING_REQUIRED_FIELD"]);
+    expect(plan.engagements.some((item) => item.stage === "INQUIRY")).toBe(false);
+  });
+
+  it("maps activity types onto the cwos_activities CHECK values and quarantines the rest", () => {
+    const input = snapshot();
+    const expected: Array<[string, string]> = [
+      ["메일 수신", "email_in"],
+      ["메일 발신", "email_out"],
+      ["전화", "call"],
+      ["미팅", "meeting"],
+      ["메신저", "message"],
+      ["결정", "decision"],
+      ["메모", "note"],
+    ];
+    const base = { "date:활동일:start": "2026-08-20", 요약: "요약", 프로젝트: ["project-1"] };
+    expected.forEach(([type], index) => input.activities.push({ sourceId: `type-${index}`, properties: { ...base, 유형: type } }));
+    input.activities.push(
+      { sourceId: "type-unknown", properties: { ...base, 유형: "방문" } },
+      { sourceId: "type-missing", properties: { ...base } },
+      { sourceId: "account-only", properties: { 유형: "전화", "date:활동일:start": "2026-08-20", 요약: "계정만 연결", "고객·파트너": ["account-customer"] } },
+    );
+    const plan = new NotionCwosImportPlanner().plan(input);
+    expected.forEach(([, type], index) => {
+      expect(plan.activities.find((item) => item.legacySourceId === `type-${index}`)?.activityType).toBe(type);
+    });
+    expect(reasonsOf(plan, "type-unknown")).toEqual(["UNMAPPED_ACTIVITY_TYPE"]);
+    expect(reasonsOf(plan, "type-missing")).toEqual(["MISSING_REQUIRED_FIELD"]);
+    expect(reasonsOf(plan, "account-only")).toEqual(["ORPHAN_ACTIVITY"]);
+  });
+
+  it("reads 매출처, 최종고객, 매입처 and 파트너 as engagement party roles", () => {
+    const input = snapshot();
+    input.projects.push(
+      projectRow("indirect", "PRJ-INDIRECT", {
+        "프로젝트 단계": "고객발주",
+        매출처: ["account-si"],
+        최종고객: ["account-customer"],
+        매입처: ["account-vendor"],
+        파트너: ["account-vendor"],
+        "고객·파트너": ["account-customer", "account-maker"],
+      }),
+      projectRow("billed-only", "PRJ-BILLED", { "프로젝트 단계": "제안/견적", 최종고객: [], 매출처: ["account-si"] }),
+      projectRow("generic-other", "PRJ-OTHER", { "프로젝트 단계": "제안/견적", "고객·파트너": ["account-etc"] }),
+    );
+    const plan = new NotionCwosImportPlanner().plan(input);
+    const parties = (source: string) => plan.engagements.find((item) => item.legacySourceId === source)?.parties.map((party) => ({ account: party.accountSourceId, role: party.role, primary: party.primary, commercial: party.commercialResponsibility, delivery: party.deliveryResponsibility }));
+
+    expect(parties("project-1")).toEqual([
+      { account: "account-customer", role: "customer", primary: true, commercial: true, delivery: false },
+      { account: "account-vendor", role: "vendor", primary: true, commercial: true, delivery: false },
+      { account: "account-vendor", role: "partner", primary: true, commercial: false, delivery: true },
+    ]);
+    expect(parties("indirect")).toEqual([
+      { account: "account-customer", role: "customer", primary: true, commercial: false, delivery: false },
+      { account: "account-si", role: "prime_contractor", primary: true, commercial: true, delivery: false },
+      { account: "account-vendor", role: "vendor", primary: true, commercial: true, delivery: false },
+      { account: "account-vendor", role: "partner", primary: true, commercial: false, delivery: true },
+      { account: "account-maker", role: "manufacturer", primary: true, commercial: false, delivery: false },
+    ]);
+    expect(parties("billed-only")).toEqual([{ account: "account-si", role: "customer", primary: true, commercial: true, delivery: false }]);
+    expect(reasonsOf(plan, "generic-other")).toEqual(["UNMAPPED_PARTY_ROLE"]);
+  });
+
+  it("maps finance 구분, 상태 and 증거 상태 strictly and quarantines unknown or missing values", () => {
+    const input = snapshot();
+    input.finance.push(
+      financeRow("settled-in", { 상태: "입금완료", "증거 상태": "은행확인", "date:실제 처리일:start": "2026-11-29" }),
+      financeRow("settled-out", { 구분: "매입", 상태: "출금완료", 거래처: ["account-vendor"], "date:예상 입금일:start": undefined, "date:예상 출금일:start": "2026-11-15" }),
+      financeRow("overdue", { 상태: "연체", "증거 상태": "WEHAGO확인" }),
+      financeRow("partial", { 상태: "부분처리", "증거 상태": "사용자확인" }),
+      financeRow("unknown-kind", { 구분: "환불" }),
+      financeRow("missing-kind", { 구분: undefined }),
+      financeRow("unknown-status", { 상태: "보류" }),
+      financeRow("missing-status", { 상태: undefined }),
+      financeRow("status-conflict", { 상태: "출금완료" }),
+      financeRow("unknown-evidence", { "증거 상태": "추정" }),
+      financeRow("missing-account", { 거래처: [] }),
+      financeRow("missing-expected", { "date:예상 입금일:start": undefined }),
+    );
+    const plan = new NotionCwosImportPlanner().plan(input);
+    const item = (source: string) => plan.financialItems.find((row) => row.legacySourceId === source);
+
+    expect(item("finance-in")).toMatchObject({ direction: "IN", lifecycle: "BILLED", evidenceStatus: "cross_confirmed" });
+    expect(item("finance-out")).toMatchObject({ direction: "OUT", lifecycle: "PLANNED", evidenceStatus: "unverified" });
+    expect(item("settled-in")).toMatchObject({ direction: "IN", lifecycle: "SETTLED", evidenceStatus: "bank_confirmed", actualDate: "2026-11-29" });
+    expect(item("settled-out")).toMatchObject({ direction: "OUT", lifecycle: "SETTLED", expectedDate: "2026-11-15" });
+    expect(item("overdue")).toMatchObject({ lifecycle: "OVERDUE", evidenceStatus: "wehago_confirmed" });
+    expect(item("partial")).toMatchObject({ lifecycle: "PARTIAL", evidenceStatus: "user_confirmed" });
+    expect(reasonsOf(plan, "unknown-kind")).toEqual(["UNMAPPED_FINANCE_KIND"]);
+    expect(reasonsOf(plan, "missing-kind")).toEqual(["MISSING_REQUIRED_FIELD"]);
+    expect(reasonsOf(plan, "unknown-status")).toEqual(["UNMAPPED_FINANCE_STATUS"]);
+    expect(reasonsOf(plan, "missing-status")).toEqual(["MISSING_REQUIRED_FIELD"]);
+    expect(reasonsOf(plan, "status-conflict")).toEqual(["FINANCE_STATUS_CONFLICT"]);
+    expect(reasonsOf(plan, "unknown-evidence")).toEqual(["UNMAPPED_EVIDENCE_STATUS"]);
+    expect(reasonsOf(plan, "missing-account")).toEqual(["MISSING_REQUIRED_FIELD"]);
+    expect(reasonsOf(plan, "missing-expected")).toEqual(["MISSING_REQUIRED_FIELD"]);
+  });
+
+  it("rejects legacy money tables and the todo board on the snapshot path", () => {
+    const withExtraTable = { ...snapshot(), receivables: [{ sourceId: "r-1", properties: {} }] } as NotionCwosSnapshot;
+    expect(rejectionCode(withExtraTable)).toBe("FORBIDDEN_SOURCE_TABLE");
+
+    const legacyRows: Array<[keyof Pick<NotionCwosSnapshot, "finance" | "projects">, NotionSourceRow]> = [
+      ["finance", { sourceId: "receivable", properties: { 입금상태: "미수", 공급가액: 100, 입금액: 0, 프로젝트: ["project-1"] } }],
+      ["finance", { sourceId: "cashflow", properties: { 거래처: "은행", 유형: "매출입금", 입금계좌: "법인통장", 금액: 100, 프로젝트: ["project-1"] } }],
+      ["finance", { sourceId: "expense", properties: { 지출명: "장비", 매입처: "총판", 결재수단: "법인카드", 공급가액: 100, 납입여부: true } }],
+      ["projects", { sourceId: "todo", properties: { 이름: "안건", 상태: "시작 전", 담당자: ["user"] } }],
+    ];
+    for (const [table, row] of legacyRows) {
+      const input = snapshot();
+      input[table].push(row);
+      expect(rejectionCode(input), row.sourceId).toBe("FORBIDDEN_SOURCE_TABLE");
+    }
+  });
+
+  it("preserves legacy source ids and 자연키 on every imported record", () => {
+    const plan = new NotionCwosImportPlanner().plan(snapshot());
+    expect(plan.accounts.find((item) => item.legacySourceId === "account-customer")?.naturalKey).toBe("ACC-CUSTOMER");
+    expect(plan.engagements[0]).toMatchObject({ legacySourceId: "project-1", naturalKey: "PRJ-NK-001" });
+    expect(plan.activities[0]).toMatchObject({ legacySourceId: "activity-1", naturalKey: "ACT-NK-001" });
+    expect(plan.financialItems.find((item) => item.legacySourceId === "finance-in")?.naturalKey).toBe("FIN-NK-IN");
+    expect(plan.accounts.find((item) => item.legacySourceId === "account-vendor")).not.toHaveProperty("naturalKey");
   });
 
   it("uses stable hashes independent of object key order", () => {

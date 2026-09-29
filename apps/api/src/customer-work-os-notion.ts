@@ -352,14 +352,9 @@ export function applyNotionPlanToDomain(input: {
       ...(item.targetDate ? { targetDate: item.targetDate } : {}),
       ...(["LOST", "CANCELLED"].includes(item.stage) ? { terminalReason: "Imported terminal state from Notion" } : {}),
     });
-    for (const source of item.accountSourceIds) {
-      const accountId = accountIds.get(source)!;
-      service.assignParty({ id: `party-${notionCwosHash({ engagement: item.id, accountId, role: "customer" }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, accountId, role: "customer", primary: true, commercialResponsibility: true, deliveryResponsibility: false });
-      parties += 1;
-    }
-    for (const source of item.partnerSourceIds) {
-      const accountId = accountIds.get(source)!;
-      service.assignParty({ id: `party-${notionCwosHash({ engagement: item.id, accountId, role: "partner" }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, accountId, role: "partner", primary: false, commercialResponsibility: false, deliveryResponsibility: true });
+    for (const party of item.parties) {
+      const accountId = accountIds.get(party.accountSourceId)!;
+      service.assignParty({ id: `party-${notionCwosHash({ engagement: item.id, accountId, role: party.role }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, accountId, role: party.role, primary: party.primary, commercialResponsibility: party.commercialResponsibility, deliveryResponsibility: party.deliveryResponsibility });
       parties += 1;
     }
     if (item.nextAction && !["CLOSED", "LOST", "CANCELLED"].includes(item.stage)) {
@@ -368,7 +363,7 @@ export function applyNotionPlanToDomain(input: {
     }
     for (const [kind, refs] of Object.entries(item.artifactRefs)) {
       refs.forEach((storageUri, index) => {
-        service.addArtifact({ id: `artifact-${notionCwosHash({ engagement: item.id, kind, storageUri }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, type: kind === "quote" ? "customer_quote" : kind === "proposal" ? "proposal" : kind === "contract" ? "contract" : "completion_report", title: `${kind} imported from Notion`, versionLabel: `legacy-${index + 1}`, status: "REVIEW", storageUri, metadata: { legacySourceId: item.legacySourceId, importedFrom: "Notion" } });
+        service.addArtifact({ id: `artifact-${notionCwosHash({ engagement: item.id, kind, storageUri }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, type: kind === "quote" ? "customer_quote" : kind === "proposal" ? "proposal" : kind === "contract" ? "contract" : "completion_report", title: `${kind} imported from Notion`, versionLabel: `legacy-${index + 1}`, status: "REVIEW", storageUri, metadata: { legacySourceId: item.legacySourceId, ...(item.naturalKey ? { naturalKey: item.naturalKey } : {}), importedFrom: "Notion" } });
         artifacts += 1;
       });
     }
@@ -377,7 +372,7 @@ export function applyNotionPlanToDomain(input: {
   for (const item of plan.activities) {
     const engagementId = item.projectSourceIds.map((source) => engagementIds.get(source)).find(Boolean);
     if (!engagementId) continue;
-    service.recordActivity({ id: item.id, workspaceId: item.workspaceId, engagementId, type: item.activityType === "메일 수신" ? "email_in" : item.activityType === "메일 발신" ? "email_out" : item.activityType === "전화" ? "call" : item.activityType === "미팅" ? "meeting" : item.activityType === "메신저" ? "message" : item.activityType === "결정" ? "decision" : "note", occurredAt: item.occurredAt, summary: item.summary, ...(item.decision ? { decision: item.decision } : {}), evidenceRef: item.sourceUrl ?? `notion://${item.legacySourceId}`, humanReviewed: true });
+    service.recordActivity({ id: item.id, workspaceId: item.workspaceId, engagementId, type: item.activityType, occurredAt: item.occurredAt, summary: item.summary, ...(item.decision ? { decision: item.decision } : {}), evidenceRef: item.sourceUrl ?? `notion://${item.legacySourceId}`, humanReviewed: true });
   }
 
   for (const item of plan.financialItems) {
