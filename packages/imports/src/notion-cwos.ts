@@ -1,3 +1,30 @@
+import { createHash } from "node:crypto";
+
+/** RFC 4122 URL namespace. Dry-run workspace binding is fixed to this value. */
+export const NOTION_CWOS_WORKSPACE_NAMESPACE = "6ba7b811-9dad-11d1-80b4-00c04fd430c8";
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function resolveNotionWorkspaceId(workspaceId: string): { workspaceId: string; rewritten: boolean } {
+  if (typeof workspaceId !== "string" || workspaceId.trim() === "") {
+    throw new NotionCwosImportError("INVALID_SNAPSHOT", "workspaceId, snapshotId and snapshotHash are required");
+  }
+  const trimmed = workspaceId.trim();
+  if (UUID_PATTERN.test(trimmed)) return { workspaceId: trimmed, rewritten: false };
+  return { workspaceId: uuidV5(NOTION_CWOS_WORKSPACE_NAMESPACE, trimmed), rewritten: true };
+}
+
+function uuidV5(namespace: string, name: string): string {
+  const namespaceBytes = Buffer.from(namespace.replace(/-/g, ""), "hex");
+  if (namespaceBytes.length !== 16) throw new NotionCwosImportError("INVALID_SNAPSHOT", "workspace namespace is not a UUID");
+  const hash = createHash("sha1").update(namespaceBytes).update(name, "utf8").digest();
+  const bytes = Buffer.from(hash.subarray(0, 16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export class NotionCwosImportError extends Error {
   constructor(readonly code: string, message: string) {
     super(message);
@@ -203,6 +230,12 @@ export interface NotionCwosImportPlan {
   outOfScope: OutOfScopeRow[];
   reconciliation: NotionCwosReconciliation;
   readOnlySource: true;
+  workspaceBinding?: {
+    algorithm: "uuidv5";
+    namespace: string;
+    sourceWorkspaceKey: string;
+    workspaceId: string;
+  };
 }
 
 function canonical(value: unknown): unknown {
