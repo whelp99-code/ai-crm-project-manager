@@ -51,11 +51,23 @@ export interface QuarantinedRow {
   rawFingerprint: string;
 }
 
+export interface NotionProvenance {
+  naturalKey?: string;
+  evidenceGrade?: string;
+  confidence?: string;
+  sourceRevision?: string;
+}
+
+export interface NotionFinanceProvenance extends NotionProvenance {
+  evidenceStatus?: FinanceEvidenceStatus;
+  projectMappingStatus?: string;
+}
+
 export interface AccountImportRecord {
   id: string;
   workspaceId: string;
   legacySourceId: string;
-  naturalKey?: string;
+  provenance: NotionProvenance;
   sourceUrl?: string;
   name: string;
   normalizedName: string;
@@ -83,7 +95,7 @@ export interface EngagementImportRecord {
   id: string;
   workspaceId: string;
   legacySourceId: string;
-  naturalKey?: string;
+  provenance: NotionProvenance;
   sourceUrl?: string;
   projectKey: string;
   name: string;
@@ -104,7 +116,7 @@ export interface ActivityImportRecord {
   id: string;
   workspaceId: string;
   legacySourceId: string;
-  naturalKey?: string;
+  provenance: NotionProvenance;
   sourceUrl?: string;
   activityType: ActivityImportType;
   occurredAt: string;
@@ -123,7 +135,7 @@ export interface FinancialItemImportRecord {
   id: string;
   workspaceId: string;
   legacySourceId: string;
-  naturalKey?: string;
+  provenance: NotionFinanceProvenance;
   sourceUrl?: string;
   engagementSourceId: string | null;
   accountSourceId: string | null;
@@ -136,7 +148,6 @@ export interface FinancialItemImportRecord {
   expectedDate?: string;
   actualDate?: string;
   evidenceRefs: string[];
-  evidenceStatus?: FinanceEvidenceStatus;
   sourceFingerprint: string;
 }
 
@@ -289,6 +300,28 @@ function mapAccountStatus(value: string | undefined): AccountImportRecord["statu
   if (value === "주의") return "at_risk";
   if (value === "휴면" || value === "종료") return "inactive";
   return "active";
+}
+
+function scalarText(properties: Record<string, unknown>, names: string[]): string | undefined {
+  for (const name of names) {
+    const value = properties[name];
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function provenanceOf(properties: Record<string, unknown>): NotionProvenance {
+  const naturalKey = text(properties, ["자연키"]);
+  const evidenceGrade = text(properties, ["근거등급"]);
+  const confidence = scalarText(properties, ["확신도"]);
+  const sourceRevision = scalarText(properties, ["원천 revision"]);
+  return {
+    ...(naturalKey !== undefined ? { naturalKey } : {}),
+    ...(evidenceGrade !== undefined ? { evidenceGrade } : {}),
+    ...(confidence !== undefined ? { confidence } : {}),
+    ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+  };
 }
 
 const PROJECT_STAGES = new Map<string, string>([
@@ -460,7 +493,7 @@ export class NotionCwosImportPlanner {
         accountSourceIds.add(legacySourceId);
         const kinds = classifyAccountKind(text(row.properties, ["구분", "유형"]));
         accountKinds.set(legacySourceId, kinds);
-        const naturalKey = text(row.properties, ["자연키"]);
+        const provenance = provenanceOf(row.properties);
         const primaryContactName = text(row.properties, ["담당자", "주요 담당자"]);
         const primaryEmail = text(row.properties, ["대표 이메일", "이메일"]);
         const primaryPhone = text(row.properties, ["대표 연락처", "전화", "연락처"]);
@@ -470,7 +503,7 @@ export class NotionCwosImportPlanner {
           id: id("account", snapshot.workspaceId, legacySourceId),
           workspaceId: snapshot.workspaceId,
           legacySourceId,
-          ...(naturalKey !== undefined ? { naturalKey } : {}),
+          provenance,
           ...(row.sourceUrl ? { sourceUrl: row.sourceUrl } : {}),
           name,
           normalizedName: normalized,
@@ -539,7 +572,7 @@ export class NotionCwosImportPlanner {
           quarantine("engagement", row, ["UNMAPPED_PARTY_ROLE"], "고객·파트너 relation points at an account whose 구분 has no party role");
           continue;
         }
-        const naturalKey = text(row.properties, ["자연키"]);
+        const provenance = provenanceOf(row.properties);
         projectKeys.set(key, legacySourceId);
         projectSourceIds.add(legacySourceId);
         const proposed = integerMoney(row.properties, ["제안금액", "예상 매출"]);
@@ -552,7 +585,7 @@ export class NotionCwosImportPlanner {
           id: id("engagement", snapshot.workspaceId, legacySourceId),
           workspaceId: snapshot.workspaceId,
           legacySourceId,
-          ...(naturalKey !== undefined ? { naturalKey } : {}),
+          provenance,
           ...(row.sourceUrl ? { sourceUrl: row.sourceUrl } : {}),
           projectKey: key,
           name,
@@ -605,7 +638,7 @@ export class NotionCwosImportPlanner {
           quarantine("activity", row, ["UNMAPPED_ACTIVITY_TYPE"], `activity 유형 ${typeLabel} has no cwos_activities type`);
           continue;
         }
-        const naturalKey = text(row.properties, ["자연키"]);
+        const provenance = provenanceOf(row.properties);
         const decision = text(row.properties, ["결정사항"]);
         const nextAction = text(row.properties, ["다음 행동"]);
         const nextContactDate = dateValue(row.properties, ["date:다음 연락일:start", "다음 연락일"]);
@@ -613,7 +646,7 @@ export class NotionCwosImportPlanner {
           id: id("activity", snapshot.workspaceId, legacySourceId),
           workspaceId: snapshot.workspaceId,
           legacySourceId,
-          ...(naturalKey !== undefined ? { naturalKey } : {}),
+          provenance,
           ...(row.sourceUrl ? { sourceUrl: row.sourceUrl } : {}),
           activityType,
           occurredAt,
@@ -709,7 +742,12 @@ export class NotionCwosImportPlanner {
           quarantine("financial_item", row, ["UNMAPPED_EVIDENCE_STATUS"], `finance 증거 상태 ${evidenceLabel} is unknown`);
           continue;
         }
-        const naturalKey = text(row.properties, ["자연키"]);
+        const projectMappingStatus = text(row.properties, ["프로젝트 매핑 상태"]);
+        const provenance: NotionFinanceProvenance = {
+          ...provenanceOf(row.properties),
+          ...(evidenceStatus ? { evidenceStatus } : {}),
+          ...(projectMappingStatus !== undefined ? { projectMappingStatus } : {}),
+        };
         const actualDate = dateValue(row.properties, ["date:실제 처리일:start", "실제 처리일"]);
         const fingerprint = notionCwosHash({ direction, name, net: net.toString(), vat: vat.toString(), expectedDate, actualDate, engagementSourceId, accountSourceId });
         if (financeFingerprints.has(fingerprint)) {
@@ -722,7 +760,7 @@ export class NotionCwosImportPlanner {
           id: id("financial", snapshot.workspaceId, legacySourceId),
           workspaceId: snapshot.workspaceId,
           legacySourceId,
-          ...(naturalKey !== undefined ? { naturalKey } : {}),
+          provenance,
           ...(row.sourceUrl ? { sourceUrl: row.sourceUrl } : {}),
           engagementSourceId,
           accountSourceId,
@@ -735,7 +773,6 @@ export class NotionCwosImportPlanner {
           expectedDate,
           ...(actualDate ? { actualDate } : {}),
           evidenceRefs: stringArray(row.properties, ["증빙"]),
-          ...(evidenceStatus ? { evidenceStatus } : {}),
           sourceFingerprint: fingerprint,
         });
       } catch (error) {

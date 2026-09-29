@@ -363,7 +363,7 @@ export function applyNotionPlanToDomain(input: {
     }
     for (const [kind, refs] of Object.entries(item.artifactRefs)) {
       refs.forEach((storageUri, index) => {
-        service.addArtifact({ id: `artifact-${notionCwosHash({ engagement: item.id, kind, storageUri }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, type: kind === "quote" ? "customer_quote" : kind === "proposal" ? "proposal" : kind === "contract" ? "contract" : "completion_report", title: `${kind} imported from Notion`, versionLabel: `legacy-${index + 1}`, status: "REVIEW", storageUri, metadata: { legacySourceId: item.legacySourceId, ...(item.naturalKey ? { naturalKey: item.naturalKey } : {}), importedFrom: "Notion" } });
+        service.addArtifact({ id: `artifact-${notionCwosHash({ engagement: item.id, kind, storageUri }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, type: kind === "quote" ? "customer_quote" : kind === "proposal" ? "proposal" : kind === "contract" ? "contract" : "completion_report", title: `${kind} imported from Notion`, versionLabel: `legacy-${index + 1}`, status: "REVIEW", storageUri, metadata: { legacySourceId: item.legacySourceId, provenance: item.provenance, importedFrom: "Notion" } });
         artifacts += 1;
       });
     }
