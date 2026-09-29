@@ -161,7 +161,7 @@ export interface Commitment {
   ownerPrincipalId: string;
   counterpartyAccountId?: string;
   description: string;
-  dueAt: string;
+  dueAt: string | null;
   status: "OPEN" | "IN_PROGRESS" | "WAITING" | "DONE" | "CANCELLED";
   priority: number;
   financialImpact: boolean;
@@ -669,6 +669,9 @@ export class CustomerWorkOsService {
     this.engagement(input.workspaceId, input.engagementId);
     if (input.sourceActivityId) this.owned(this.activities, input.workspaceId, input.sourceActivityId, "activity");
     if (input.counterpartyAccountId) this.account(input.workspaceId, input.counterpartyAccountId);
+    if (typeof input.dueAt === "string" && input.dueAt.trim() === "") {
+      throw new CustomerWorkOsError("INVALID_INPUT", "commitment.dueAt is required");
+    }
     if (!Number.isInteger(input.priority) || input.priority < 0 || input.priority > 100) {
       throw new CustomerWorkOsError("INVALID_PRIORITY", "commitment priority must be 0..100");
     }
@@ -1180,7 +1183,12 @@ export class CustomerWorkOsService {
       activities: this.byEngagement(this.activities, workspaceId, engagementId).sort((left, right) => right.occurredAt.localeCompare(left.occurredAt)),
       artifacts: this.byEngagement(this.artifacts, workspaceId, engagementId),
       knowledge: this.byEngagement(this.knowledge, workspaceId, engagementId),
-      commitments: this.byEngagement(this.commitments, workspaceId, engagementId).sort((left, right) => left.dueAt.localeCompare(right.dueAt)),
+      commitments: this.byEngagement(this.commitments, workspaceId, engagementId).sort((left, right) => {
+        if (left.dueAt == null && right.dueAt == null) return 0;
+        if (left.dueAt == null) return 1;
+        if (right.dueAt == null) return -1;
+        return left.dueAt.localeCompare(right.dueAt);
+      }),
       quotes: this.byEngagement(this.quotes, workspaceId, engagementId),
       contracts: this.byEngagement(this.contracts, workspaceId, engagementId),
       deliveryProjects: this.byEngagement(this.deliveryProjects, workspaceId, engagementId),

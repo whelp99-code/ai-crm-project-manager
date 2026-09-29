@@ -403,7 +403,7 @@ export async function registerDurableCustomerWorkOsRoutes(
           activeEngagementCount: activeEngagements.length,
           criticalEngagementCount: activeEngagements.filter((engagement) => engagement.health === "critical").length,
           openCommitmentCount: openCommitments.length,
-          overdueCommitmentCount: openCommitments.filter((commitment) => commitment.dueAt < now()).length,
+          overdueCommitmentCount: openCommitments.filter((commitment) => commitment.dueAt != null && commitment.dueAt < now()).length,
           pendingQuoteCount: state.quotes.filter((quote) => ["DRAFT", "REVIEW", "SENT"].includes(quote.status)).length,
           generatedAt: now(),
         };
