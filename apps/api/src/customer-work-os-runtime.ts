@@ -41,6 +41,10 @@ export interface CustomerWorkOsMutationAudit {
   eventHash?: string;
 }
 
+export interface SnapshotTransaction {
+  query<T = Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<{ rows: T[]; rowCount?: number | null }>;
+}
+
 export interface CustomerWorkOsSnapshotStore {
   load(workspaceId: string): Promise<CustomerWorkOsRuntimeEnvelope | undefined>;
   compareAndSwap(
@@ -48,6 +52,7 @@ export interface CustomerWorkOsSnapshotStore {
     expectedVersion: number,
     next: Omit<CustomerWorkOsRuntimeEnvelope, "version">,
     audit: CustomerWorkOsMutationAudit,
+    participate?: (connection: SnapshotTransaction) => Promise<void>,
   ): Promise<CustomerWorkOsRuntimeEnvelope>;
   close?(): Promise<void>;
 }
@@ -213,6 +218,7 @@ export class InMemoryCustomerWorkOsSnapshotStore implements CustomerWorkOsSnapsh
     expectedVersion: number,
     next: Omit<CustomerWorkOsRuntimeEnvelope, "version">,
     audit: CustomerWorkOsMutationAudit,
+    participate?: (connection: SnapshotTransaction) => Promise<void>,
   ): Promise<CustomerWorkOsRuntimeEnvelope> {
     const current = this.rows.get(workspaceId);
     const actualVersion = current?.version ?? 0;
@@ -232,6 +238,9 @@ export class InMemoryCustomerWorkOsSnapshotStore implements CustomerWorkOsSnapsh
       throw new CustomerWorkOsError("AUDIT_CHAIN_MISMATCH", "audit history is not contiguous");
     }
     const event = finalizeAudit(audit, history.length + 1, stored.version, previous?.eventHash);
+    await participate?.({
+      query: async () => { throw new CustomerWorkOsError("INVALID_STATE", "in-memory snapshot participation has no SQL connection"); },
+    });
     this.rows.set(workspaceId, stored);
     this.events.set(workspaceId, [...history, event]);
     return copy(stored);
@@ -325,6 +334,7 @@ export class PgCustomerWorkOsSnapshotStore implements CustomerWorkOsSnapshotStor
     expectedVersion: number,
     next: Omit<CustomerWorkOsRuntimeEnvelope, "version">,
     audit: CustomerWorkOsMutationAudit,
+    participate?: (connection: SnapshotTransaction) => Promise<void>,
   ): Promise<CustomerWorkOsRuntimeEnvelope> {
     const candidate: CustomerWorkOsRuntimeEnvelope = { ...copy(next), version: expectedVersion + 1 };
     validateEnvelope(candidate);
@@ -413,6 +423,7 @@ export class PgCustomerWorkOsSnapshotStore implements CustomerWorkOsSnapshotStor
           WHERE workspace_id = $1`,
         [workspaceId, sequence, eventId, event.eventHash, event.createdAt],
       );
+      await participate?.(connection);
       return fromRow(snapshotRow);
     });
   }
@@ -522,6 +533,7 @@ export class CustomerWorkOsRuntimeManager {
     requestHash: string;
     operationId?: string;
     operation(service: CustomerWorkOsService): T | Promise<T>;
+    participate?: (connection: SnapshotTransaction) => Promise<void>;
     statusCode?: number;
     now?: string;
   }): Promise<{ statusCode: number; payload: T; replayed: boolean }> {
@@ -580,6 +592,7 @@ export class CustomerWorkOsRuntimeManager {
           runtime.version,
           { ...envelopeCore, stateHash },
           audit,
+          input.participate,
         );
         runtime.version = saved.version;
         return { statusCode, payload: copy(payload), replayed: false };

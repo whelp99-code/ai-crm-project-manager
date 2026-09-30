@@ -31,7 +31,7 @@ export interface ReportCommitment {
   id: string;
   engagementId: string;
   description: string;
-  dueAt: string;
+  dueAt: string | null;
   status: "OPEN" | "IN_PROGRESS" | "WAITING" | "DONE" | "CANCELLED";
   priority: number;
   [key: string]: unknown;
@@ -203,13 +203,13 @@ export function buildOwnerCockpit(state: CustomerWorkOsReportState, asOf: string
   const active = state.engagements.filter((engagement) => !terminal.has(engagement.stage));
   const openCommitments = state.commitments.filter((item) => !["DONE", "CANCELLED"].includes(item.status));
   const overdue = openCommitments
-    .filter((item) => dayStart(item.dueAt) < asOfMs)
+    .filter((item): item is ReportCommitment & { dueAt: string } => item.dueAt != null && dayStart(item.dueAt) < asOfMs)
     .sort((left, right) => left.dueAt.localeCompare(right.dueAt) || right.priority - left.priority);
 
   const engagements = active
     .map((engagement): CockpitEngagement => {
       const commitments = openCommitments.filter((item) => item.engagementId === engagement.id);
-      const overdueCount = commitments.filter((item) => dayStart(item.dueAt) < asOfMs).length;
+      const overdueCount = commitments.filter((item) => item.dueAt != null && dayStart(item.dueAt) < asOfMs).length;
       const latestActivityAt = state.activities
         .filter((item) => item.engagementId === engagement.id)
         .map((item) => item.occurredAt)
