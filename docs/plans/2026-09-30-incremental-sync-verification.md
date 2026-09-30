@@ -55,3 +55,16 @@
 - 일일 잡 연결, `ai_crm` apply, override, reversal, 읽기 API의 archive 제외: NOT_RUN.
 - 출시 보류 사유: S3/S4. 날짜 비교를 타임존에 의존하지 않게 하고, timestamptz·jsonb 키 순서를 정규화한 뒤에 불변 스냅샷 재diff가 0인지 재시험할 것.
 - 수정 후 재시험: 아직 없음.
+
+## 재검증 2026-09-30 — `8b26ff9`
+
+독립 클론 `/tmp/ai-crm-verify-8b26`, HEAD `8b26ff955efebb4e0ddcdda49c6f3106b4ad327b`. `ai_crm` 미접속. Notion 미호출. 검증냥은 출시를 승인하지 않는다. 이전 FAIL(S3/S4)의 재시험이다.
+
+| 단계 | 판정 | 증거 |
+| --- | --- | --- |
+| 1. 신규 테스트가 수정 전 src에서 실패하고 `8b26ff9`에서 통과. typecheck. `pnpm test` | PASS | `0259d06` src + `8b26ff9` 테스트, `TZ=Asia/Seoul`: imports 2 failed (occurred_at, metadata 키 순서, assertion), api 3 failed (updates 4와 3, `start_date::text` 없음). `8b26ff9`: imports 10 passed, api 7 passed, exit 0. `pnpm --filter @ai-crm/api run typecheck` exit 0. `pnpm test` exit 1: 745 passed, 1 failed, 52 skipped. 실패는 `worker-start.integration.test.ts` SIGTERM 15s timeout만. Node v24.19.0 |
+| 2. DB냥 diff 검토 | PASS | 읽기 SQL이 `start_date::text`, `target_date::text`, `expected_date::text`. pg 기본 DATE 파서는 Date이며 Asia/Seoul에서 `2025-12-01`의 `toISOString()`은 `2025-11-30T15:00:00.000Z`. 실제 비교 경로는 캐스트 문자열이라 `rowToLive`가 `2025-12-01` / `2025-12-31` / `2026-01-01`을 TZ=Asia/Seoul과 TZ=UTC 모두에서 반환. 타임스탬프는 날짜 문자열과 ISO를 같은 UTC 자정으로 정규화. JSON은 중첩 키 정렬. 값 변경은 불일치로 남음. 금액 컬럼은 `bigint`, node-pg는 무스케일 문자열(`7314000`). 비교는 정수 파싱이 아니라 그 문자열 동등. `1000.00`은 불일치로 남으며, 이 스키마에서는 스케일 문자열이 나오지 않음. `changedFields`는 desired에 없는 키를 건너뛰나, 계획 빌더는 UPDATABLE 키를 모두 넣음. 0025는 ADD COLUMN / CREATE TABLE·INDEX·POLICY·GRANT와 artifact guard 함수 교체. DROP COLUMN·데이터 삭제 없음. 0024의 `due_at` NOT NULL 해제는 0025가 아님 |
+| 3. scratch 양쪽 TZ | PASS | 덤프 `ai_crm-before-cutover-20260930T1037.dump` + 0024 + 0025. DB `ai_crm_verify_recheck_20260930`(Seoul), `ai_crm_verify_recheck_utc_20260930`(UTC). 스냅샷 `notion-snapshot-20260930T021058Z.json`. 둘 다 1차 189/0/0/0 settlementInserts 5, hash만 변경한 재동기화 0/0/0/0, engagement max(version)=1 bumped 0, 합성 1/1/1/1 hold `AMOUNT_OR_DIRECTION`, 재실행 alreadyApplied, 주입 `injected` 후 runs 3 유지, settlement_sum 50010400. Seoul 적용 후 engagement version>1은 1건, artifact/account version>1은 0. 일자 가장자리: 트랜잭션 후 ROLLBACK. `2025-12-01`·`2025-12-31`·`2026-01-01`이 양쪽 TZ에서 달력일 유지. probe 잔존 0. 두 DB DROP 확인 |
+| 4. 문서만 커밋·푸시 | 이 절을 커밋한 뒤 기록 | 제품 코드 변경 없음 |
+
+잔여 NOT_RUN: 일일 잡, `ai_crm` apply, override, reversal, 읽기 API archive 제외, 정산 행을 스냅샷에서 제거, 앱 런타임 역할(이번 scratch는 superuser라 RLS 우회). 출시 승인은 하지 않음. 이전 S3/S4 결함은 이 커밋에서 재현되지 않았다.
