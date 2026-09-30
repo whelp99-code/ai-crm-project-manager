@@ -7,6 +7,7 @@ interface EngagementRow {
   id: string;
   name: string;
   stage: string;
+  source_stage?: string | null;
   account_name: string | null;
 }
 
@@ -64,7 +65,7 @@ export default async function EngagementsPage() {
           items={result.engagements.map((engagement) => ({
             id: engagement.id,
             name: engagement.name,
-            chips: [{ text: stageLabel(engagement.stage) }],
+            chips: [{ text: stageLabel(engagement.stage, engagement.source_stage) }],
             sub: engagement.account_name ?? "연결 계정 없음",
           }))}
         />

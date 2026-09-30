@@ -22,6 +22,9 @@ describe("readonly finance totals query", () => {
     expect(engagementsSql(true)).toContain("e.archived_at IS NULL");
     expect(financeItemsSql(true)).toContain("f.archived_at IS NULL");
     expect(engagementsSql(false)).not.toContain("archived_at");
+    expect(engagementsSql(false)).toContain("NULL::text AS source_stage");
+    expect(engagementsSql(false, true)).toContain("e.source_stage");
+    expect(engagementsSql(false, true)).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/);
   });
 
   it("rolls query rows into IN and OUT without inventing a missing direction", () => {

@@ -85,8 +85,14 @@ app.get("/api/cwos/engagements", async (request, reply) => {
     await client.query("BEGIN");
     await client.query("SELECT set_config('app.workspace_id', $1, true)", [workspaceId]);
     const archived = await archivedColumn(client, "cwos_engagements");
-    const result = await client.query<{ id: string; name: string; stage: string; account_name: string | null }>(
-      engagementsSql(archived),
+    const sourceStagePresent = (await client.query<{ present: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'cwos_engagements' AND column_name = 'source_stage'
+       ) AS present`,
+    )).rows[0]?.present === true;
+    const result = await client.query<{ id: string; name: string; stage: string; source_stage: string | null; account_name: string | null }>(
+      engagementsSql(archived, sourceStagePresent),
       [workspaceId],
     );
     await client.query("COMMIT");
