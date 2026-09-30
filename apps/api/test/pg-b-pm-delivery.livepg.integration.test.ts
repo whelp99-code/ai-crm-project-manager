@@ -103,9 +103,9 @@ describe.skipIf(!LIVE)("PG-B PM + delivery PG-primary + restart-survival against
         ...process.env,
         PGHOST: "localhost",
         PGPORT: "5432",
-        PGUSER: "ai_crm",
-        PGPASSWORD: "ai_crm_dev",
-        PGDATABASE: "ai_crm",
+        PGUSER: process.env.PGUSER ?? "ai_crm",
+        PGPASSWORD: process.env.PGPASSWORD ?? "ai_crm_dev",
+        PGDATABASE: process.env.PGDATABASE ?? "ai_crm",
       },
       stdio: "pipe",
     });
