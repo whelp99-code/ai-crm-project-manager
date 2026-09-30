@@ -250,6 +250,29 @@ function canonical(value: unknown): unknown {
   return value;
 }
 
+/** Drop signed-URL query and fragment. Notion S3 signatures change every snapshot; the path does not. */
+export function stableNotionStorageKey(uri: string): string {
+  const trimmed = uri.trim();
+  const hashAt = trimmed.indexOf("#");
+  const noHash = hashAt === -1 ? trimmed : trimmed.slice(0, hashAt);
+  const queryAt = noHash.indexOf("?");
+  const noQuery = queryAt === -1 ? noHash : noHash.slice(0, queryAt);
+  try {
+    const url = new URL(noQuery);
+    return `${url.origin}${decodeURIComponent(url.pathname)}`;
+  } catch {
+    return noQuery;
+  }
+}
+
+export function notionArtifactIdentity(input: { engagementId: string; pageId: string; kind: string; storageUri: string }): { id: string; notionPageId: string } {
+  const file = stableNotionStorageKey(input.storageUri);
+  return {
+    id: `artifact-${notionCwosHash({ engagement: input.engagementId, kind: input.kind, file }).slice(-8)}`,
+    notionPageId: `artifact:${input.pageId}:${input.kind}:${notionCwosHash(file).slice(-8)}`,
+  };
+}
+
 export function notionCwosHash(value: unknown): string {
   const serialized = JSON.stringify(canonical(value)) ?? "undefined";
   let hash = 2166136261;

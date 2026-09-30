@@ -1,7 +1,9 @@
 import { CustomerWorkOsError } from "@ai-crm/domain/customer-work-os";
 import {
   diffNotionSync,
+  notionArtifactIdentity,
   notionCwosHash,
+  stableNotionStorageKey,
   type NotionCwosImportPlan,
   type NotionSyncDiff,
   type NotionSyncEntity,
@@ -145,10 +147,11 @@ export function buildNotionSyncDesired(plan: NotionCwosImportPlan, principalId: 
     }
     for (const [kind, refs] of Object.entries(item.artifactRefs)) {
       refs.forEach((storageUri, index) => {
+        const identity = notionArtifactIdentity({ engagementId: item.id, pageId: item.legacySourceId, kind, storageUri });
         desired.push({
           kind: "artifact",
-          id: `artifact-${notionCwosHash({ engagement: item.id, kind, storageUri }).slice(-8)}`,
-          notionPageId: `artifact:${item.legacySourceId}:${kind}:${notionCwosHash(storageUri).slice(-8)}`,
+          id: identity.id,
+          notionPageId: identity.notionPageId,
           pageId: item.legacySourceId,
           fields: {
             engagement_id: item.id,
@@ -244,6 +247,48 @@ export function buildNotionSyncDesired(plan: NotionCwosImportPlan, principalId: 
   return { desired, settlements, holds, pageIds };
 }
 
+function metadataRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    } catch {
+      return undefined;
+    }
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  return undefined;
+}
+
+function sameArtifactSlot(desired: NotionSyncEntity, live: NotionSyncLiveEntity): boolean {
+  const meta = metadataRecord(live.fields.metadata);
+  const page = typeof meta?.legacySourceId === "string" ? meta.legacySourceId : live.pageId;
+  if (page !== desired.pageId) return false;
+  if (live.fields.artifact_type !== desired.fields.artifact_type) return false;
+  if (desired.fields.engagement_id && live.fields.engagement_id && live.fields.engagement_id !== desired.fields.engagement_id) return false;
+  return true;
+}
+
+/** Keep first-load ids that hashed the signed URL. Match by page id plus stable file path, never insert a twin. */
+export function bindExistingArtifactIds(desired: readonly NotionSyncEntity[], live: readonly NotionSyncLiveEntity[]): NotionSyncEntity[] {
+  const liveArtifacts = live.filter((row) => row.kind === "artifact" && !row.archivedAt);
+  const used = new Set<string>();
+  return desired.map((row) => {
+    if (row.kind !== "artifact") return row;
+    if (liveArtifacts.some((item) => item.id === row.id)) {
+      used.add(row.id);
+      return row;
+    }
+    const file = stableNotionStorageKey(String(row.fields.storage_uri ?? ""));
+    const byFile = liveArtifacts.find((item) => !used.has(item.id) && sameArtifactSlot(row, item) && stableNotionStorageKey(String(item.fields.storage_uri ?? "")) === file);
+    const byLabel = liveArtifacts.find((item) => !used.has(item.id) && sameArtifactSlot(row, item) && item.fields.version_label != null && item.fields.version_label === row.fields.version_label);
+    const match = byFile ?? byLabel;
+    if (!match) return row;
+    used.add(match.id);
+    return { ...row, id: match.id };
+  });
+}
+
 const LIVE_SQL: Record<NotionSyncKind, string> = {
   account: `SELECT id, notion_page_id, notion_parent_page_id, archived_at, version, synced_version,
       name, normalized_name, kinds, status, source_ref FROM cwos_accounts WHERE workspace_id = $1`,
@@ -256,7 +301,7 @@ const LIVE_SQL: Record<NotionSyncKind, string> = {
   commitment: `SELECT id, notion_page_id, notion_parent_page_id, archived_at, version, synced_version,
       description, due_at, priority, financial_impact, status, completion_evidence_ref FROM cwos_commitments WHERE workspace_id = $1`,
   artifact: `SELECT id, notion_page_id, notion_parent_page_id, archived_at, version, synced_version,
-      title, status, storage_uri, metadata FROM cwos_artifacts WHERE workspace_id = $1`,
+      engagement_id, artifact_type, title, version_label, status, storage_uri, metadata FROM cwos_artifacts WHERE workspace_id = $1`,
   financial_item: `SELECT id, notion_page_id, notion_parent_page_id, archived_at,
       net_amount_krw, vat_amount_krw, gross_amount_krw, expected_date::text AS expected_date, lifecycle, category, engagement_id, account_id, direction
       FROM cwos_financial_items WHERE workspace_id = $1`,
@@ -477,8 +522,9 @@ export async function syncApprovedNotionPlan(input: {
     }
     const built = buildNotionSyncDesired(input.record.plan, input.principalId);
     const { live, settled } = await loadLive(connection, input.record.workspaceId);
+    const desired = bindExistingArtifactIds(built.desired, live);
     const diff = diffNotionSync({
-      desired: built.desired,
+      desired,
       live,
       quarantinedPageIds: new Set(input.record.plan.quarantined.map((row) => row.sourceId)),
       snapshotPageIds: input.snapshotPageIds ?? built.pageIds,
