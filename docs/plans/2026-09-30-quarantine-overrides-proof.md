@@ -89,3 +89,23 @@ Itemised delta that landed (existing rows did not change):
 Assigned OUT that landed: 7 rows, net 83280000. The earlier 86300000 figure was the prior scratch, where the same bind failed. This dump has no pre-existing row for those project keys, so the rows insert once.
 
 Checks on this commit: `pnpm typecheck` 0, `pnpm test` 782 passed / 0 failed / 54 skipped, `pnpm --filter @ai-crm/web exec next build` 0. `ai_crm` schema_migrations has no 0027. `ai_crm` engagements still 35.
+
+## Independent verification — 2026-09-30 (검증냥, not the implementer)
+
+Context: fresh clone of `feat/quarantine-overrides` at `f34adb5`. Scratch `ai_crm_verifier_st01a0f245` restored from a read-only `pg_dump` of current `ai_crm` (35 engagements, migrations through 0026, no 0027), then 0027 SQL only. Not a write to `ai_crm`. Not a Notion write. Snapshot `notion-cfo-os-20260930T014053Z`. Flags on via the committed override file. Scratch dropped after this record.
+
+| check | result | evidence |
+|---|---|---|
+| New resolution tests fail before | FAIL_BEFORE (expected) | Parent `71d8c22` plus the new test file: 2 failed / 1 passed. Binding assertion got `SCHEMA_REJECT`; `bindExistingEngagementIds` is not a function. The passing test is re-run `alreadyApplied` only. |
+| New resolution tests pass after | PASS | `f34adb5` `apps/api/test/notion-engagement-identity.test.ts` 3 passed inside the full suite. |
+| `pnpm test` 0 failed | PASS | 780 passed / 0 failed / 54 skipped (109 files). Node v24.19.0 (engine wants 22). Developer count 782 passed was not reproduced. Not a failure of the 0-failed gate. |
+| Quarantine 39→9, same nine page ids | PASS | Flags off 39. Flags on 9. Page ids match the table above. |
+| Engagements 35→46, 0 duplicate `project_key` | PASS | 11 keys exist only after sync (`202607-GAMECHOSUN-HCI-RNWL` among them). Baseline dump has none of those 11. |
+| Finance totals | PASS | IN net 24486000 / vat 2448600 / gross 26934600 (n=5). OUT net 177492000 / vat 17749200 / gross 195241200 (n=17). First sync inserts 59, updates 2, archives 0, holds 0, settlementInserts 5. Re-run `alreadyApplied`, inserts 0. |
+| Finance FK | PASS | 18/22 rows have an `engagement_id` that exists. 4/22 are rule-2 `unassigned` with null `engagement_id` (not a dangling FK). |
+| Hometax gross gap is one row | PASS | 17 BuyHomeTax rows, gross 194911200. 195241200−194911200=330000. 16 gross amounts match. The only gap is page `3bb33ddb-7425-8114-8769-d2a1e0c9bac2` (넥시아스, approval tail `0855`): scratch gross 3630000 vs invoice gross 3300000. Invoice 작성일 and Notion 예상 출금일 are 2026-05-22. Recon date 2026-08-13 is Notion 실제 처리일, not a second invoice. Same page. Net gap on that row is 300000 (3300000 vs invoice supply 3000000); vat gap 30000. No second mismatched gross. |
+| Earlier assigned OUT 86300000 vs 83280000 | NOT a ledger row | The seven assigned OUT pages that landed sum to 83280000 (3300000+62350000+4730000+1580000+7300000+520000+3500000). 86300000−83280000=3020000. No finance amount in this snapshot is 3020000. The 86300000 figure in the prior scratch paragraph is not the sum of these seven nets. Do not carry it as a measured total. |
+
+`ai_crm` after this run: engagements still 35, schema_migrations has no 0027. Checked by SELECT. Not deployed. Not in owner use.
+
+Verdicts: tests-before NOT a product fail (it is the before state). Product checks PASS except the unreproduced 782 count (recorded, not a 0-failed fail). 86300000 claim FAIL as a number, does not change the landed totals. Release approval is not this note.
