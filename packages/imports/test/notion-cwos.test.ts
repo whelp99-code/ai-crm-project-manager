@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { NotionCwosImportError, NotionCwosImportPlanner, notionCwosHash, type NotionCwosSnapshot, type NotionSourceRow } from "../src/notion-cwos.js";
+import { NotionCwosImportError, NotionCwosImportPlanner, notionCwosHash, type NotionCwosSnapshot, type NotionOwnerOverrides, type NotionSourceRow } from "../src/notion-cwos.js";
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 
@@ -417,5 +419,104 @@ describe("NotionCwosImportPlanner", () => {
 
   it("uses stable hashes independent of object key order", () => {
     expect(notionCwosHash({ a: 1, b: { c: 2 } })).toBe(notionCwosHash({ b: { c: 2 }, a: 1 }));
+  });
+});
+
+const ownerOverrides = JSON.parse(readFileSync(fileURLToPath(new URL("../fixtures/notion-owner-overrides.json", import.meta.url)), "utf8")) as NotionOwnerOverrides;
+const ALL_RULES = { stage: true, unassignedFinance: true, accountActivity: true, nullExpectedDate: true, counterparty: true };
+const CARD_FEE = "f8033ddb-7425-8239-8038-01ba0c753851";
+const RENEWAL = "18533ddb-7425-82f8-9e3b-81bfc5ea54ce";
+const KVM = "3df33ddb-7425-8110-afb6-df19d305254c";
+
+function withRows(extra: Partial<Pick<NotionCwosSnapshot, "projects" | "activities" | "finance">>): NotionCwosSnapshot {
+  const base = snapshot();
+  return {
+    ...base,
+    projects: [...base.projects, ...(extra.projects ?? [])],
+    activities: [...base.activities, ...(extra.activities ?? [])],
+    finance: [...base.finance, ...(extra.finance ?? [])],
+  };
+}
+
+describe("owner quarantine overrides", () => {
+  it("keeps stage-less rows quarantined when the file is loaded but flags are off", () => {
+    const plan = new NotionCwosImportPlanner().plan(withRows({
+      projects: [{ sourceId: RENEWAL, properties: { "프로젝트명(Title)": "게임조선 HCI Renewal", 프로젝트ID: "202607-GAMECHOSUN-HCI-RNWL", "프로젝트 단계": "미분류" } }],
+    }), { rules: {}, overrides: ownerOverrides });
+    expect(plan.quarantined.find((row) => row.sourceId === RENEWAL)?.reasons).toContain("UNMAPPED_STAGE");
+    expect(plan.engagements.some((row) => row.legacySourceId === RENEWAL)).toBe(false);
+  });
+
+  it("maps only listed page ids and leaves the card-fee row on MISSING_PROJECT_KEY", () => {
+    const plan = new NotionCwosImportPlanner().plan(withRows({
+      projects: [
+        { sourceId: RENEWAL, properties: { "프로젝트명(Title)": "게임조선 HCI Renewal", 프로젝트ID: "202607-GAMECHOSUN-HCI-RNWL", "프로젝트 단계": "미분류" } },
+        { sourceId: KVM, properties: { "프로젝트명(Title)": "KVM IAG 내방·보안정책", 상태: "진행" } },
+        { sourceId: CARD_FEE, properties: { "프로젝트명(Title)": "[비프로젝트] 2월 카드사용료1", "프로젝트 단계": "보류", "고객·파트너": ["account-customer"] } },
+        { sourceId: "not-in-file", properties: { "프로젝트명(Title)": "미등록", "프로젝트 단계": "미분류", 프로젝트ID: "X" } },
+      ],
+    }), { rules: { stage: true }, overrides: ownerOverrides });
+    expect(plan.engagements.find((row) => row.legacySourceId === RENEWAL)).toMatchObject({ stage: "DELIVERY", engagementType: "renewal", sourceStage: "미분류" });
+    expect(plan.engagements.find((row) => row.legacySourceId === KVM)).toMatchObject({ stage: "DELIVERY", engagementType: "delivery", projectKey: "kvm-iag-visit-202610" });
+    expect(plan.quarantined.find((row) => row.sourceId === CARD_FEE)?.reasons).toEqual(["MISSING_PROJECT_KEY"]);
+    expect(plan.quarantined.find((row) => row.sourceId === "not-in-file")?.reasons).toContain("UNMAPPED_STAGE");
+    expect(ownerOverrides.stages[CARD_FEE]).toBeUndefined();
+  });
+
+  it("keeps rule-1 projects assigned and unassigns only empty relations", () => {
+    const plan = new NotionCwosImportPlanner().plan(withRows({
+      projects: [{ sourceId: RENEWAL, properties: { "프로젝트명(Title)": "게임조선 HCI Renewal", 프로젝트ID: "202607-GAMECHOSUN-HCI-RNWL", "프로젝트 단계": "미분류", 매입처: ["account-vendor"] } }],
+      finance: [
+        { sourceId: "3bb33ddb-7425-8171-9236-ca1618805be1", properties: { 거래명: "게임조선 매입", 구분: "매입", 금액: 1580000, 부가세: 158000, 상태: "청구", 프로젝트: [RENEWAL], 거래처: ["account-vendor"], "예상 출금일": "2026-07-14" } },
+        { sourceId: "3bb33ddb-7425-8105-8036-e363c2cf3766", properties: { 거래명: "한국정보인증", 구분: "매입", 금액: 100000, 부가세: 10000, 상태: "청구", 거래처: ["account-vendor"] } },
+      ],
+    }), { rules: { stage: true, unassignedFinance: true }, overrides: ownerOverrides });
+    const assigned = plan.financialItems.find((row) => row.legacySourceId === "3bb33ddb-7425-8171-9236-ca1618805be1");
+    expect(assigned?.engagementSourceId).toBe(RENEWAL);
+    expect(assigned?.importAssignment).toBeUndefined();
+    expect(plan.financialItems.find((row) => row.legacySourceId === "3bb33ddb-7425-8105-8036-e363c2cf3766")).toMatchObject({
+      engagementSourceId: null,
+      importAssignment: "unassigned",
+      netAmountKrw: "100000",
+      expectedDate: null,
+      provenance: { projectMappingStatus: "unassigned" },
+    });
+  });
+
+  it("does not null a date or invent a counterparty unless the page id is listed", () => {
+    const plan = new NotionCwosImportPlanner().plan(withRows({
+      finance: [
+        { sourceId: "3be33ddb-7425-818f-b474-c49f702b11de", properties: { 거래명: "동국대 선금", 구분: "매출", 금액: 9752000, 부가세: 975200, 상태: "청구", 프로젝트: ["project-1"], 거래처: ["account-customer"] } },
+        { sourceId: "dated-missing-not-listed", properties: { 거래명: "날짜 없음", 구분: "매출", 금액: 1000, 부가세: 100, 상태: "청구", 프로젝트: ["project-1"], 거래처: ["account-customer"] } },
+      ],
+    }), { rules: ALL_RULES, overrides: ownerOverrides });
+    expect(plan.financialItems.find((row) => row.legacySourceId === "3be33ddb-7425-818f-b474-c49f702b11de")).toMatchObject({ expectedDate: null, engagementSourceId: "project-1" });
+    expect(plan.quarantined.find((row) => row.sourceId === "dated-missing-not-listed")?.reasons).toContain("MISSING_REQUIRED_FIELD");
+  });
+
+  it("uses the listed 굿어스 account only when the row has no 거래처", () => {
+    const input = snapshot();
+    input.accounts.push({ sourceId: "3bb33ddb-7425-8100-a3f3-e7f2b285430c", properties: { "회사/조직명": "굿어스", 구분: "파트너" } });
+    input.finance.push({ sourceId: "3e933ddb-7425-81b5-8574-fe154243ead9", properties: { 거래명: "굿어스 매출", 구분: "매출", 금액: 780000, 부가세: 78000, 상태: "청구", "예상 입금일": "2026-11-15", 프로젝트: ["project-1"] } });
+    const plan = new NotionCwosImportPlanner().plan(input, { rules: { counterparty: true }, overrides: ownerOverrides });
+    expect(plan.financialItems.find((row) => row.legacySourceId === "3e933ddb-7425-81b5-8574-fe154243ead9")).toMatchObject({
+      accountSourceId: "3bb33ddb-7425-8100-a3f3-e7f2b285430c",
+      provenance: { accountSource: "owner_override" },
+    });
+  });
+
+  it("imports a listed account-level activity and leaves an unlisted orphan quarantined", () => {
+    const input = snapshot();
+    input.accounts.push({ sourceId: "3bb33ddb-7425-8146-96ea-e1ef2cb2ec0f", properties: { "회사/조직명": "넥시아스", 구분: "파트너" } });
+    input.activities.push(
+      { sourceId: "3bb33ddb-7425-8169-b337-e3d61fc20585", properties: { 요약: "홈택스", 유형: "메일 수신", 활동일: "2026-07-14" } },
+      { sourceId: "3bf33ddb-7425-8131-bf65-f9283e2e9dfa", properties: { 요약: "계정 없음", 유형: "메일 수신", 활동일: "2026-08-14" } },
+    );
+    const plan = new NotionCwosImportPlanner().plan(input, { rules: { accountActivity: true }, overrides: ownerOverrides });
+    expect(plan.activities.find((row) => row.legacySourceId === "3bb33ddb-7425-8169-b337-e3d61fc20585")).toMatchObject({
+      projectSourceIds: [],
+      accountSourceIds: ["3bb33ddb-7425-8146-96ea-e1ef2cb2ec0f"],
+    });
+    expect(plan.quarantined.find((row) => row.sourceId === "3bf33ddb-7425-8131-bf65-f9283e2e9dfa")?.reasons).toContain("ORPHAN_ACTIVITY");
   });
 });

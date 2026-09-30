@@ -12,6 +12,7 @@ import {
   notionCwosHash,
   resolveNotionWorkspaceId,
   type NotionCwosImportPlan,
+  type NotionCwosPlanOptions,
   type NotionCwosSnapshot,
 } from "@ai-crm/imports";
 import {

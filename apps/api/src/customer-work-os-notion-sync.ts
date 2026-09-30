@@ -99,7 +99,7 @@ export function buildNotionSyncDesired(plan: NotionCwosImportPlan, principalId: 
       fields: {
         name: item.name,
         project_key: item.projectKey,
-        engagement_type: importedEngagementType(item.stage),
+        engagement_type: item.engagementType ?? importedEngagementType(item.stage),
         stage: item.stage,
         source_stage: item.sourceStage ?? null,
         start_date: item.startDate ?? null,
@@ -170,9 +170,9 @@ export function buildNotionSyncDesired(plan: NotionCwosImportPlan, principalId: 
 
   for (const item of plan.activities) {
     if (quarantined.has(item.legacySourceId)) continue;
-    const engagementId = item.projectSourceIds.map((source) => engagementIds.get(source)).find(Boolean);
-    if (!engagementId) continue;
+    const engagementId = item.projectSourceIds.map((source) => engagementIds.get(source)).find(Boolean) ?? null;
     const accountId = item.accountSourceIds.map((source) => accountIds.get(source)).find(Boolean) ?? null;
+    if (!engagementId && !accountId) continue;
     desired.push({
       kind: "activity",
       id: item.id,
@@ -203,7 +203,7 @@ export function buildNotionSyncDesired(plan: NotionCwosImportPlan, principalId: 
       continue;
     }
     const engagementId = item.engagementSourceId ? engagementIds.get(item.engagementSourceId) ?? null : null;
-    if (!item.expectedDate) {
+    if (item.expectedDate === undefined) {
       holds.push({ notionPageId: item.legacySourceId, kind: "financial_item", reason: "MISSING_DATE" });
       continue;
     }
@@ -222,6 +222,7 @@ export function buildNotionSyncDesired(plan: NotionCwosImportPlan, principalId: 
         vat_amount_krw: item.vatAmountKrw,
         gross_amount_krw: item.grossAmountKrw,
         expected_date: item.expectedDate,
+        import_assignment: item.importAssignment ?? "assigned",
         revision: 1,
         evidence_ref: item.evidenceRefs[0] ?? item.sourceUrl ?? `notion://${item.legacySourceId}`,
       },
