@@ -120,14 +120,13 @@ describe("syncApprovedNotionPlan", () => {
   });
 });
 
-function seoulMidnight(isoDay: string): Date {
-  const [year, month, day] = isoDay.split("-").map(Number);
-  return new Date(year!, (month ?? 1) - 1, day);
+/** node-pg DATE: `new Date('YYYY-MM-DD')` is UTC midnight, independent of process TZ. */
+function pgDate(isoDay: string): Date {
+  return new Date(`${isoDay}T00:00:00.000Z`);
 }
 
 describe("notion sync canonical round-trip", () => {
   it("formats a DATE near midnight in Asia/Seoul as the calendar day", () => {
-    expect(new Date().getTimezoneOffset()).toBe(-540);
     const live = rowToLive("engagement", {
       id: "engagement-aaaaaaaa",
       notion_page_id: "page-1",
@@ -139,8 +138,8 @@ describe("notion sync canonical round-trip", () => {
       project_key: "P",
       engagement_type: "delivery",
       stage: "DELIVERY",
-      start_date: seoulMidnight("2025-12-01"),
-      target_date: seoulMidnight("2025-12-31"),
+      start_date: pgDate("2025-12-01"),
+      target_date: pgDate("2025-12-31"),
     });
     expect(live.fields.start_date).toBe("2025-12-01");
     expect(live.fields.target_date).toBe("2025-12-31");
@@ -259,7 +258,7 @@ function memoryPool() {
 function distort(row: Record<string, unknown>): Record<string, unknown> {
   const next: Record<string, unknown> = { ...row, archived_at: null };
   for (const [key, value] of Object.entries(next)) {
-    if (typeof value === "string" && DATE_COLUMNS.has(key)) next[key] = seoulMidnight(value.slice(0, 10));
+    if (typeof value === "string" && DATE_COLUMNS.has(key)) next[key] = pgDate(value.slice(0, 10));
     else if (typeof value === "string" && TIMESTAMP_COLUMNS.has(key) && /^\d{4}-\d{2}-\d{2}$/.test(value)) next[key] = new Date(`${value}T00:00:00.000Z`);
     else if (key === "metadata" && typeof value === "string") {
       const parsed = JSON.parse(value) as Record<string, unknown>;
