@@ -10,16 +10,15 @@ env:
 
 jobs:
   test:
-    # node 20 and 22 are both exercised as a cross-version signal. package.json
-    # pins engines.node to ">=22 <23"; pnpm only *warns* (does not fail) on an
-    # engine mismatch, and every step below has been verified green on node 20
-    # in addition to node 22 — see docs/ci/README.md for details/caveats.
+    # package.json engines.node is ">=22 <23". Node 20 cannot run
+    # `node --experimental-strip-types` (Node 22.6+), which the live-pg DATE
+    # parser child uses. Do not re-add 20 to this matrix.
     name: Package tests + web typecheck + e2e (node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 22]
+        node: [22]
 
     services:
       postgres:
