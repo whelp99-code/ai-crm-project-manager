@@ -1,3 +1,4 @@
+import { RecordList } from "../record-list";
 import { stageLabel } from "./labels";
 
 export const dynamic = "force-dynamic";
@@ -52,27 +53,21 @@ export default async function EngagementsPage() {
     <>
       <header>
         <h1>프로젝트 {result.count}</h1>
-        <p className="lead">정규 테이블의 프로젝트입니다. 동기화로 보관된 행은 이 목록에 없습니다.</p>
+        <p className="lead">노션에서 가져온 프로젝트 {result.count}건</p>
       </header>
       <section className="panel" aria-labelledby="engagement-list-title">
-        <h2 id="engagement-list-title">프로젝트 목록</h2>
+        <h2 id="engagement-list-title" className="visually-hidden">프로젝트 목록</h2>
         <p className="meta" data-testid="engagement-count">표시 {result.engagements.length} / 합계 {result.count}</p>
-        {result.engagements.length === 0 ? <p className="empty">표시할 프로젝트가 없습니다.</p> : (
-          <table className="data-table">
-            <thead>
-              <tr><th>이름</th><th>단계</th><th>계정</th></tr>
-            </thead>
-            <tbody>
-              {result.engagements.map((engagement) => (
-                <tr key={engagement.id}>
-                  <td data-label="이름">{engagement.name}</td>
-                  <td data-label="단계">{stageLabel(engagement.stage)}</td>
-                  <td data-label="계정">{engagement.account_name ?? <span className="empty">연결 계정 없음</span>}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+        <RecordList
+          placeholder="프로젝트 이름 검색"
+          empty={result.engagements.length === 0 ? "표시할 프로젝트가 없습니다." : "찾는 프로젝트가 없습니다."}
+          items={result.engagements.map((engagement) => ({
+            id: engagement.id,
+            name: engagement.name,
+            chips: [{ text: stageLabel(engagement.stage) }],
+            sub: engagement.account_name ?? "연결 계정 없음",
+          }))}
+        />
       </section>
     </>
   );

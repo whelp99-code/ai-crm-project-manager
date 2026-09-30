@@ -1,3 +1,4 @@
+import { RecordList } from "../record-list";
 import { directionLabel, formatKrw } from "./labels";
 
 export const dynamic = "force-dynamic";
@@ -45,12 +46,15 @@ async function loadFinance(): Promise<LoadResult> {
   }
 }
 
-function TotalCard({ title, totals, testId }: { title: string; totals: MoneyTotals; testId: string }) {
+function TotalCard({ title, totals, testId, tone }: { title: string; totals: MoneyTotals; testId: string; tone: "in" | "out" }) {
   return (
     <section className="panel" data-testid={testId}>
-      <h2>{title}</h2>
-      <p className="meta">공급가액 · 부가세 · 합계</p>
-      <p data-testid={`${testId}-figures`}>{formatKrw(totals.net)} / {formatKrw(totals.vat)} / {formatKrw(totals.gross)}원</p>
+      <h2><span className={`chip chip-${tone}`}>{title}</span></h2>
+      <p className="money-gross">{formatKrw(totals.gross)}원</p>
+      <p className="money-bits" data-testid={`${testId}-figures`}>
+        <span>공급가 {formatKrw(totals.net)}</span>
+        <span>부가세 {formatKrw(totals.vat)}</span>
+      </p>
     </section>
   );
 }
@@ -69,33 +73,31 @@ export default async function FinancePage() {
     <>
       <header>
         <h1>재무 {result.count}</h1>
-        <p className="lead">정규 테이블에서 집계한 금액입니다. 동기화로 보관된 행은 합계와 목록에 없습니다.</p>
+        <p className="lead">노션에서 가져온 금액 {result.count}건</p>
       </header>
       <div className="stack">
       <div className="grid">
-        <TotalCard title="매출" totals={result.totals.IN} testId="finance-in" />
-        <TotalCard title="매입" totals={result.totals.OUT} testId="finance-out" />
+        <TotalCard title="매출" totals={result.totals.IN} testId="finance-in" tone="in" />
+        <TotalCard title="매입" totals={result.totals.OUT} testId="finance-out" tone="out" />
       </div>
       <section className="panel" aria-labelledby="finance-list-title">
-        <h2 id="finance-list-title">재무 항목</h2>
+        <h2 id="finance-list-title" className="visually-hidden">재무 항목</h2>
         <p className="meta" data-testid="finance-count">표시 {result.items.length} / 합계 {result.count}</p>
-        {result.items.length === 0 ? <p className="empty">표시할 재무 항목이 없습니다.</p> : (
-          <table className="data-table">
-            <thead>
-              <tr><th>구분</th><th>금액</th><th>날짜</th><th>거래처</th></tr>
-            </thead>
-            <tbody>
-              {result.items.map((item) => (
-                <tr key={item.id}>
-                  <td data-label="구분">{directionLabel(item.direction)}</td>
-                  <td data-label="금액">{formatKrw(item.gross_amount_krw)}원</td>
-                  <td data-label="날짜">{item.expected_date}</td>
-                  <td data-label="거래처">{item.counterparty ?? <span className="empty">거래처 없음</span>}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+        <RecordList
+          placeholder="거래처 검색"
+          empty={result.items.length === 0 ? "표시할 재무 항목이 없습니다." : "찾는 거래처가 없습니다."}
+          items={result.items.map((item) => ({
+            id: item.id,
+            name: item.counterparty ?? "거래처 없음",
+            chips: [item.direction === "IN"
+              ? { text: directionLabel(item.direction), tone: "in" as const }
+              : item.direction === "OUT"
+                ? { text: directionLabel(item.direction), tone: "out" as const }
+                : { text: directionLabel(item.direction) }],
+            sub: item.expected_date,
+            amount: formatKrw(item.gross_amount_krw),
+          }))}
+        />
       </section>
       </div>
     </>
