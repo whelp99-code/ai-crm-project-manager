@@ -131,7 +131,8 @@ echo "required migrations: ${REQUIRED[*]}"
 
 (
   cd "$DEST"
-  pnpm install --frozen-lockfile
+  # app.env sets NODE_ENV=production, which would omit the TypeScript next build needs.
+  NODE_ENV=development pnpm install --frozen-lockfile
 )
 
 MISSING="$(cd "$DEST/apps/api" && node --input-type=module - "$DUMP_URL" "${REQUIRED[@]}" << 'JS'
