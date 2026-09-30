@@ -50,6 +50,42 @@ Itemised delta that landed (existing rows did not change):
 | OUT | 30000 | `3bb33ddb-7425-81ce-a93e-e34d030a9dfa` | rule 2 unassigned |
 | OUT | 1322000 | `3bb33ddb-7425-81fc-9089-cb70be2b9fe2` | rule 2 unassigned |
 
-Seven assigned OUT rows are in the plan (net 86300000) but did not land. Their engagements already exist in the restored dump under a different id with the same `project_key` (example: 게임조선 `engagement-580e2406` vs planned `engagement-3af71d0d`). Sync insert hit `cwos_engagements_workspace_id_project_key_key`, then the finance row failed its engagement FK. That is id drift in the dump, not an amount change. Do not apply this branch to `ai_crm` until that bind is verified.
+Seven assigned OUT rows are in the plan (net 86300000) but did not land on that scratch. Their engagements already exist there under a different id with the same `project_key` (example: 게임조선 `engagement-580e2406` vs planned `engagement-3af71d0d`). Sync insert hit `cwos_engagements_workspace_id_project_key_key`, then the finance row failed its engagement FK. That is id drift, not an amount change.
 
-Checks already recorded on `c23c070`: typecheck 0, `pnpm test` 779 passed / 0 failed, `next build` 0.
+## Engagement identity bind — 2026-09-30
+
+Sync now resolves an engagement before insert: Notion page id (including a `notion://` source ref), then `(workspace_id, project_key)`. It reuses that database id for the engagement and for finance/activity rows. If the planned id and the identity row both exist, the database identity wins and the mapping is logged. A second engagement is not inserted.
+
+Unit proof: existing row `engagement-580e2406` + planned `engagement-3af71d0d` with the same `project_key` → no engagement insert, finance `engagement_id` is `engagement-580e2406`, re-run `alreadyApplied` inserts 0. The raw workspace string `jm-business-crm` hashes to `engagement-580e2406`; the resolved workspace UUID hashes to `engagement-3af71d0d`.
+
+Scratch: read-only `pg_dump` of current `ai_crm` (0025/0026 + markers, 35 engagements) restored to `ai_crm_engagement_bind_scratch`, then 0027 only. Not a write to `ai_crm`. Not a Notion write. Scratch dropped after this record. Flags on, snapshot `notion-cfo-os-20260930T014053Z`.
+
+- Quarantined 9 (same nine page ids as above).
+- First sync: inserts 59, updates 2, archives 0, holds 0, settlementInserts 5. SCHEMA_REJECT 0.
+- Re-run: `alreadyApplied`, inserts 0, updates 0, archives 0, holds 0.
+- Engagements 35 → 46. Duplicate `(workspace_id, project_key)` groups: 0. Those 11 projects are the stage-override pages. They are not in current `ai_crm` (no `202607-GAMECHOSUN-HCI-RNWL`, no `engagement-580e2406`), so they are new rows, not twins of the baseline 35.
+- IN net 24486000 / vat 2448600 / gross 26934600 (n=5). Delta net +14772000.
+- OUT net 177492000 / vat 17749200 / gross 195241200 (n=17). Delta net +89732000.
+
+Itemised delta that landed (existing rows did not change):
+
+| direction | net | page id | why |
+|---|---:|---|---|
+| IN | 9752000 | `3be33ddb-7425-818f-b474-c49f702b11de` | rule 4, date null |
+| IN | 4240000 | `3d633ddb-7425-81e9-8d09-f8eae49e658d` | rule 4, date null |
+| IN | 780000 | `3e933ddb-7425-81b5-8574-fe154243ead9` | rule 5 |
+| OUT | 100000 | `3bb33ddb-7425-8105-8036-e363c2cf3766` | rule 2 unassigned |
+| OUT | 5000000 | `3bb33ddb-7425-816d-baaa-cbadd9db6758` | rule 2 unassigned |
+| OUT | 30000 | `3bb33ddb-7425-81ce-a93e-e34d030a9dfa` | rule 2 unassigned |
+| OUT | 1322000 | `3bb33ddb-7425-81fc-9089-cb70be2b9fe2` | rule 2 unassigned |
+| OUT | 3300000 | `3bb33ddb-7425-8114-8769-d2a1e0c9bac2` | assigned, new engagement |
+| OUT | 62350000 | `3bb33ddb-7425-813c-b878-cfba9da826e6` | assigned, new engagement |
+| OUT | 4730000 | `3bb33ddb-7425-8153-ad8b-d3f0fc6fbe02` | assigned, new engagement |
+| OUT | 1580000 | `3bb33ddb-7425-8171-9236-ca1618805be1` | assigned, 게임조선, engagement `engagement-3af71d0d` |
+| OUT | 7300000 | `3bb33ddb-7425-8184-be97-d2d4a1c54246` | assigned, new engagement |
+| OUT | 520000 | `3bb33ddb-7425-81b3-8dbc-f3541c1a473e` | assigned, new engagement |
+| OUT | 3500000 | `3bb33ddb-7425-81c7-bc3c-dc18d930e2fa` | assigned, new engagement |
+
+Assigned OUT that landed: 7 rows, net 83280000. The earlier 86300000 figure was the prior scratch, where the same bind failed. This dump has no pre-existing row for those project keys, so the rows insert once.
+
+Checks on this commit: `pnpm typecheck` 0, `pnpm test` 782 passed / 0 failed / 54 skipped, `pnpm --filter @ai-crm/web exec next build` 0. `ai_crm` schema_migrations has no 0027. `ai_crm` engagements still 35.
