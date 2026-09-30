@@ -94,11 +94,35 @@ export function notionSyncFieldEqual(left: unknown, right: unknown): boolean {
   return normalizeField(left) === normalizeField(right);
 }
 
+function canonicalJson(value: unknown): string {
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
+  if (typeof value === "bigint") return JSON.stringify(value.toString());
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).filter((key) => record[key] !== undefined).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function normalizeTimestamp(value: unknown): string | null {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value !== "string") return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return `${value}T00:00:00.000Z`;
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value)) {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+  }
+  return null;
+}
+
 function normalizeField(value: unknown): string {
   if (value === null || value === undefined) return "";
-  if (value instanceof Date) return value.toISOString();
   if (typeof value === "bigint") return value.toString();
-  if (typeof value === "object") return JSON.stringify(value);
+  const timestamp = normalizeTimestamp(value);
+  if (timestamp) return timestamp;
+  if (typeof value === "object") return canonicalJson(value);
   return String(value);
 }
 

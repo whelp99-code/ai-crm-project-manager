@@ -248,7 +248,7 @@ const LIVE_SQL: Record<NotionSyncKind, string> = {
   account: `SELECT id, notion_page_id, notion_parent_page_id, archived_at, version, synced_version,
       name, normalized_name, kinds, status, source_ref FROM cwos_accounts WHERE workspace_id = $1`,
   engagement: `SELECT id, notion_page_id, notion_parent_page_id, archived_at, version, synced_version,
-      name, project_key, engagement_type, stage, start_date, target_date FROM cwos_engagements WHERE workspace_id = $1`,
+      name, project_key, engagement_type, stage, start_date::text AS start_date, target_date::text AS target_date FROM cwos_engagements WHERE workspace_id = $1`,
   party: `SELECT id, notion_page_id, notion_parent_page_id, archived_at,
       role, is_primary, commercial_responsibility, delivery_responsibility FROM cwos_engagement_parties WHERE workspace_id = $1`,
   activity: `SELECT id, notion_page_id, notion_parent_page_id, archived_at,
@@ -258,18 +258,26 @@ const LIVE_SQL: Record<NotionSyncKind, string> = {
   artifact: `SELECT id, notion_page_id, notion_parent_page_id, archived_at, version, synced_version,
       title, status, storage_uri, metadata FROM cwos_artifacts WHERE workspace_id = $1`,
   financial_item: `SELECT id, notion_page_id, notion_parent_page_id, archived_at,
-      net_amount_krw, vat_amount_krw, gross_amount_krw, expected_date, lifecycle, category, engagement_id, account_id, direction
+      net_amount_krw, vat_amount_krw, gross_amount_krw, expected_date::text AS expected_date, lifecycle, category, engagement_id, account_id, direction
       FROM cwos_financial_items WHERE workspace_id = $1`,
 };
 
+export function rowToLive(kind: NotionSyncKind, row: Record<string, unknown>): NotionSyncLiveEntity {
+  return rowToLiveImpl(kind, row);
+}
+
 function dateText(value: unknown): string | null {
   if (value === null || value === undefined) return null;
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (value instanceof Date) {
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+    return `${value.getFullYear()}-${month}-${day}`;
+  }
   const text = String(value);
   return text.length >= 10 ? text.slice(0, 10) : text;
 }
 
-function rowToLive(kind: NotionSyncKind, row: Record<string, unknown>): NotionSyncLiveEntity {
+function rowToLiveImpl(kind: NotionSyncKind, row: Record<string, unknown>): NotionSyncLiveEntity {
   const notionPageId = row.notion_page_id == null ? "" : String(row.notion_page_id);
   const parent = row.notion_parent_page_id == null ? null : String(row.notion_parent_page_id);
   const pageId = parent ?? (notionPageId || "");
@@ -314,7 +322,7 @@ async function loadLive(connection: NotionSyncConnection, workspaceId: string): 
   const live: NotionSyncLiveEntity[] = [];
   for (const kind of Object.keys(LIVE_SQL) as NotionSyncKind[]) {
     const result = await connection.query<Record<string, unknown>>(LIVE_SQL[kind], [workspaceId]);
-    for (const row of result.rows) live.push(rowToLive(kind, row));
+    for (const row of result.rows) live.push(rowToLiveImpl(kind, row));
   }
   const settlements = await connection.query<{ financial_item_id: string }>(
     `SELECT financial_item_id FROM cwos_settlements WHERE workspace_id = $1`,

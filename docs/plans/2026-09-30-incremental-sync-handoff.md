@@ -34,3 +34,15 @@ updates 37은 제목 변경 1건보다 많다. 행 단위 원인 분류는 하�
 
 - `ai_crm` apply, 일일 잡 연결, override 플래그 on, reversal 실행, 읽기 API의 archive 제외
 - 이 재검사는 독립 감사가 아니다
+
+## 2026-09-30 정합 비교 수정 (검증냥 FAILED 대응)
+
+원인: DATE를 `toISOString().slice(0,10)`으로 읽어 Asia/Seoul에서 하루가 밀리고, `occurred_at` 날짜 문자열과 `T00:00:00.000Z`를 그대로 비교하며, artifact metadata JSON 키 순서가 달랐다. 비교를 느슨하게 끄지 않고 정규형으로 맞췄다. DATE는 `::text`와 로컬 달력 일로 읽고, 타임스탬프는 양쪽을 UTC 자정 ISO로 맞추며, metadata는 키 정렬 JSON으로 비교한다.
+
+- `pnpm --filter @ai-crm/api run typecheck`와 `@ai-crm/imports` typecheck: exit 0
+- `pnpm test`: exit 1. 745 passed, 1 failed, 52 skipped. 실패는 `worker-start.integration.test.ts` SIGTERM 15s timeout만.
+- scratch `ai_crm_sync_canon_20260930` (덤프 + 0024 + 0025, 증명 후 DROP). `ai_crm` 미사용. Notion 미호출.
+  - 1차: inserts 189, updates 0, archives 0, holds 0, settlementInserts 5
+  - 내용 동일·plan hash만 다름: inserts 0, updates 0, archives 0, holds 0. engagement `max(version)=1`, `version>1` 0건
+  - 합성(추가 1, 제목 1, 제거 1, 정산 금액 +1000): inserts 1, updates 1, archives 1, holds 1 (`AMOUNT_OR_DIRECTION`)
+  - 재실행: alreadyApplied true, runs 3 유지, settlement_sum 50010400 유지

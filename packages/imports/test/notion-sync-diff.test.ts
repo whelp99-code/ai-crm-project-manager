@@ -128,4 +128,60 @@ describe("diffNotionSync", () => {
     expect(present.updates).toHaveLength(0);
     expect(present.archives).toHaveLength(0);
   });
+
+  it("treats a date string and UTC midnight timestamp as the same occurred_at", () => {
+    const desired: NotionSyncEntity = {
+      kind: "activity",
+      id: "activity-aaaaaaaa",
+      notionPageId: "act-1",
+      pageId: "act-1",
+      fields: { activity_type: "note", occurred_at: "2025-12-01", summary: "memo", engagement_id: "engagement-aaaaaaaa", account_id: null },
+    };
+    const live: NotionSyncLiveEntity = {
+      ...desired,
+      version: 1,
+      syncedVersion: 1,
+      fields: { ...desired.fields, occurred_at: "2025-12-01T00:00:00.000Z" },
+    };
+    const diff = diffNotionSync({ desired: [desired], live: [live], snapshotPageIds: new Set(["act-1"]) });
+    expect(diff.updates).toHaveLength(0);
+    expect(diff.inserts).toHaveLength(0);
+  });
+
+  it("does not update artifact metadata when only JSON key order differs", () => {
+    const desired: NotionSyncEntity = {
+      kind: "artifact",
+      id: "artifact-aaaaaaaa",
+      notionPageId: "artifact:page:quote:abcd1234",
+      pageId: "page-1",
+      fields: { title: "quote imported from Notion", status: "REVIEW", storage_uri: "notion://file", metadata: { legacySourceId: "page-1", importedFrom: "Notion" } },
+    };
+    const live: NotionSyncLiveEntity = {
+      ...desired,
+      version: 1,
+      syncedVersion: 1,
+      fields: { ...desired.fields, metadata: { importedFrom: "Notion", legacySourceId: "page-1" } },
+    };
+    const diff = diffNotionSync({ desired: [desired], live: [live], snapshotPageIds: new Set(["page-1"]) });
+    expect(diff.updates).toHaveLength(0);
+  });
+
+  it("still updates artifact metadata when a value changes", () => {
+    const desired: NotionSyncEntity = {
+      kind: "artifact",
+      id: "artifact-aaaaaaaa",
+      notionPageId: "artifact:page:quote:abcd1234",
+      pageId: "page-1",
+      fields: { title: "quote imported from Notion", status: "REVIEW", storage_uri: "notion://file", metadata: { legacySourceId: "page-1", importedFrom: "Notion" } },
+    };
+    const live: NotionSyncLiveEntity = {
+      ...desired,
+      version: 1,
+      syncedVersion: 1,
+      fields: { ...desired.fields, metadata: { importedFrom: "Other", legacySourceId: "page-1" } },
+    };
+    const diff = diffNotionSync({ desired: [desired], live: [live], snapshotPageIds: new Set(["page-1"]) });
+    expect(diff.updates).toHaveLength(1);
+    expect(diff.updates[0]?.fields.metadata).toEqual({ legacySourceId: "page-1", importedFrom: "Notion" });
+  });
 });

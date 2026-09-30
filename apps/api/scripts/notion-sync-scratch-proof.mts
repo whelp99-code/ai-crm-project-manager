@@ -99,6 +99,25 @@ async function main() {
     pool, record: first, principalId: "notion-sync-proof", snapshotSha256: snapshot.snapshotHash,
   });
   const afterFirst = await counts(first.workspaceId);
+  const unchangedSnapshot = {
+    ...snapshot,
+    snapshotId: `${snapshot.snapshotId}-unchanged`,
+    snapshotHash: `${snapshot.snapshotHash}-unchanged`,
+  };
+  const unchanged = await syncApprovedNotionPlan({
+    pool,
+    record: recordFrom(unchangedSnapshot),
+    principalId: "notion-sync-proof",
+    snapshotSha256: unchangedSnapshot.snapshotHash,
+  });
+  const afterUnchanged = await counts(first.workspaceId);
+  const versionClient = await pool.connect();
+  const versions = await versionClient.query(
+    `SELECT max(version) AS max_version, count(*) FILTER (WHERE version > 1) AS bumped
+       FROM cwos_engagements WHERE workspace_id = $1::uuid`,
+    [first.workspaceId],
+  );
+  versionClient.release();
   const synthetic = mutate(snapshot);
   const second = recordFrom(synthetic.next);
   const changed = await syncApprovedNotionPlan({
@@ -136,6 +155,9 @@ async function main() {
     workspaceId: first.workspaceId,
     first: applied,
     afterFirst,
+    unchanged,
+    afterUnchanged,
+    versionsAfterUnchanged: versions.rows[0],
     changed,
     afterSecond,
     rerun,
