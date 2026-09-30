@@ -5,6 +5,7 @@
  */
 import { readFileSync } from "node:fs";
 import pg from "pg";
+import { installPgDateStringParser } from "../src/pg-date-types.ts";
 import { NotionCwosImportPlanner, resolveNotionWorkspaceId, type NotionCwosSnapshot } from "@ai-crm/imports";
 import { syncApprovedNotionPlan } from "../src/customer-work-os-notion-sync.js";
 import type { NotionPlanRecord } from "../src/customer-work-os-notion.js";
@@ -16,6 +17,7 @@ if (!connectionString) throw new Error("NOTION_SYNC_SCRATCH_URL is required");
 if (new URL(connectionString).pathname === "/ai_crm") throw new Error("refusing ai_crm");
 
 const planner = new NotionCwosImportPlanner();
+installPgDateStringParser(pg);
 const pool = new pg.Pool({ connectionString, max: 1, application_name: "notion-sync-scratch-proof" });
 
 function recordFrom(snapshot: NotionCwosSnapshot): NotionPlanRecord {

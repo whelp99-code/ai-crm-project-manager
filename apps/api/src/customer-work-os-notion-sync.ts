@@ -313,14 +313,14 @@ export function rowToLive(kind: NotionSyncKind, row: Record<string, unknown>): N
 
 function dateText(value: unknown): string | null {
   if (value === null || value === undefined) return null;
-  // node-pg parses DATE as UTC midnight (`new Date('YYYY-MM-DD')`). Local getters shift that calendar day west of UTC.
-  if (value instanceof Date) {
-    const month = String(value.getUTCMonth() + 1).padStart(2, "0");
-    const day = String(value.getUTCDate()).padStart(2, "0");
-    return `${value.getUTCFullYear()}-${month}-${day}`;
+  // DATE must already be the raw YYYY-MM-DD text. node-pg's default OID 1082
+  // parser is a local-midnight Date, not UTC midnight; getUTC* on that Date
+  // shifts the day in Asia/Seoul. installPgDateStringParser rejects that path
+  // at the driver, so a Date here is a missing parser, not a value to format.
+  if (typeof value !== "string") {
+    throw new Error(`DATE column must be a YYYY-MM-DD string, got ${Object.prototype.toString.call(value)}`);
   }
-  const text = String(value);
-  return text.length >= 10 ? text.slice(0, 10) : text;
+  return value.length >= 10 ? value.slice(0, 10) : value;
 }
 
 function rowToLiveImpl(kind: NotionSyncKind, row: Record<string, unknown>): NotionSyncLiveEntity {

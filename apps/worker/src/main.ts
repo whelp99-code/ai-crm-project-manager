@@ -41,6 +41,7 @@
  * No user-facing HTTP server is started. See docs/ops/worker.md.
  */
 import { pathToFileURL } from "node:url";
+import { installPgDateStringParser } from "./pg-date-types.js";
 import {
   ActionRegistry,
   GovernanceAuthorizationService,
@@ -228,6 +229,7 @@ export async function loadGovernance(
   if (!PoolCtor) {
     throw new Error("pg module loaded but Pool export was missing");
   }
+  installPgDateStringParser(pgMod);
 
   const rawPool = new PoolCtor({ connectionString: databaseUrl });
   let rawAdminPool: RealPgPool | undefined;

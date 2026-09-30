@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { installPgDateStringParser } from "./pg-date-types.js";
 import { CustomerWorkOsError, type ApprovalReceipt } from "@ai-crm/domain/customer-work-os";
 import {
   canDecideCustomerWorkOsControl,
@@ -500,6 +501,7 @@ export async function createPgCustomerWorkOsControlServiceFromEnvironment(): Pro
   const module = await dynamicImport("pg");
   const Pool = module.Pool as new (options: { connectionString: string; max: number; application_name: string }) => SqlPool;
   if (!Pool) throw new CustomerWorkOsError("PG_DRIVER_UNAVAILABLE", "pg Pool export is unavailable");
+  installPgDateStringParser(module);
   const max = Number(process.env.CWOS_CONTROL_PG_POOL_MAX ?? 3);
   if (!Number.isInteger(max) || max < 1 || max > 20) throw new CustomerWorkOsError("INVALID_CONFIG", "CWOS_CONTROL_PG_POOL_MAX must be 1..20");
   return new PgCustomerWorkOsControlService(new Pool({ connectionString, max, application_name: "ai-crm-cwos-controls" }));

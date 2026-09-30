@@ -120,13 +120,8 @@ describe("syncApprovedNotionPlan", () => {
   });
 });
 
-/** node-pg DATE: `new Date('YYYY-MM-DD')` is UTC midnight, independent of process TZ. */
-function pgDate(isoDay: string): Date {
-  return new Date(`${isoDay}T00:00:00.000Z`);
-}
-
 describe("notion sync canonical round-trip", () => {
-  it("formats a DATE near midnight in Asia/Seoul as the calendar day", () => {
+  it("keeps a DATE column that arrived as YYYY-MM-DD text", () => {
     const live = rowToLive("engagement", {
       id: "engagement-aaaaaaaa",
       notion_page_id: "page-1",
@@ -138,11 +133,28 @@ describe("notion sync canonical round-trip", () => {
       project_key: "P",
       engagement_type: "delivery",
       stage: "DELIVERY",
-      start_date: pgDate("2025-12-01"),
-      target_date: pgDate("2025-12-31"),
+      start_date: "2025-12-01",
+      target_date: "2025-12-31",
     });
     expect(live.fields.start_date).toBe("2025-12-01");
     expect(live.fields.target_date).toBe("2025-12-31");
+  });
+
+  it("refuses a Date for a DATE column instead of guessing UTC midnight", () => {
+    expect(() => rowToLive("engagement", {
+      id: "engagement-aaaaaaaa",
+      notion_page_id: "page-1",
+      notion_parent_page_id: null,
+      archived_at: null,
+      version: 1,
+      synced_version: 1,
+      name: "경월",
+      project_key: "P",
+      engagement_type: "delivery",
+      stage: "DELIVERY",
+      start_date: new Date("2025-12-01T00:00:00.000Z"),
+      target_date: "2025-12-31",
+    })).toThrow(/YYYY-MM-DD string/);
   });
 
   it("does not rewrite an unchanged snapshot loaded back as pg dates and reordered metadata", async () => {
@@ -258,7 +270,7 @@ function memoryPool() {
 function distort(row: Record<string, unknown>): Record<string, unknown> {
   const next: Record<string, unknown> = { ...row, archived_at: null };
   for (const [key, value] of Object.entries(next)) {
-    if (typeof value === "string" && DATE_COLUMNS.has(key)) next[key] = pgDate(value.slice(0, 10));
+    if (typeof value === "string" && DATE_COLUMNS.has(key)) next[key] = value.slice(0, 10);
     else if (typeof value === "string" && TIMESTAMP_COLUMNS.has(key) && /^\d{4}-\d{2}-\d{2}$/.test(value)) next[key] = new Date(`${value}T00:00:00.000Z`);
     else if (key === "metadata" && typeof value === "string") {
       const parsed = JSON.parse(value) as Record<string, unknown>;
