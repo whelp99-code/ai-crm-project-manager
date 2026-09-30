@@ -148,6 +148,7 @@ function scriptedDatabase(seed: NotionPlanRecord) {
         return ok([toRow(next)], 1);
       }
       if (sql.startsWith("INSERT INTO cwos_notion_import_plan_events")) return ok([], 1);
+      if (/^INSERT INTO cwos_(accounts|contacts|engagements|engagement_parties|activities|commitments|artifacts|financial_items|settlements)\b/.test(sql)) return ok([], 1);
       throw new Error(`unhandled sql: ${sql}`);
     },
     release() {},

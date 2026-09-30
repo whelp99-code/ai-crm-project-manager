@@ -2,6 +2,7 @@ import {
   CustomerWorkOsError,
   type ApprovalReceipt,
   type CustomerWorkOsService,
+  type CustomerWorkOsState,
 } from "@ai-crm/domain/customer-work-os";
 import {
   NOTION_CWOS_WORKSPACE_NAMESPACE,
@@ -15,6 +16,7 @@ import {
   CustomerWorkOsRuntimeManager,
   type SnapshotTransaction,
 } from "./customer-work-os-runtime.js";
+import { writeNormalizedCustomerWorkState } from "./customer-work-os-normalized-write.js";
 
 export interface NotionPlanRecord {
   id: string;
@@ -471,6 +473,8 @@ export async function applyApprovedNotionPlan(input: {
     throw new CustomerWorkOsError("INVALID_STATE", "only the current APPROVED plan can be applied");
   }
   const appliedAt = input.now ?? new Date().toISOString();
+  const excludeSourceIds = new Set(current.plan.quarantined.map((row) => row.sourceId));
+  let domain: CustomerWorkOsState | undefined;
   const result = await input.manager.mutate({
     workspaceId: input.workspaceId,
     principalId: input.principalId,
@@ -478,13 +482,19 @@ export async function applyApprovedNotionPlan(input: {
     requestHash: current.planHash,
     operationId: "NOTION_IMPORT_APPLY",
     now: appliedAt,
-    operation: (service) => applyNotionPlanToDomain({
-      service,
-      record: current,
-      principalId: input.principalId,
-      receipt: input.receipt,
-    }),
+    operation: (service) => {
+      const payload = applyNotionPlanToDomain({
+        service,
+        record: current,
+        principalId: input.principalId,
+        receipt: input.receipt,
+      });
+      domain = service.exportState();
+      return payload;
+    },
     participate: async (connection) => {
+      if (!domain) throw new CustomerWorkOsError("INVALID_STATE", "normalized write has no domain state");
+      await writeNormalizedCustomerWorkState(connection, domain, { excludeSourceIds });
       await input.participate?.(connection);
       await input.service.markAppliedInTransaction(connection, input.workspaceId, input.planId, input.expectedVersion, input.principalId, input.reason, appliedAt);
     },
