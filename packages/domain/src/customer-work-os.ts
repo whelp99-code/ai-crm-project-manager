@@ -79,7 +79,7 @@ export interface EngagementParty {
 export interface Activity {
   id: string;
   workspaceId: string;
-  engagementId: string;
+  engagementId: string | null;
   accountId?: string;
   type: "email_in" | "email_out" | "call" | "meeting" | "message" | "visit" | "document" | "decision" | "note" | "finance";
   occurredAt: string;
@@ -347,7 +347,8 @@ export interface FinancialItem {
   netAmountKrw: MoneyKrw;
   vatAmountKrw: MoneyKrw;
   grossAmountKrw: MoneyKrw;
-  expectedDate: string;
+  expectedDate: string | null;
+  importAssignment?: "assigned" | "unassigned";
   contractualDueDate?: string;
   sourceArtifactId?: string;
   sourcePurchaseOrderId?: string;
@@ -556,7 +557,8 @@ export class CustomerWorkOsService {
 
   recordActivity(input: Activity): Activity {
     this.ensureNew(this.activities, input.id, "activity");
-    this.engagement(input.workspaceId, input.engagementId);
+    if (input.engagementId) this.engagement(input.workspaceId, input.engagementId);
+    else if (!input.accountId) throw new CustomerWorkOsError("ACCOUNT_REQUIRED", "account-level activity requires accountId");
     if (input.accountId) this.account(input.workspaceId, input.accountId);
     required(input.summary, "activity.summary");
     if (input.aiConfidence !== undefined && (input.aiConfidence < 0 || input.aiConfidence > 1)) {
@@ -1024,7 +1026,9 @@ export class CustomerWorkOsService {
     const vat = nonNegative(input.vatAmountKrw, "VAT amount");
     const gross = nonNegative(input.grossAmountKrw, "gross amount");
     if (net + vat !== gross) throw new CustomerWorkOsError("VAT_MISMATCH", "gross amount must equal net plus VAT");
-    if (input.engagementId === null && input.category !== "overhead") throw new CustomerWorkOsError("PROJECT_BINDING_REQUIRED", "non-overhead financial item requires engagementId");
+    if (input.engagementId === null && input.category !== "overhead" && input.importAssignment !== "unassigned") {
+      throw new CustomerWorkOsError("PROJECT_BINDING_REQUIRED", "non-overhead financial item requires engagementId");
+    }
     if (input.sourcePurchaseOrderId) {
       const order = this.owned(this.purchaseOrders, input.workspaceId, input.sourcePurchaseOrderId, "purchase order");
       if (input.engagementId !== order.engagementId || input.direction !== "OUT") throw new CustomerWorkOsError("PURCHASE_BINDING_MISMATCH", "purchase-linked financial item must be OUT for the same engagement");
@@ -1271,7 +1275,7 @@ export class CustomerWorkOsService {
     if (map.has(id)) throw new CustomerWorkOsError("DUPLICATE_ID", `${label} already exists: ${id}`);
   }
 
-  private byEngagement<T extends { workspaceId: string; engagementId: string }>(map: Map<string, T>, workspaceId: string, engagementId: string): T[] {
+  private byEngagement<T extends { workspaceId: string; engagementId: string | null }>(map: Map<string, T>, workspaceId: string, engagementId: string): T[] {
     return [...map.values()]
       .filter((item) => item.workspaceId === workspaceId && item.engagementId === engagementId)
       .map((item) => copy(item));

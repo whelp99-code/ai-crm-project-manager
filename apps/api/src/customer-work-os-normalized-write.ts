@@ -138,11 +138,11 @@ export async function writeNormalizedCustomerWorkState(
     }
     await insertIgnoringConflict(connection, "cwos_financial_items", [
       "id", "workspace_id", "engagement_id", "account_id", "direction", "category", "lifecycle",
-      "net_amount_krw", "vat_amount_krw", "gross_amount_krw", "expected_date", "contractual_due_date",
+      "net_amount_krw", "vat_amount_krw", "gross_amount_krw", "expected_date", "import_assignment", "contractual_due_date",
       "source_artifact_id", "source_purchase_order_id", "revision", "evidence_ref",
     ], [
       item.id, item.workspaceId, item.engagementId, item.accountId, item.direction, item.category, item.lifecycle,
-      item.netAmountKrw, item.vatAmountKrw, item.grossAmountKrw, item.expectedDate, item.contractualDueDate ?? null,
+      item.netAmountKrw, item.vatAmountKrw, item.grossAmountKrw, item.expectedDate, item.importAssignment ?? "assigned", item.contractualDueDate ?? null,
       item.sourceArtifactId ?? null, item.sourcePurchaseOrderId ?? null, item.revision, item.evidenceRef ?? null,
     ]);
   }

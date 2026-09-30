@@ -12,6 +12,7 @@ import {
   notionCwosHash,
   resolveNotionWorkspaceId,
   type NotionCwosImportPlan,
+  type NotionCwosPlanOptions,
   type NotionCwosSnapshot,
 } from "@ai-crm/imports";
 import {
@@ -288,10 +289,10 @@ export class CustomerWorkOsNotionService {
   private readonly planner = new NotionCwosImportPlanner();
   constructor(private readonly store: NotionPlanStore, private readonly now: () => string = () => new Date().toISOString()) {}
 
-  async plan(snapshot: NotionCwosSnapshot, principalId: string): Promise<NotionPlanRecord> {
+  async plan(snapshot: NotionCwosSnapshot, principalId: string, options?: NotionCwosPlanOptions): Promise<NotionPlanRecord> {
     const resolved = resolveNotionWorkspaceId(snapshot.workspaceId);
     const boundSnapshot = resolved.rewritten ? { ...snapshot, workspaceId: resolved.workspaceId } : snapshot;
-    const plan = this.planner.plan(boundSnapshot);
+    const plan = this.planner.plan(boundSnapshot, options);
     const workspaceBinding = {
       algorithm: "uuidv5" as const,
       namespace: NOTION_CWOS_WORKSPACE_NAMESPACE,
@@ -410,7 +411,7 @@ export function applyNotionPlanToDomain(input: {
       workspaceId: item.workspaceId,
       projectKey: item.projectKey,
       name: item.name,
-      type: importedEngagementType(item.stage),
+      type: item.engagementType ?? importedEngagementType(item.stage),
       stage: item.stage as Parameters<CustomerWorkOsService["createEngagement"]>[0]["stage"],
       ...(item.sourceStage ? { sourceStage: item.sourceStage } : {}),
       health: "normal",
@@ -438,9 +439,21 @@ export function applyNotionPlanToDomain(input: {
   }
 
   for (const item of plan.activities) {
-    const engagementId = item.projectSourceIds.map((source) => engagementIds.get(source)).find(Boolean);
-    if (!engagementId) continue;
-    service.recordActivity({ id: item.id, workspaceId: item.workspaceId, engagementId, type: item.activityType, occurredAt: item.occurredAt, summary: item.summary, ...(item.decision ? { decision: item.decision } : {}), evidenceRef: item.sourceUrl ?? `notion://${item.legacySourceId}`, humanReviewed: true });
+    const engagementId = item.projectSourceIds.map((source) => engagementIds.get(source)).find(Boolean) ?? null;
+    const accountId = item.accountSourceIds.map((source) => accountIds.get(source)).find(Boolean);
+    if (!engagementId && !accountId) continue;
+    service.recordActivity({
+      id: item.id,
+      workspaceId: item.workspaceId,
+      engagementId,
+      ...(accountId ? { accountId } : {}),
+      type: item.activityType,
+      occurredAt: item.occurredAt,
+      summary: item.summary,
+      ...(item.decision ? { decision: item.decision } : {}),
+      evidenceRef: item.sourceUrl ?? `notion://${item.legacySourceId}`,
+      humanReviewed: true,
+    });
   }
 
   for (const item of plan.financialItems) {
@@ -448,10 +461,14 @@ export function applyNotionPlanToDomain(input: {
     const engagementId = item.engagementSourceId ? engagementIds.get(item.engagementSourceId) ?? null : null;
     const accountId = accountIds.get(item.accountSourceId);
     if (!accountId) throw new CustomerWorkOsError("IMPORT_MAPPING_MISSING", `account mapping missing for ${item.accountSourceId}`);
-    service.addFinancialItem({ id: item.id, workspaceId: item.workspaceId, engagementId, accountId, direction: item.direction, category: item.category as Parameters<CustomerWorkOsService["addFinancialItem"]>[0]["category"], lifecycle: item.lifecycle as Parameters<CustomerWorkOsService["addFinancialItem"]>[0]["lifecycle"], netAmountKrw: item.netAmountKrw, vatAmountKrw: item.vatAmountKrw, grossAmountKrw: item.grossAmountKrw, expectedDate: item.expectedDate ?? plan.capturedAt.slice(0, 10), revision: 1, evidenceRef: item.evidenceRefs[0] ?? item.sourceUrl ?? `notion://${item.legacySourceId}` });
+    const expectedDate = item.expectedDate === null ? null : item.expectedDate ?? plan.capturedAt.slice(0, 10);
+    service.addFinancialItem({ id: item.id, workspaceId: item.workspaceId, engagementId, accountId, direction: item.direction, category: item.category as Parameters<CustomerWorkOsService["addFinancialItem"]>[0]["category"], lifecycle: item.lifecycle as Parameters<CustomerWorkOsService["addFinancialItem"]>[0]["lifecycle"], netAmountKrw: item.netAmountKrw, vatAmountKrw: item.vatAmountKrw, grossAmountKrw: item.grossAmountKrw, expectedDate, ...(item.importAssignment ? { importAssignment: item.importAssignment } : {}), revision: 1, evidenceRef: item.evidenceRefs[0] ?? item.sourceUrl ?? `notion://${item.legacySourceId}` });
     if (item.lifecycle === "SETTLED") {
-      service.recordSettlement({ id: `settlement-${notionCwosHash(item.id).slice(-8)}`, workspaceId: item.workspaceId, financialItemId: item.id, direction: item.direction, amountKrw: item.grossAmountKrw, settledAt: item.actualDate ?? item.expectedDate ?? plan.capturedAt.slice(0, 10), accountOrCard: "notion-import", evidenceRef: item.evidenceRefs[0] ?? item.sourceUrl ?? `notion://${item.legacySourceId}` });
-      settlements += 1;
+      const settledAt = item.actualDate ?? (item.expectedDate === null ? undefined : item.expectedDate);
+      if (settledAt) {
+        service.recordSettlement({ id: `settlement-${notionCwosHash(item.id).slice(-8)}`, workspaceId: item.workspaceId, financialItemId: item.id, direction: item.direction, amountKrw: item.grossAmountKrw, settledAt, accountOrCard: "notion-import", evidenceRef: item.evidenceRefs[0] ?? item.sourceUrl ?? `notion://${item.legacySourceId}` });
+        settlements += 1;
+      }
     }
   }
 

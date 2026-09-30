@@ -99,7 +99,7 @@ export function buildNotionSyncDesired(plan: NotionCwosImportPlan, principalId: 
       fields: {
         name: item.name,
         project_key: item.projectKey,
-        engagement_type: importedEngagementType(item.stage),
+        engagement_type: item.engagementType ?? importedEngagementType(item.stage),
         stage: item.stage,
         source_stage: item.sourceStage ?? null,
         start_date: item.startDate ?? null,
@@ -170,9 +170,9 @@ export function buildNotionSyncDesired(plan: NotionCwosImportPlan, principalId: 
 
   for (const item of plan.activities) {
     if (quarantined.has(item.legacySourceId)) continue;
-    const engagementId = item.projectSourceIds.map((source) => engagementIds.get(source)).find(Boolean);
-    if (!engagementId) continue;
+    const engagementId = item.projectSourceIds.map((source) => engagementIds.get(source)).find(Boolean) ?? null;
     const accountId = item.accountSourceIds.map((source) => accountIds.get(source)).find(Boolean) ?? null;
+    if (!engagementId && !accountId) continue;
     desired.push({
       kind: "activity",
       id: item.id,
@@ -203,7 +203,7 @@ export function buildNotionSyncDesired(plan: NotionCwosImportPlan, principalId: 
       continue;
     }
     const engagementId = item.engagementSourceId ? engagementIds.get(item.engagementSourceId) ?? null : null;
-    if (!item.expectedDate) {
+    if (item.expectedDate === undefined) {
       holds.push({ notionPageId: item.legacySourceId, kind: "financial_item", reason: "MISSING_DATE" });
       continue;
     }
@@ -222,6 +222,7 @@ export function buildNotionSyncDesired(plan: NotionCwosImportPlan, principalId: 
         vat_amount_krw: item.vatAmountKrw,
         gross_amount_krw: item.grossAmountKrw,
         expected_date: item.expectedDate,
+        import_assignment: item.importAssignment ?? "assigned",
         revision: 1,
         evidence_ref: item.evidenceRefs[0] ?? item.sourceUrl ?? `notion://${item.legacySourceId}`,
       },
@@ -268,6 +269,86 @@ function sameArtifactSlot(desired: NotionSyncEntity, live: NotionSyncLiveEntity)
   if (live.fields.artifact_type !== desired.fields.artifact_type) return false;
   if (desired.fields.engagement_id && live.fields.engagement_id && live.fields.engagement_id !== desired.fields.engagement_id) return false;
   return true;
+}
+
+export interface EngagementIdMapping {
+  plannedId: string;
+  resolvedId: string;
+  via: "notion_page_id" | "project_key";
+}
+
+function pageKey(row: { notionPageId: string; pageId: string }): string {
+  return row.pageId || row.notionPageId;
+}
+
+function sourceRefPage(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  return trimmed.startsWith("notion://") ? trimmed.slice("notion://".length) : trimmed;
+}
+
+function notionPageMatches(live: NotionSyncLiveEntity, desired: NotionSyncEntity): boolean {
+  const wanted = pageKey(desired);
+  if (!wanted) return false;
+  if (live.notionPageId === wanted || live.pageId === wanted) return true;
+  return sourceRefPage(live.fields.source_ref) === wanted;
+}
+
+function sameSlot(live: NotionSyncLiveEntity, row: NotionSyncEntity, keys: readonly string[]): boolean {
+  return keys.every((key) => live.fields[key] != null && live.fields[key] === row.fields[key]);
+}
+
+/**
+ * Reuse the engagement already stored for this Notion page, then for this project key.
+ * Never insert a second engagement. If the planned id and the identity row both exist, keep the database identity row.
+ */
+export function bindExistingEngagementIds(
+  desired: readonly NotionSyncEntity[],
+  live: readonly NotionSyncLiveEntity[],
+): { desired: NotionSyncEntity[]; mappings: EngagementIdMapping[] } {
+  const liveEngagements = live.filter((row) => row.kind === "engagement");
+  const used = new Set<string>();
+  const mappings: EngagementIdMapping[] = [];
+  const idMap = new Map<string, string>();
+  const rebound = desired.map((row) => {
+    if (row.kind !== "engagement") return row;
+    const byPage = liveEngagements.find((item) => !used.has(item.id) && notionPageMatches(item, row));
+    const projectKey = row.fields.project_key;
+    const byKey = typeof projectKey === "string" && projectKey.trim() !== ""
+      ? liveEngagements.find((item) => !used.has(item.id) && item.fields.project_key === projectKey)
+      : undefined;
+    const byPlanned = liveEngagements.find((item) => item.id === row.id);
+    const match = byPage ?? byKey ?? (byPlanned && !used.has(byPlanned.id) ? byPlanned : undefined);
+    if (!match) return row;
+    used.add(match.id);
+    if (match.id === row.id) return row;
+    const via = byPage && byPage.id === match.id ? "notion_page_id" : "project_key";
+    mappings.push({ plannedId: row.id, resolvedId: match.id, via });
+    idMap.set(row.id, match.id);
+    return { ...row, id: match.id };
+  });
+  const rewritten = rebound.map((row) => {
+    const engagementId = row.fields.engagement_id;
+    if (typeof engagementId !== "string" || !idMap.has(engagementId)) return row;
+    return { ...row, fields: { ...row.fields, engagement_id: idMap.get(engagementId) } };
+  });
+  return { desired: rebindDerivedRows(rewritten, live), mappings };
+}
+
+function rebindDerivedRows(desired: NotionSyncEntity[], live: readonly NotionSyncLiveEntity[]): NotionSyncEntity[] {
+  const used = new Set<string>();
+  return desired.map((row) => {
+    if (row.kind !== "party" && row.kind !== "commitment") return row;
+    const peers = live.filter((item) => item.kind === row.kind);
+    const byPage = peers.find((item) => !used.has(item.id) && item.notionPageId !== "" && item.notionPageId === row.notionPageId);
+    const bySlot = row.kind === "party"
+      ? peers.find((item) => !used.has(item.id) && sameSlot(item, row, ["engagement_id", "account_id", "role"]))
+      : peers.find((item) => !used.has(item.id) && sameSlot(item, row, ["engagement_id", "description"]));
+    const match = byPage ?? bySlot;
+    if (!match) return row;
+    used.add(match.id);
+    return match.id === row.id ? row : { ...row, id: match.id };
+  });
 }
 
 /** Keep first-load ids that hashed the signed URL. Match by page id plus stable file path, never insert a twin. */
@@ -524,7 +605,11 @@ export async function syncApprovedNotionPlan(input: {
     }
     const built = buildNotionSyncDesired(input.record.plan, input.principalId);
     const { live, settled } = await loadLive(connection, input.record.workspaceId);
-    const desired = bindExistingArtifactIds(built.desired, live);
+    const boundEngagements = bindExistingEngagementIds(built.desired, live);
+    for (const mapping of boundEngagements.mappings) {
+      console.info(`notion-sync engagement mapping planned=${mapping.plannedId} resolved=${mapping.resolvedId} via=${mapping.via}`);
+    }
+    const desired = bindExistingArtifactIds(boundEngagements.desired, live);
     const diff = diffNotionSync({
       desired,
       live,

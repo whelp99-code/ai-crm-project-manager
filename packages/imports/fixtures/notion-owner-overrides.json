@@ -1,0 +1,45 @@
+{
+  "stages": {
+    "18533ddb-7425-82f8-9e3b-81bfc5ea54ce": { "stage": "DELIVERY", "engagementType": "renewal" },
+    "3bb33ddb-7425-8118-9cf4-d7622716e939": { "stage": "DELIVERY", "engagementType": "maintenance" },
+    "3bb33ddb-7425-8175-a784-fc54b383fd73": { "stage": "DELIVERY", "engagementType": "renewal" },
+    "3bb33ddb-7425-81e1-ad70-d0e428a67110": { "stage": "DELIVERY", "engagementType": "renewal" },
+    "5c733ddb-7425-8352-8caa-812c5ee07fd6": { "stage": "DELIVERY", "engagementType": "renewal" },
+    "b3733ddb-7425-82ec-bbf8-81d87d495c57": { "stage": "DELIVERY", "engagementType": "renewal" },
+    "37c33ddb-7425-8333-9ecc-01cf18b74ec4": { "stage": "DELIVERY", "engagementType": "delivery" },
+    "3bb33ddb-7425-8196-a6f0-fbbb932136d6": { "stage": "DELIVERY", "engagementType": "delivery" },
+    "9be33ddb-7425-83cc-91cb-01a18f75ac9b": { "stage": "DELIVERY", "engagementType": "delivery" },
+    "3df33ddb-7425-8110-afb6-df19d305254c": { "stage": "DELIVERY", "engagementType": "delivery", "projectKey": "kvm-iag-visit-202610" },
+    "3bb33ddb-7425-810c-ab77-c5fa278eff31": { "stage": "DELIVERY", "engagementType": "delivery" }
+  },
+  "unassignedFinance": [
+    "3bb33ddb-7425-8105-8036-e363c2cf3766",
+    "3bb33ddb-7425-816d-baaa-cbadd9db6758",
+    "3bb33ddb-7425-81ce-a93e-e34d030a9dfa",
+    "3bb33ddb-7425-81fc-9089-cb70be2b9fe2",
+    "3e933ddb-7425-81ba-b104-cd246dd9fa99",
+    "3bb33ddb-7425-8114-8769-d2a1e0c9bac2",
+    "3bb33ddb-7425-813c-b878-cfba9da826e6",
+    "3bb33ddb-7425-8153-ad8b-d3f0fc6fbe02",
+    "3bb33ddb-7425-8171-9236-ca1618805be1",
+    "3bb33ddb-7425-8184-be97-d2d4a1c54246",
+    "3bb33ddb-7425-81b3-8dbc-f3541c1a473e",
+    "3bb33ddb-7425-81c7-bc3c-dc18d930e2fa",
+    "3d633ddb-7425-8132-a2ce-f85bc88156c2",
+    "3d633ddb-7425-8146-bb0b-f4fa2f8cdf6a",
+    "3e933ddb-7425-8169-b757-e95319c581e2",
+    "3e933ddb-7425-81b8-b88c-f753f5399575"
+  ],
+  "accountActivities": {
+    "3bb33ddb-7425-8169-b337-e3d61fc20585": { "accountSourceId": "3bb33ddb-7425-8146-96ea-e1ef2cb2ec0f" },
+    "3bb33ddb-7425-81c8-9813-ee1b2951fc80": { "accountSourceId": "3bb33ddb-7425-8146-96ea-e1ef2cb2ec0f" },
+    "3bb33ddb-7425-81d3-99c3-c6b03c1d348f": { "accountSourceId": "3bb33ddb-7425-81c8-b8f3-e1e3ffc3cf47" }
+  },
+  "nullExpectedDate": [
+    "3be33ddb-7425-818f-b474-c49f702b11de",
+    "3d633ddb-7425-81e9-8d09-f8eae49e658d"
+  ],
+  "counterparties": {
+    "3e933ddb-7425-81b5-8574-fe154243ead9": { "accountSourceId": "3bb33ddb-7425-8100-a3f3-e7f2b285430c" }
+  }
+}
