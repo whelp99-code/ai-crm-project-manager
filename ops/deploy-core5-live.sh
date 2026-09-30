@@ -234,6 +234,19 @@ switched=1
 systemctl --user restart core5-api.service core5-web.service
 sleep 3
 
+wait_http() {
+  local url="$1"
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -fsS "$url" >/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "refusing: ${url} did not become ready" >&2
+  return 1
+}
+wait_http "${HEALTH_URL}/health"
 curl -fsS "${HEALTH_URL}/health" | grep -q '"status":"ok"'
 curl -fsS "${HEALTH_URL}/ready" | grep -q '"status":"ready"'
 COUNT="$(curl -fsS \
@@ -241,6 +254,8 @@ COUNT="$(curl -fsS \
   -H "x-workspace-id: ${WORKSPACE_ID}" \
   "${HEALTH_URL}/api/cwos/accounts" | python3 -c 'import json,sys; print(json.load(sys.stdin)["count"])')"
 echo "accounts count=${COUNT}"
-curl -fsS "${WEB_URL}/accounts" | grep -q "계정 ${COUNT}"
+wait_http "${WEB_URL}/accounts"
+curl -fsS "${WEB_URL}/accounts" | python3 -c 'import re,sys; count=sys.argv[1]; html=re.sub(r"<!--.*?-->", "", sys.stdin.read());
+raise SystemExit(0 if f"계정 {count}" in html else 1)' "$COUNT"
 trap - ERR
 echo "deploy ok sha=${SHA} count=${COUNT} backup=${DUMP_PATH}"
