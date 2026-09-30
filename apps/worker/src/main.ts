@@ -461,12 +461,30 @@ async function main(): Promise<void> {
   if (Number.isFinite(intervalMs) && intervalMs > 0) {
     console.info("worker.interval_start", JSON.stringify({ intervalMs, durable: Boolean(runtime.govRepo) }));
     await runOnce(runtime);
-    setInterval(() => {
+    const timer = setInterval(() => {
       runOnce(runtime).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         console.error("worker.tick_failed", message);
       });
     }, intervalMs);
+    // `pnpm start` is `sh -c`. Without `exec`, SIGTERM stops pnpm/sh and
+    // orphans this process (interval + inherited stdio keep the tree up).
+    // When the signal does reach us, drop the interval and the pg pool
+    // before exiting with the conventional 128+signal code.
+    let stopping = false;
+    const shutdown = (signal: NodeJS.Signals) => {
+      if (stopping) return;
+      stopping = true;
+      clearInterval(timer);
+      runtime.closePool().catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("worker.shutdown_failed", message);
+      }).finally(() => {
+        process.exit(signal === "SIGINT" ? 130 : 143);
+      });
+    };
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
+    process.on("SIGINT", () => shutdown("SIGINT"));
     return;
   }
 
