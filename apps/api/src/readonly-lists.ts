@@ -17,10 +17,11 @@ export function archivedPredicate(columnPresent: boolean, alias: string): string
   return columnPresent ? `${alias}.archived_at IS NULL` : "TRUE";
 }
 
-export function engagementsSql(columnPresent: boolean): string {
+export function engagementsSql(columnPresent: boolean, sourceStageColumn = false): string {
   const archived = archivedPredicate(columnPresent, "e");
   const partyArchived = archivedPredicate(columnPresent, "p");
-  return `SELECT e.id, e.name, e.stage, acct.account_name
+  const sourceStage = sourceStageColumn ? "e.source_stage" : "NULL::text AS source_stage";
+  return `SELECT e.id, e.name, e.stage, ${sourceStage}, acct.account_name
             FROM cwos_engagements e
             LEFT JOIN LATERAL (
               SELECT a.name AS account_name
