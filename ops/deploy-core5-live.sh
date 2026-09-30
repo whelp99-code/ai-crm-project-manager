@@ -121,16 +121,26 @@ if [[ ${#REQUIRED[@]} -eq 0 ]]; then
 fi
 echo "required migrations: ${REQUIRED[*]}"
 
-MISSING="$(python3 - "$DUMP_URL" "${REQUIRED[@]}" << 'PY'
-import subprocess, sys
-url = sys.argv[1]
-required = sys.argv[2:]
-sql = "SELECT id FROM schema_migrations"
-proc = subprocess.run(["psql", url, "-At", "-c", sql], check=True, capture_output=True, text=True)
-applied = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
-missing = [item for item in required if item not in applied]
-print("\n".join(missing))
-PY
+(
+  cd "$DEST"
+  pnpm install --frozen-lockfile
+)
+
+MISSING="$(cd "$DEST/apps/api" && node --input-type=module - "$DUMP_URL" "${REQUIRED[@]}" << 'JS'
+import pg from "pg";
+const url = process.argv[2];
+const required = process.argv.slice(3);
+const pool = new pg.Pool({ connectionString: url, max: 1 });
+try {
+  const result = await pool.query("SELECT id FROM schema_migrations");
+  const applied = new Set(result.rows.map((row) => row.id));
+  for (const item of required) {
+    if (!applied.has(item)) console.log(item);
+  }
+} finally {
+  await pool.end();
+}
+JS
 )"
 if [[ -n "$MISSING" ]]; then
   echo "refusing: unapplied required migrations:" >&2
@@ -142,7 +152,6 @@ echo "migration check ok"
 
 (
   cd "$DEST"
-  pnpm install --frozen-lockfile
   pnpm --filter @ai-crm/web build
 )
 
