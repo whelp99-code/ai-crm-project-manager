@@ -19,6 +19,14 @@ REPO_URL="${CORE5_REPO_URL:-https://github.com/whelp99-code/ai-crm-project-manag
 HEALTH_URL="${CORE5_HEALTH_URL:-http://127.0.0.1:4312}"
 WEB_URL="${CORE5_WEB_URL:-http://127.0.0.1:4313}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+PG_DUMP="${CORE5_PG_DUMP:-/home/jm/.local/pg-bootstrap/extract16/usr/lib/postgresql/16/bin/pg_dump}"
+if [[ ! -x "$PG_DUMP" ]]; then
+  PG_DUMP="$(command -v pg_dump || true)"
+fi
+if [[ -z "$PG_DUMP" || ! -x "$PG_DUMP" ]]; then
+  echo "refusing: pg_dump not found" >&2
+  exit 1
+fi
 
 if [[ ! -x "$NODE_BIN" ]]; then
   echo "refusing: Node 22 binary missing at $NODE_BIN" >&2
@@ -38,7 +46,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
-export PATH="${NODE_DIR}:${PATH}"
+export PATH="${NODE_DIR}:/usr/bin:/bin:${PATH}"
 umask 077
 
 resolve_sha() {
@@ -87,7 +95,7 @@ if [[ -z "$DUMP_URL" ]]; then
   exit 1
 fi
 DUMP_PATH="${BACKUP_DIR}/ai_crm-before-deploy-${SHORT}-${STAMP}.dump"
-pg_dump --format=custom --no-owner --file="$DUMP_PATH" "$DUMP_URL"
+"$PG_DUMP" --format=custom --no-owner --file="$DUMP_PATH" "$DUMP_URL"
 chmod 0600 "$DUMP_PATH"
 echo "backup ${DUMP_PATH} bytes=$(wc -c < "$DUMP_PATH") mode=$(stat -c %a "$DUMP_PATH")"
 

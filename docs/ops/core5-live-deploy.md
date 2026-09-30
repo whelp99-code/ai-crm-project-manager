@@ -20,7 +20,7 @@ Secrets stay in `/home/jm/.config/core5/app.env`. The script does not copy that 
 ops/deploy-core5-live.sh <branch-or-40-char-sha>
 ```
 
-Overrides: `CORE5_NODE_BIN`, `CORE5_APP_ROOT`, `CORE5_ENV_FILE`, `CORE5_BACKUP_DIR`, `CORE5_REPO_URL`, `CORE5_HEALTH_URL`, `CORE5_WEB_URL`.
+Overrides: `CORE5_NODE_BIN`, `CORE5_PG_DUMP`, `CORE5_APP_ROOT`, `CORE5_ENV_FILE`, `CORE5_BACKUP_DIR`, `CORE5_REPO_URL`, `CORE5_HEALTH_URL`, `CORE5_WEB_URL`. Default `pg_dump` is the local PostgreSQL 16 client, because this host image does not ship `psql` or `pg_dump` on `PATH`.
 
 ## Rollback
 
