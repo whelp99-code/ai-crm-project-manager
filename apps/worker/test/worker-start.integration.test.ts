@@ -78,8 +78,14 @@ describe("worker package start script", () => {
 
     expect(output).toContain("worker.interval_start");
     expect(output).toContain('"intervalMs":25');
+    const closed = once(child, "close") as Promise<[number | null, NodeJS.Signals | null]>;
     child.kill("SIGTERM");
-    const [code, signal] = await once(child, "close") as [number | null, NodeJS.Signals | null];
+    const [code, signal] = await Promise.race([
+      closed,
+      new Promise<[number | null, NodeJS.Signals | null]>((_, reject) => {
+        setTimeout(() => reject(new Error(`worker did not exit after SIGTERM:\n${output}`)), 5_000);
+      }),
+    ]);
     // pnpm may expose SIGTERM directly or translate it to the conventional
     // 128 + signal-number exit code; either means the script did not mask it.
     expect(signal === "SIGTERM" || code === 143).toBe(true);
