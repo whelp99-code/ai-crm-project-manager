@@ -178,6 +178,9 @@ rollback() {
   fi
   systemctl --user daemon-reload
   systemctl --user restart core5-api.service core5-web.service
+  if [[ -f "$PROXY_UNIT" ]]; then
+    systemctl --user restart core5-tailscale-proxy.service
+  fi
   sleep 2
   curl -fsS "${HEALTH_URL}/health" >/dev/null || echo "rollback health check failed" >&2
   exit 1
@@ -232,6 +235,9 @@ PY
 systemctl --user daemon-reload
 switched=1
 systemctl --user restart core5-api.service core5-web.service
+if [[ -f "$PROXY_UNIT" ]]; then
+  systemctl --user restart core5-tailscale-proxy.service
+fi
 sleep 3
 
 wait_http() {
