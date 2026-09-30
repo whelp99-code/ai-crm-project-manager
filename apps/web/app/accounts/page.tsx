@@ -1,3 +1,5 @@
+import { kindLabel, parseKinds, statusLabel } from "./labels";
+
 export const dynamic = "force-dynamic";
 
 interface AccountRow {
@@ -55,16 +57,22 @@ export default async function AccountsPage() {
       <section className="panel" aria-labelledby="account-list-title">
         <h2 id="account-list-title">계정 목록</h2>
         <p className="meta" data-testid="account-count">표시 {result.accounts.length} / 합계 {result.count}</p>
-        <table>
+        <table className="account-table">
           <thead>
             <tr><th>이름</th><th>상태</th><th>구분</th></tr>
           </thead>
           <tbody>
             {result.accounts.map((account) => (
               <tr key={account.id}>
-                <td>{account.name}</td>
-                <td>{account.status}</td>
-                <td>{account.kinds}</td>
+                <td data-label="이름">{account.name}</td>
+                <td data-label="상태">{statusLabel(account.status)}</td>
+                <td data-label="구분">
+                  <span className="chips">
+                    {parseKinds(account.kinds).map((kind) => (
+                      <span className="chip" key={kind}>{kindLabel(kind)}</span>
+                    ))}
+                  </span>
+                </td>
               </tr>
             ))}
           </tbody>
