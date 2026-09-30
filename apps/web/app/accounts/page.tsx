@@ -1,3 +1,4 @@
+import { RecordList } from "../record-list";
 import { kindLabel, parseKinds, statusLabel } from "./labels";
 
 export const dynamic = "force-dynamic";
@@ -52,31 +53,24 @@ export default async function AccountsPage() {
     <>
       <header>
         <h1>계정 {result.count}</h1>
-        <p className="lead">Notion 스냅샷에서 정규 테이블로 반입된 계정입니다. 격리된 행은 이 목록에 없습니다.</p>
+        <p className="lead">노션에서 가져온 고객 {result.count}곳</p>
       </header>
       <section className="panel" aria-labelledby="account-list-title">
-        <h2 id="account-list-title">계정 목록</h2>
+        <h2 id="account-list-title" className="visually-hidden">계정 목록</h2>
         <p className="meta" data-testid="account-count">표시 {result.accounts.length} / 합계 {result.count}</p>
-        <table className="account-table">
-          <thead>
-            <tr><th>이름</th><th>상태</th><th>구분</th></tr>
-          </thead>
-          <tbody>
-            {result.accounts.map((account) => (
-              <tr key={account.id}>
-                <td data-label="이름">{account.name}</td>
-                <td data-label="상태">{statusLabel(account.status)}</td>
-                <td data-label="구분">
-                  <span className="chips">
-                    {parseKinds(account.kinds).map((kind) => (
-                      <span className="chip" key={kind}>{kindLabel(kind)}</span>
-                    ))}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <RecordList
+          placeholder="이름 검색"
+          empty="찾는 계정이 없습니다."
+          items={result.accounts.map((account) => ({
+            id: account.id,
+            name: account.name,
+            chips: [
+              { text: statusLabel(account.status) },
+              ...parseKinds(account.kinds).map((kind) => ({ text: kindLabel(kind) })),
+            ],
+            sub: "",
+          }))}
+        />
       </section>
     </>
   );
