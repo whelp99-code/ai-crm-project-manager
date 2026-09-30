@@ -96,7 +96,7 @@ export interface NotionFinanceProvenance extends NotionProvenance {
   evidenceStatus?: FinanceEvidenceStatus;
   projectMappingStatus?: string;
   expectedDateSource?: "actual_date";
-  accountSource?: "project_party";
+  accountSource?: "project_party" | "owner_override";
 }
 
 export interface AccountImportRecord {
@@ -136,6 +136,8 @@ export interface EngagementImportRecord {
   projectKey: string;
   name: string;
   stage: string;
+  /** Set only by an owner stage override. Apply must not recompute type from stage when this is present. */
+  engagementType?: "inquiry" | "opportunity" | "consulting" | "delivery" | "support" | "maintenance" | "renewal" | "internal";
   /** Original Notion 프로젝트 단계. Mapped `stage` collapses 매입발주 and 수행/검수. */
   sourceStage?: string;
   priority?: string;
@@ -183,7 +185,8 @@ export interface FinancialItemImportRecord {
   netAmountKrw: string;
   vatAmountKrw: string;
   grossAmountKrw: string;
-  expectedDate?: string;
+  expectedDate: string | null;
+  importAssignment?: "assigned" | "unassigned";
   actualDate?: string;
   evidenceRefs: string[];
   sourceFingerprint: string;
@@ -520,8 +523,48 @@ function financeCategory(direction: "IN" | "OUT", memo: string): string {
 }
 
 
+export interface NotionOwnerStageOverride {
+  stage: string;
+  engagementType: NonNullable<EngagementImportRecord["engagementType"]>;
+  projectKey?: string;
+}
+
+export interface NotionOwnerOverrides {
+  stages: Record<string, NotionOwnerStageOverride>;
+  unassignedFinance: string[];
+  accountActivities: Record<string, { accountSourceId: string }>;
+  nullExpectedDate: string[];
+  counterparties: Record<string, { accountSourceId: string }>;
+}
+
+export interface NotionCwosPlanRules {
+  stage: boolean;
+  unassignedFinance: boolean;
+  accountActivity: boolean;
+  nullExpectedDate: boolean;
+  counterparty: boolean;
+}
+
+export interface NotionCwosPlanOptions {
+  rules?: Partial<NotionCwosPlanRules>;
+  overrides?: NotionOwnerOverrides;
+}
+
+const ALLOWED_OVERRIDE_STAGES = new Set(PROJECT_STAGES.values());
+const ALLOWED_OVERRIDE_TYPES = new Set(["inquiry", "opportunity", "consulting", "delivery", "support", "maintenance", "renewal", "internal"]);
+
+export const NOTION_OWNER_RULES_OFF: NotionCwosPlanRules = {
+  stage: false,
+  unassignedFinance: false,
+  accountActivity: false,
+  nullExpectedDate: false,
+  counterparty: false,
+};
+
 export class NotionCwosImportPlanner {
-  plan(snapshot: NotionCwosSnapshot): NotionCwosImportPlan {
+  plan(snapshot: NotionCwosSnapshot, options?: NotionCwosPlanOptions): NotionCwosImportPlan {
+    const rules: NotionCwosPlanRules = { ...NOTION_OWNER_RULES_OFF, ...options?.rules };
+    const overrides = options?.overrides;
     if (!snapshot.workspaceId.trim() || !snapshot.snapshotId.trim() || !snapshot.snapshotHash.trim()) {
       throw new NotionCwosImportError("INVALID_SNAPSHOT", "workspaceId, snapshotId and snapshotHash are required");
     }
@@ -601,7 +644,8 @@ export class NotionCwosImportPlanner {
           quarantine("engagement", row, ["MISSING_REQUIRED_FIELD"], "project name is missing");
           continue;
         }
-        const key = text(row.properties, ["프로젝트ID", "프로젝트 ID", "Project Key"]);
+        const stageOverride = rules.stage ? overrides?.stages[legacySourceId] : undefined;
+        const key = text(row.properties, ["프로젝트ID", "프로젝트 ID", "Project Key"]) ?? stageOverride?.projectKey;
         const relations = {
           generic: stringArray(row.properties, ["고객·파트너", "고객", "accountSourceIds"]),
           billed: stringArray(row.properties, ["매출처"]),
@@ -631,12 +675,19 @@ export class NotionCwosImportPlanner {
           continue;
         }
         const stageLabel = text(row.properties, ["프로젝트 단계"]);
-        if (!stageLabel) {
+        let stage = stageLabel ? PROJECT_STAGES.get(stageLabel) : undefined;
+        let engagementType: EngagementImportRecord["engagementType"];
+        if (stageOverride) {
+          if (!ALLOWED_OVERRIDE_STAGES.has(stageOverride.stage) || !ALLOWED_OVERRIDE_TYPES.has(stageOverride.engagementType)) {
+            quarantine("engagement", row, ["UNMAPPED_STAGE"], "owner stage override is outside the existing stage and engagement_type checks");
+            continue;
+          }
+          stage = stageOverride.stage;
+          engagementType = stageOverride.engagementType;
+        } else if (!stageLabel) {
           quarantine("engagement", row, ["MISSING_REQUIRED_FIELD"], "프로젝트 단계 is missing");
           continue;
-        }
-        const stage = PROJECT_STAGES.get(stageLabel);
-        if (!stage) {
+        } else if (!stage) {
           quarantine("engagement", row, ["UNMAPPED_STAGE"], `프로젝트 단계 ${stageLabel} has no core5 stage`);
           continue;
         }
@@ -664,7 +715,8 @@ export class NotionCwosImportPlanner {
           projectKey: key,
           name,
           stage,
-          sourceStage: stageLabel,
+          ...(engagementType ? { engagementType } : {}),
+          ...(stageLabel ? { sourceStage: stageLabel } : {}),
           ...(priority !== undefined ? { priority } : {}),
           ...(startDate !== undefined ? { startDate } : {}),
           ...(targetDate !== undefined ? { targetDate } : {}),
@@ -689,10 +741,14 @@ export class NotionCwosImportPlanner {
       try {
         const legacySourceId = sourceId(row);
         const projectIds = stringArray(row.properties, ["프로젝트", "projectSourceIds"]);
-        const accountIds = stringArray(row.properties, ["고객·파트너", "accountSourceIds"]);
+        let accountIds = stringArray(row.properties, ["고객·파트너", "accountSourceIds"]);
+        const accountActivity = rules.accountActivity ? overrides?.accountActivities[legacySourceId] : undefined;
         if (projectIds.length === 0) {
-          quarantine("activity", row, ["ORPHAN_ACTIVITY"], "activity has no project relation; cwos_activities.engagement_id is required");
-          continue;
+          if (!accountActivity || !accountSourceIds.has(accountActivity.accountSourceId)) {
+            quarantine("activity", row, ["ORPHAN_ACTIVITY"], "activity has no project relation; cwos_activities.engagement_id is required");
+            continue;
+          }
+          if (!accountIds.includes(accountActivity.accountSourceId)) accountIds = [accountActivity.accountSourceId, ...accountIds];
         }
         const unknownProjects = projectIds.filter((relation) => !projectSourceIds.has(relation));
         const unknownAccounts = accountIds.filter((relation) => !accountSourceIds.has(relation));
@@ -759,18 +815,27 @@ export class NotionCwosImportPlanner {
         const projectRelations = stringArray(row.properties, ["프로젝트", "projectSourceIds"]);
         const accountRelations = stringArray(row.properties, ["거래처", "accountSourceIds"]);
         const category = financeCategory(direction, name);
-        const engagementSourceId = projectRelations[0] ?? null;
+        const listedForUnassigned = rules.unassignedFinance && overrides?.unassignedFinance.includes(legacySourceId) === true;
+        let engagementSourceId = projectRelations[0] ?? null;
+        let unassigned = false;
         if (engagementSourceId === null) {
-          orphanRelations += 1;
-          quarantine("financial_item", row, ["ORPHAN_FINANCE"], "project financial item has no project relation");
-          continue;
+          if (!listedForUnassigned) {
+            orphanRelations += 1;
+            quarantine("financial_item", row, ["ORPHAN_FINANCE"], "project financial item has no project relation");
+            continue;
+          }
+          unassigned = true;
+        } else if (!projectSourceIds.has(engagementSourceId)) {
+          if (!listedForUnassigned) {
+            orphanRelations += 1;
+            quarantine("financial_item", row, ["UNKNOWN_RELATION"], "financial item references unknown project");
+            continue;
+          }
+          engagementSourceId = null;
+          unassigned = true;
         }
-        if (engagementSourceId && !projectSourceIds.has(engagementSourceId)) {
-          orphanRelations += 1;
-          quarantine("financial_item", row, ["UNKNOWN_RELATION"], "financial item references unknown project");
-          continue;
-        }
-        const listedAccountSourceId = accountRelations[0];
+        const counterpartyOverride = rules.counterparty ? overrides?.counterparties[legacySourceId] : undefined;
+        const listedAccountSourceId = accountRelations[0] ?? (counterpartyOverride && !accountRelations[0] ? counterpartyOverride.accountSourceId : undefined);
         if (listedAccountSourceId && !accountSourceIds.has(listedAccountSourceId)) {
           orphanRelations += 1;
           quarantine("financial_item", row, ["UNKNOWN_RELATION"], "financial item references unknown account");
@@ -816,8 +881,10 @@ export class NotionCwosImportPlanner {
           : dateValue(row.properties, ["date:예상 출금일:start", "예상 출금일"]);
         const actualDate = dateValue(row.properties, ["date:실제 처리일:start", "실제 처리일"]);
         const settledByStatus = statusLabel === "입금완료" || statusLabel === "출금완료";
-        const expectedDate = plannedDate ?? (settledByStatus ? actualDate : undefined);
-        if (!expectedDate) {
+        const plannedOrActual = plannedDate ?? (settledByStatus ? actualDate : undefined);
+        const nullDateAllowed = rules.nullExpectedDate && overrides?.nullExpectedDate.includes(legacySourceId) === true;
+        const expectedDate = plannedOrActual ?? (nullDateAllowed || unassigned ? null : undefined);
+        if (expectedDate === undefined) {
           quarantine("financial_item", row, ["MISSING_REQUIRED_FIELD"], `finance ${direction === "IN" ? "예상 입금일" : "예상 출금일"} is missing${settledByStatus ? " and 실제 처리일 is missing" : ""}; cwos_financial_items.expected_date is required`);
           continue;
         }
@@ -831,9 +898,11 @@ export class NotionCwosImportPlanner {
         const provenance: NotionFinanceProvenance = {
           ...provenanceOf(row.properties),
           ...(evidenceStatus ? { evidenceStatus } : {}),
-          ...(projectMappingStatus !== undefined ? { projectMappingStatus } : {}),
-          ...(plannedDate === undefined ? { expectedDateSource: "actual_date" as const } : {}),
-          ...(listedAccountSourceId === undefined ? { accountSource: "project_party" as const } : {}),
+          ...(unassigned ? { projectMappingStatus: "unassigned" } : projectMappingStatus !== undefined ? { projectMappingStatus } : {}),
+          ...(plannedDate === undefined && expectedDate !== null ? { expectedDateSource: "actual_date" as const } : {}),
+          ...(accountRelations[0] === undefined && counterpartyOverride
+            ? { accountSource: "owner_override" as const }
+            : accountRelations[0] === undefined ? { accountSource: "project_party" as const } : {}),
         };
         const fingerprint = notionCwosHash({ direction, name, net: net.toString(), vat: vat.toString(), expectedDate, actualDate, engagementSourceId, accountSourceId });
         if (financeFingerprints.has(fingerprint)) {
@@ -857,6 +926,7 @@ export class NotionCwosImportPlanner {
           vatAmountKrw: vat.toString(),
           grossAmountKrw: gross.toString(),
           expectedDate,
+          ...(unassigned ? { importAssignment: "unassigned" as const } : {}),
           ...(actualDate ? { actualDate } : {}),
           evidenceRefs: stringArray(row.properties, ["증빙"]),
           sourceFingerprint: fingerprint,
