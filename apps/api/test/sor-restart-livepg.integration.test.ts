@@ -97,9 +97,9 @@ describe.skipIf(!LIVE)("G-01 SoR restart-consistency: hydrate-on-boot against RE
         ...process.env,
         PGHOST: "localhost",
         PGPORT: "5432",
-        PGUSER: "ai_crm",
-        PGPASSWORD: "ai_crm_dev",
-        PGDATABASE: "ai_crm",
+        PGUSER: process.env.PGUSER ?? "ai_crm",
+        PGPASSWORD: process.env.PGPASSWORD ?? "ai_crm_dev",
+        PGDATABASE: process.env.PGDATABASE ?? "ai_crm",
       },
       stdio: "pipe",
     });

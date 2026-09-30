@@ -24,16 +24,16 @@ RUN_LOG="${LOG_DIR}/run-${RUN_TS//[:]/-}.log"
 
 export PGHOST="${PGHOST:-localhost}"
 export PGPORT="${PGPORT:-5432}"
-export PGUSER="${PGUSER:-ai_crm}"
-export PGDATABASE="${PGDATABASE:-ai_crm}"
-# Default matches docker-compose.yml; override via env in non-dev.
-export PGPASSWORD="${PGPASSWORD:-ai_crm_dev}"
-
-# Hard guard: refuse anything that is not the ai_crm DB on the expected host/port.
-if [[ "${PGDATABASE}" != "ai_crm" ]]; then
-  echo "REFUSE: PGDATABASE must be ai_crm (got ${PGDATABASE}); refusing to touch other DBs" >&2
+# Caller must set credentials and database. Do not default to ai_crm / ai_crm_dev:
+# the CI postgres:16 service is POSTGRES_USER/PASSWORD=postgres and may target a
+# throwaway database name. Empty values are refused so a missing env cannot
+# silently hit another local role.
+if [[ -z "${PGUSER:-}" || -z "${PGPASSWORD:-}" || -z "${PGDATABASE:-}" ]]; then
+  echo "REFUSE: PGUSER, PGPASSWORD, and PGDATABASE must be set explicitly (no hardcoded defaults)" >&2
   exit 2
 fi
+export PGUSER PGPASSWORD PGDATABASE
+
 if [[ "${PGPORT}" != "5432" && "${PGPORT}" != "5432/tcp" ]]; then
   # Allow override only when explicitly AI_CRM_SMOKE_ALLOW_NONDEFAULT_PORT=1
   if [[ "${AI_CRM_SMOKE_ALLOW_NONDEFAULT_PORT:-}" != "1" ]]; then
@@ -193,6 +193,30 @@ apply_migrations() {
     "${MIGRATIONS_DIR}/0010_finance_recon_dailygate.sql" || true
   apply_migration_file "0011_reports_model_invocations" \
     "${MIGRATIONS_DIR}/0011_reports_model_invocations.sql" || true
+
+  # CI applies every file with psql before this script and does not write
+  # schema_migrations. 0025's notion_page_id column means that lexical apply
+  # already happened; record every file so non-idempotent DDL is not re-run.
+  # A fresh database has no such column, so the loop below applies 0001..0025.
+  local head_present
+  head_present="$(psql_q -c "SELECT CASE WHEN EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='cwos_accounts' AND column_name='notion_page_id') THEN 1 ELSE 0 END")"
+  if [[ "${head_present}" == "1" ]]; then
+    local existing
+    while IFS= read -r existing; do
+      [[ -n "${existing}" ]] || continue
+      local existing_id
+      existing_id="$(basename "${existing}" .sql)"
+      psql_f -c "INSERT INTO schema_migrations (id) VALUES ('${existing_id}') ON CONFLICT (id) DO NOTHING"
+    done < <(find "${MIGRATIONS_DIR}" -maxdepth 1 -type f -name '*.sql' | sort)
+    log "backfilled schema_migrations for lexical migration set (0025 notion_page_id present)"
+  fi
+
+  local migration_file migration_id
+  while IFS= read -r migration_file; do
+    [[ -n "${migration_file}" ]] || continue
+    migration_id="$(basename "${migration_file}" .sql)"
+    apply_migration_file "${migration_id}" "${migration_file}" || true
+  done < <(find "${MIGRATIONS_DIR}" -maxdepth 1 -type f -name '*.sql' | sort)
 }
 
 check_force_rls() {

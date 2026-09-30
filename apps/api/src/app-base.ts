@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { installPgDateStringParser } from "./pg-date-types.js";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import {
   CrmDomainError,
@@ -1202,6 +1203,7 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
         if (!PoolCtor) {
           throw new Error("pg module loaded but Pool export was missing");
         }
+        installPgDateStringParser(pgMod);
         const created = new PoolCtor({ connectionString: resolvedDatabaseUrl });
         // Fail-closed connectivity check so a bad DATABASE_URL cannot silently stay half-open.
         await created.query("select 1 as ok");
@@ -1296,6 +1298,7 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
         if (!PoolCtor) {
           throw new Error("pg module loaded but Pool export was missing");
         }
+        installPgDateStringParser(pgMod);
         const createdAdmin = new PoolCtor({ connectionString: resolvedAdminDatabaseUrl });
         // Fail-closed connectivity check, same as the main pool.
         await createdAdmin.query("select 1 as ok");
@@ -1347,6 +1350,7 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
         if (!PoolCtor) {
           throw new Error("pg module loaded but Pool export was missing");
         }
+        installPgDateStringParser(pgMod);
         const createdModelGateway = new PoolCtor({ connectionString: effectiveModelGatewayDatabaseUrl });
         // Fail-closed connectivity check, same as the main/admin pools.
         await createdModelGateway.query("select 1 as ok");

@@ -1,3 +1,4 @@
+import { installPgDateStringParser } from "./pg-date-types.js";
 import {
   CustomerWorkOsError,
   type ApprovalReceipt,
@@ -513,6 +514,7 @@ export async function createPgNotionPlanStoreFromEnvironment(): Promise<PgNotion
   const module = await dynamicImport("pg");
   const Pool = module.Pool as new (options: { connectionString: string; max: number; application_name: string }) => SqlPool;
   if (!Pool) throw new CustomerWorkOsError("PG_DRIVER_UNAVAILABLE", "pg Pool export is unavailable");
+  installPgDateStringParser(module);
   const max = Number(process.env.CWOS_NOTION_PG_POOL_MAX ?? 2);
   if (!Number.isInteger(max) || max < 1 || max > 10) throw new CustomerWorkOsError("INVALID_CONFIG", "CWOS_NOTION_PG_POOL_MAX must be 1..10");
   return new PgNotionPlanStore(new Pool({ connectionString, max, application_name: "ai-crm-cwos-notion" }));

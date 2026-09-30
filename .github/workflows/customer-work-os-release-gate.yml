@@ -73,7 +73,11 @@ jobs:
           --health-retries 20
     env:
       PG_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/ai_crm
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
       PGPASSWORD: postgres
+      PGDATABASE: ai_crm
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -127,6 +131,7 @@ jobs:
             test/pg-mutex-concurrency.livepg.integration.test.ts \
             test/q2-reports-model.livepg.integration.test.ts \
             test/customer-work-os-v2.livepg.integration.test.ts \
+            test/pg-date-oid.livepg.integration.test.ts \
             --no-file-parallelism
       - name: Backup and restore
         shell: bash

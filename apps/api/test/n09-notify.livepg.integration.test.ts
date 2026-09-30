@@ -223,7 +223,7 @@ async function insertJobWithEvent(
 describe.skipIf(!LIVE)("N-09 cross-process eventing via PG LISTEN/NOTIFY against REAL Postgres (LIVE_PG_TEST=1)", () => {
   beforeAll(async () => {
     execFileSync("bash", [smokeScript], {
-      env: { ...process.env, PGHOST: "localhost", PGPORT: "5432", PGUSER: "ai_crm", PGPASSWORD: "ai_crm_dev", PGDATABASE: "ai_crm" },
+      env: { ...process.env, PGHOST: "localhost", PGPORT: "5432", PGUSER: process.env.PGUSER ?? "ai_crm", PGPASSWORD: process.env.PGPASSWORD ?? "ai_crm_dev", PGDATABASE: process.env.PGDATABASE ?? "ai_crm" },
       stdio: "pipe",
     });
 

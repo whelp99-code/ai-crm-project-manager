@@ -1,3 +1,4 @@
+import { installPgDateStringParser } from "./pg-date-types.js";
 import {
   CustomerWorkOsAiError,
   CustomerWorkOsAiService,
@@ -315,6 +316,7 @@ export async function createPgAiSuggestionStoreFromEnvironment(): Promise<PgAiSu
   const module = await dynamicImport("pg");
   const Pool = module.Pool as new (options: { connectionString: string; max: number; application_name: string }) => SqlPool;
   if (!Pool) throw new CustomerWorkOsAiError("PG_DRIVER_UNAVAILABLE", "pg Pool export is unavailable");
+  installPgDateStringParser(module);
   const max = Number(process.env.CWOS_AI_PG_POOL_MAX ?? 3);
   if (!Number.isInteger(max) || max < 1 || max > 20) throw new CustomerWorkOsAiError("INVALID_CONFIG", "CWOS_AI_PG_POOL_MAX must be 1..20");
   return new PgAiSuggestionStore(new Pool({ connectionString, max, application_name: "ai-crm-cwos-ai" }));
