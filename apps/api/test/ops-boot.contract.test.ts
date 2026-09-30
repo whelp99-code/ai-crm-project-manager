@@ -21,4 +21,12 @@ describe("ops-boot accounts route", () => {
     expect(src).toContain("UNAUTHENTICATED");
     expect(src).toContain("x-workspace-id");
   });
+
+  it("serves read-only engagement and finance queries", () => {
+    expect(src).toContain('app.get("/api/cwos/engagements"');
+    expect(src).toContain('app.get("/api/cwos/finance"');
+    expect(src).toContain("engagementsSql");
+    expect(src).toContain("financeTotalsSql");
+    expect(src).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/);
+  });
 });
