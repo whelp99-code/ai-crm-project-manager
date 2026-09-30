@@ -1,6 +1,6 @@
 # 검증냥 인계 — Notion 증분 동기화
 
-대상: `feat/notion-incremental-sync` → `core5-c01-c02`. 이슈 #15. `ai_crm`에는 쓰지 않았다.
+대상: `feat/notion-incremental-sync` → `core5-c01-c02`. PR #16. 이슈 #15. `ai_crm`에는 쓰지 않았다.
 
 ## 커밋
 
