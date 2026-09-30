@@ -213,8 +213,10 @@ describe("NotionCwosImportPlanner", () => {
       projectRow("stage-status-only", "PRJ-STAGE-S", { 상태: "완료" }),
     );
     const plan = new NotionCwosImportPlanner().plan(input);
-    expected.forEach(([, stage], index) => {
-      expect(plan.engagements.find((item) => item.legacySourceId === `stage-${index}`)?.stage).toBe(stage);
+    expected.forEach(([label, stage], index) => {
+      const engagement = plan.engagements.find((item) => item.legacySourceId === `stage-${index}`);
+      expect(engagement?.stage).toBe(stage);
+      expect(engagement?.sourceStage).toBe(label);
     });
     expect(reasonsOf(plan, "stage-unclassified")).toEqual(["UNMAPPED_STAGE"]);
     expect(reasonsOf(plan, "stage-unknown")).toEqual(["UNMAPPED_STAGE"]);

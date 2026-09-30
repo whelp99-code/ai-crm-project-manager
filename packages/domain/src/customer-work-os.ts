@@ -53,6 +53,7 @@ export interface Engagement {
   name: string;
   type: "inquiry" | "opportunity" | "consulting" | "delivery" | "support" | "maintenance" | "renewal" | "internal";
   stage: EngagementStage;
+  sourceStage?: string | null;
   health: "normal" | "warning" | "critical";
   ownerPrincipalId: string;
   startDate?: string;

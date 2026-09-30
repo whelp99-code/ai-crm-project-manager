@@ -92,6 +92,14 @@ describe("notion commitment due dates", () => {
     expect(commitments.some((item) => item.dueAt === "2026-09-29")).toBe(false);
   });
 
+  it("keeps the original Notion stage name on the engagement", () => {
+    const service = new CustomerWorkOsService();
+    const planned = record([{ id: "buy", stage: "DELIVERY" }]);
+    planned.plan.engagements[0]!.sourceStage = "매입발주";
+    applyNotionPlanToDomain({ service, record: planned, principalId: "owner", receipt: receipt(planned.id) });
+    expect(service.exportState().engagements.map((item) => item.sourceStage)).toEqual(["매입발주"]);
+  });
+
   it("keeps an explicit targetDate", () => {
     const service = new CustomerWorkOsService();
     const planned = record([{ id: "dated", stage: "DELIVERY", nextAction: "검수", targetDate: "2026-10-03" }]);

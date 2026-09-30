@@ -195,6 +195,28 @@ describe("notion sync canonical round-trip", () => {
     expect(report).toMatchObject({ inserts: 1, updates: 1, archives: 1, holds: 1 });
     expect(report.holdReasons).toEqual(["AMOUNT_OR_DIRECTION"]);
   });
+
+  it("writes the original stage name and treats a Notion stage rename as a business update", async () => {
+    const base = populated();
+    base.engagements[0]!.sourceStage = "매입발주";
+    const pool = memoryPool();
+    const first = await syncApprovedNotionPlan({
+      pool, record: rec(base, "fnv1a32:stage1"), principalId: "owner", snapshotSha256: "sha256:stage1",
+    });
+    expect(first.inserts).toBeGreaterThan(0);
+    expect(pool.queries.some((query) => query.includes("INSERT INTO cwos_engagements") && query.includes("source_stage"))).toBe(true);
+    const renamed = populated();
+    renamed.engagements[0]!.sourceStage = "수행/검수";
+    const second = await syncApprovedNotionPlan({
+      pool, record: rec(renamed, "fnv1a32:stage2"), principalId: "owner", snapshotSha256: "sha256:stage2",
+    });
+    expect(second).toMatchObject({ inserts: 0, updates: 1, archives: 0, holds: 0 });
+    expect(pool.queries.some((query) => query.includes("UPDATE cwos_engagements") && query.includes("source_stage"))).toBe(true);
+    const third = await syncApprovedNotionPlan({
+      pool, record: rec(renamed, "fnv1a32:stage3"), principalId: "owner", snapshotSha256: "sha256:stage3",
+    });
+    expect(third).toMatchObject({ inserts: 0, updates: 0, archives: 0, holds: 0 });
+  });
 });
 
 function populated(): NotionCwosImportPlan {
@@ -256,7 +278,22 @@ function memoryPool() {
         }
         return { rows: [] };
       }
-      if (sql.startsWith("UPDATE ")) return { rows: [] };
+      if (sql.startsWith("UPDATE ")) {
+        const table = sql.match(/UPDATE (cwos_\w+)/)?.[1];
+        const id = values?.[1];
+        const tableRows = table ? rows.get(table) : undefined;
+        const stored = tableRows?.find((row) => row.id === id);
+        if (stored && values) {
+          const setClause = sql.match(/SET ([\s\S]+) WHERE/)?.[1] ?? "";
+          for (const assignment of setClause.split(",")) {
+            const match = assignment.trim().match(/^([a-z_]+) = \$(\d+)/);
+            if (!match) continue;
+            stored[match[1]!] = values[Number(match[2]) - 1];
+          }
+          if (setClause.includes("archived_at = NULL")) stored.archived_at = null;
+        }
+        return { rows: [] };
+      }
       const live = sql.match(/FROM (cwos_\w+)/);
       if (!live) return { rows: [] };
       const table = live[1]!;
