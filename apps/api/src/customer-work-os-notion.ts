@@ -412,6 +412,7 @@ export function applyNotionPlanToDomain(input: {
       name: item.name,
       type: importedEngagementType(item.stage),
       stage: item.stage as Parameters<CustomerWorkOsService["createEngagement"]>[0]["stage"],
+      ...(item.sourceStage ? { sourceStage: item.sourceStage } : {}),
       health: "normal",
       ownerPrincipalId: principalId,
       ...(item.startDate ? { startDate: item.startDate } : {}),

@@ -69,7 +69,7 @@ export interface NotionSyncDiff {
 
 const UPDATABLE: Record<NotionSyncKind, readonly string[]> = {
   account: ["name", "normalized_name", "kinds", "status", "source_ref"],
-  engagement: ["name", "project_key", "engagement_type", "stage", "start_date", "target_date"],
+  engagement: ["name", "project_key", "engagement_type", "stage", "source_stage", "start_date", "target_date"],
   party: ["role", "is_primary", "commercial_responsibility", "delivery_responsibility"],
   activity: ["activity_type", "occurred_at", "summary", "engagement_id", "account_id"],
   commitment: ["description", "due_at", "priority", "financial_impact", "status"],

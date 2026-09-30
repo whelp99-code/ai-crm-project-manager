@@ -79,10 +79,10 @@ export async function writeNormalizedCustomerWorkState(
   for (const item of state.engagements) {
     if (excluded(item.id, [], exclude)) continue;
     await insertIgnoringConflict(connection, "cwos_engagements", [
-      "id", "workspace_id", "project_key", "name", "engagement_type", "stage", "health", "owner_principal_id",
+      "id", "workspace_id", "project_key", "name", "engagement_type", "stage", "source_stage", "health", "owner_principal_id",
       "start_date", "target_date", "won_quote_id", "contract_id", "delivery_project_id", "terminal_reason", "version",
     ], [
-      item.id, item.workspaceId, item.projectKey, item.name, item.type, item.stage, item.health, item.ownerPrincipalId,
+      item.id, item.workspaceId, item.projectKey, item.name, item.type, item.stage, item.sourceStage ?? null, item.health, item.ownerPrincipalId,
       item.startDate ?? null, item.targetDate ?? null, item.wonQuoteId ?? null, item.contractId ?? null,
       item.deliveryProjectId ?? null, item.terminalReason ?? null, item.version,
     ]);

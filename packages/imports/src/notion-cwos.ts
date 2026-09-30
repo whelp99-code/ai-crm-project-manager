@@ -136,6 +136,8 @@ export interface EngagementImportRecord {
   projectKey: string;
   name: string;
   stage: string;
+  /** Original Notion 프로젝트 단계. Mapped `stage` collapses 매입발주 and 수행/검수. */
+  sourceStage?: string;
   priority?: string;
   startDate?: string;
   targetDate?: string;
@@ -662,6 +664,7 @@ export class NotionCwosImportPlanner {
           projectKey: key,
           name,
           stage,
+          sourceStage: stageLabel,
           ...(priority !== undefined ? { priority } : {}),
           ...(startDate !== undefined ? { startDate } : {}),
           ...(targetDate !== undefined ? { targetDate } : {}),
