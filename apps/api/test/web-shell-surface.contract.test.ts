@@ -38,6 +38,11 @@ describe("G003 web shell surface contracts (E2E-S0-01 static)", () => {
     const src = read("layout.tsx");
     expect(src).toContain('href="/accounts"');
     expect(src).toContain(">계정<");
+    expect(src.indexOf(">계정<")).toBeLessThan(src.indexOf(">프로젝트<"));
+    expect(src.indexOf(">프로젝트<")).toBeLessThan(src.indexOf(">재무<"));
+    expect(src.indexOf(">재무<")).toBeLessThan(src.indexOf(">작업실<"));
+    expect(src).toContain('href="/engagements"');
+    expect(src).toContain('href="/finance"');
     expect(src).toContain('href="/work"');
     expect(src).toContain('href="/approvals"');
   });

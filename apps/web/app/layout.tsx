@@ -46,11 +46,12 @@ const styles = `
     .context { display: flex; flex-wrap: wrap; gap: 4px 12px; }
     .context a { display: inline-flex; align-items: center; min-height: 44px; }
     .panel { padding: 18px; }
-    .account-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-    .account-table, .account-table tbody, .account-table tr, .account-table td { display: block; width: 100%; }
-    .account-table tr { padding: 12px 0; border-bottom: 1px solid #d9e1dd; }
-    .account-table td { border-bottom: 0; padding: 4px 0; }
-    .account-table td[data-label]::before { content: attr(data-label); display: block; color: #46564d; font-size: 14px; font-weight: 680; }
+    .account-table thead, .data-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    .account-table, .account-table tbody, .account-table tr, .account-table td,
+    .data-table, .data-table tbody, .data-table tr, .data-table td { display: block; width: 100%; }
+    .account-table tr, .data-table tr { padding: 12px 0; border-bottom: 1px solid #d9e1dd; }
+    .account-table td, .data-table td { border-bottom: 0; padding: 4px 0; }
+    .account-table td[data-label]::before, .data-table td[data-label]::before { content: attr(data-label); display: block; color: #46564d; font-size: 14px; font-weight: 680; }
   }
 `;
 
@@ -65,6 +66,10 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
               <span className="brand">AI 업무 운영실</span>
               <span className="context">
                 <a href="/accounts" style={{ color: "#dcebe3" }}>계정</a>
+                {" · "}
+                <a href="/engagements" style={{ color: "#dcebe3" }}>프로젝트</a>
+                {" · "}
+                <a href="/finance" style={{ color: "#dcebe3" }}>재무</a>
                 {" · "}
                 <a href="/work" style={{ color: "#dcebe3" }}>작업실</a>
                 {" · "}
