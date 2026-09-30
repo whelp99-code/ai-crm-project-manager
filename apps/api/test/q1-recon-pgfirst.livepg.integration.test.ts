@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { createApp, type CreateAppOptions } from "../src/app.js";
+import { createApp, type CreateAppOptions, type DailyGateControlPlane } from "../src/app.js";
 import type { PgQueryable } from "@ai-crm/orchestration";
 import type { FinancePackConfig } from "@ai-crm/finance";
 
@@ -77,6 +77,12 @@ const ALL_WS = [
   WS_FAIL_RECON_SECOND,
   WS_FAIL_DAY_SECOND,
 ];
+const CONTROLLER_BY_WS = Object.fromEntries(
+  ALL_WS.map((workspaceId, index) => [workspaceId, `c1111111-1111-4111-8111-${String(index + 1).padStart(12, "0")}`]),
+) as Record<string, string>;
+const USER_BY_WS = Object.fromEntries(
+  ALL_WS.map((workspaceId, index) => [workspaceId, `d1111111-1111-4111-8111-${String(index + 1).padStart(12, "0")}`]),
+) as Record<string, string>;
 
 const FINANCE_PACK: FinancePackConfig = {
   packVersion: 1,
@@ -93,9 +99,47 @@ const FINANCE_PACK: FinancePackConfig = {
   requiredConsecutiveDays: 3,
 };
 
+function controlPlane(): DailyGateControlPlane {
+  return {
+    async dayFacts({ workspaceId, date }) {
+      return {
+        actor: { id: CONTROLLER_BY_WS[workspaceId] ?? "", workspaceId, role: "CONTROLLER", kind: "HUMAN", active: true },
+        metrics: { importsCompleted: true, entriesBalanced: true, openFinanceExceptions: 0 },
+        receivedAt: `${date}T09:00:00+09:00`,
+        provenance: {
+          refs: ["import-batch:q1", "ledger-close:q1"],
+          digests: ["a".repeat(64), "b".repeat(64)],
+          observedAt: "2026-01-01T00:00:00+09:00",
+          expiresAt: "2026-06-01T00:00:00+09:00",
+        },
+        matrixVersion: 1,
+        matrixActive: true,
+        policyVersion: 1,
+        packVersion: 1,
+        evidenceId: `q1-evidence-${workspaceId}-${date}`,
+        evidenceSecret: "q1-live-test-secret",
+      };
+    },
+    async activationFacts({ workspaceId }) {
+      return {
+        actor: { id: "q1-cfo", workspaceId, role: "CFO", kind: "HUMAN", active: true },
+        matrixVersion: 1,
+        matrixActive: true,
+        policyVersion: 1,
+        packVersion: 1,
+        approvalId: `q1-approval-${workspaceId}`,
+        approvedAt: "2026-05-05T17:00:00+09:00",
+        expiresAt: "2026-06-01T00:00:00+09:00",
+        evidenceSecret: "q1-live-test-secret",
+      };
+    },
+    now: () => new Date("2026-05-05T17:30:00+09:00"),
+  };
+}
+
 const apps: FastifyInstance[] = [];
 async function bootApp(options: CreateAppOptions): Promise<FastifyInstance> {
-  const instance = createApp(options);
+  const instance = createApp({ dailyGateControlPlane: controlPlane(), ...options });
   apps.push(instance);
   await instance.ready();
   return instance;
@@ -159,8 +203,8 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
     execFileSync("bash", [smokeScript], {
       env: {
         ...process.env,
-        PGHOST: "localhost",
-        PGPORT: "5432",
+        PGHOST: process.env.PGHOST ?? "localhost",
+        PGPORT: process.env.PGPORT ?? "5432",
         PGUSER: process.env.PGUSER ?? "ai_crm",
         PGPASSWORD: process.env.PGPASSWORD ?? "ai_crm_dev",
         PGDATABASE: process.env.PGDATABASE ?? "ai_crm",
@@ -186,6 +230,22 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
         `INSERT INTO workspaces (id, name) VALUES ${values} ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
         params,
       );
+      for (const workspaceId of ALL_WS) {
+        const userId = USER_BY_WS[workspaceId];
+        const controllerId = CONTROLLER_BY_WS[workspaceId];
+        await client.query(
+          `INSERT INTO users (id, workspace_id, email, display_name, role)
+           VALUES ($1, $2, $3, 'Q1 Controller', 'CONTROLLER')
+           ON CONFLICT (id) DO NOTHING`,
+          [userId, workspaceId, `q1-controller-${workspaceId}@example.invalid`],
+        );
+        await client.query(
+          `INSERT INTO principals (id, workspace_id, kind, user_id, role, display_name)
+           VALUES ($1, $2, 'HUMAN', $3, 'CONTROLLER', 'Q1 Controller')
+           ON CONFLICT (id) DO NOTHING`,
+          [controllerId, workspaceId, userId],
+        );
+      }
     } finally {
       await client.end();
     }
@@ -204,6 +264,12 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
       try {
         for (const ws of ALL_WS) {
           await client.query(`SELECT set_config('app.workspace_id', $1, false)`, [ws]);
+          await client.query(`ALTER TABLE finance_daily_gate_activations DISABLE TRIGGER finance_daily_gate_activations_immutable`);
+          await client.query(`ALTER TABLE finance_daily_gate_evidence DISABLE TRIGGER finance_daily_gate_evidence_immutable`);
+          await client.query(`DELETE FROM finance_daily_gate_activations WHERE workspace_id = $1`, [ws]);
+          await client.query(`DELETE FROM finance_daily_gate_evidence WHERE workspace_id = $1`, [ws]);
+          await client.query(`ALTER TABLE finance_daily_gate_evidence ENABLE TRIGGER finance_daily_gate_evidence_immutable`);
+          await client.query(`ALTER TABLE finance_daily_gate_activations ENABLE TRIGGER finance_daily_gate_activations_immutable`);
           await client.query(`DELETE FROM finance_day_records WHERE workspace_id = $1`, [ws]);
           await client.query(`DELETE FROM finance_daily_gate_state WHERE workspace_id = $1`, [ws]);
           await client.query(`DELETE FROM finance_exceptions WHERE workspace_id = $1`, [ws]);
@@ -217,6 +283,8 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
         await client.query(`ALTER TABLE audit_chain_heads ENABLE TRIGGER audit_chain_heads_no_delete`);
       }
       await client.query(`RESET app.workspace_id`);
+      await client.query(`DELETE FROM principals WHERE workspace_id = ANY($1::uuid[])`, [ALL_WS]);
+      await client.query(`DELETE FROM users WHERE workspace_id = ANY($1::uuid[])`, [ALL_WS]);
       await client.query(`DELETE FROM workspaces WHERE id = ANY($1::uuid[])`, [ALL_WS]);
     } finally {
       await client.end();
@@ -292,13 +360,7 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
           method: "POST",
           url: "/api/finance/daily-gate/days",
           headers: { "x-workspace-id": WS_HAPPY },
-          payload: {
-            date: "2026-03-01",
-            importsCompleted: true,
-            entriesBalanced: true,
-            openFinanceExceptions: 0,
-            receivedAt: "2026-03-01T09:00:00+09:00",
-          },
+          payload: { date: "2026-03-01" },
         });
         expect(recordDay.statusCode).toBe(201);
         expect((recordDay.json() as { qualifying: boolean }).qualifying).toBe(true);
@@ -427,13 +489,7 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
           method: "POST",
           url: "/api/finance/daily-gate/days",
           headers: { "x-workspace-id": WS_FAIL_DAY },
-          payload: {
-            date: "2026-04-01",
-            importsCompleted: true,
-            entriesBalanced: true,
-            openFinanceExceptions: 0,
-            receivedAt: "2026-04-01T09:00:00+09:00",
-          },
+          payload: { date: "2026-04-01" },
         });
         expect(doomed.statusCode).toBeGreaterThanOrEqual(500);
         expect(doomed.statusCode).toBeLessThan(600);
@@ -460,13 +516,7 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
           method: "POST",
           url: "/api/finance/daily-gate/days",
           headers: { "x-workspace-id": WS_CROSS_UNTOUCHED },
-          payload: {
-            date: "2026-04-01",
-            importsCompleted: true,
-            entriesBalanced: true,
-            openFinanceExceptions: 0,
-            receivedAt: "2026-04-01T09:00:00+09:00",
-          },
+          payload: { date: "2026-04-01" },
         });
         expect(untouched.statusCode).toBe(201);
         const untouchedRow = await pool.query(`SELECT count(*)::int AS n FROM finance_day_records WHERE workspace_id = $1`, [WS_CROSS_UNTOUCHED]);
@@ -494,13 +544,7 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
               method: "POST",
               url: "/api/finance/daily-gate/days",
               headers: { "x-workspace-id": WS_CONCURRENT },
-              payload: {
-                date,
-                importsCompleted: true,
-                entriesBalanced: true,
-                openFinanceExceptions: 0,
-                receivedAt: `${date}T09:00:00+09:00`,
-              },
+              payload: { date },
             }),
           ),
         );
@@ -628,13 +672,7 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
           method: "POST",
           url: "/api/finance/daily-gate/days",
           headers: { "x-workspace-id": WS_FAIL_DAY_SECOND },
-          payload: {
-            date: "2026-04-02",
-            importsCompleted: true,
-            entriesBalanced: true,
-            openFinanceExceptions: 0,
-            receivedAt: "2026-04-02T09:00:00+09:00",
-          },
+          payload: { date: "2026-04-02" },
         });
         expect(doomed.statusCode).toBeGreaterThanOrEqual(500);
         expect(doomed.statusCode).toBeLessThan(600);
