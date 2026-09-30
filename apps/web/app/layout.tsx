@@ -18,6 +18,8 @@ const styles = `
   .topbar-inner { display: flex; align-items: center; justify-content: space-between; padding: 18px 0; gap: 24px; }
   .brand { font-size: 21px; font-weight: 760; letter-spacing: -.02em; }
   .context { color: #dcebe3; font-size: 14px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip { display: inline-flex; align-items: center; border: 1px solid #7f9388; border-radius: 999px; padding: 2px 10px; background: #f4f7f5; color: #17221d; font-size: 14px; font-weight: 680; line-height: 1.4; }
   main { padding: 34px 0 64px; }
   h1 { margin: 0 0 8px; font-size: clamp(28px, 4vw, 42px); line-height: 1.2; letter-spacing: -.035em; }
   h2 { margin: 0 0 16px; font-size: 20px; }
@@ -37,9 +39,19 @@ const styles = `
   .empty { color: #69766f; }
   .error { border: 2px solid #a53b32; background: #fff; padding: 24px; border-radius: 10px; }
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #d9e1dd; vertical-align: top; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #d9e1dd; vertical-align: top; overflow-wrap: anywhere; }
   th { color: #46564d; font-size: 14px; }
-  @media (max-width: 640px) { .topbar-inner { align-items: flex-start; flex-direction: column; } .panel { padding: 18px; } }
+  @media (max-width: 640px) {
+    .topbar-inner { align-items: flex-start; flex-direction: column; gap: 8px; }
+    .context { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+    .context a { display: inline-flex; align-items: center; min-height: 44px; }
+    .panel { padding: 18px; }
+    .account-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    .account-table, .account-table tbody, .account-table tr, .account-table td { display: block; width: 100%; }
+    .account-table tr { padding: 12px 0; border-bottom: 1px solid #d9e1dd; }
+    .account-table td { border-bottom: 0; padding: 4px 0; }
+    .account-table td[data-label]::before { content: attr(data-label); display: block; color: #46564d; font-size: 14px; font-weight: 680; }
+  }
 `;
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
