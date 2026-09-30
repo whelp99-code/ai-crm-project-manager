@@ -193,11 +193,14 @@ api, web, proxy, dest, short, node_dir = sys.argv[1:]
 pnpm = f"{node_dir}/pnpm"
 node = f"{node_dir}/node"
 
+path_env = f"Environment=PATH={node_dir}:/usr/bin:/bin"
+
 def rewrite(path, description, workdir, execstart):
     file = pathlib.Path(path)
     if not file.exists():
         return
     lines = []
+    saw_path = False
     for line in file.read_text().splitlines():
         if line.startswith("Description="):
             line = f"Description={description}"
@@ -205,31 +208,43 @@ def rewrite(path, description, workdir, execstart):
             line = f"WorkingDirectory={workdir}"
         elif line.startswith("ExecStart="):
             line = f"ExecStart={execstart}"
+        elif line.startswith("Environment=PATH="):
+            line = path_env
+            saw_path = True
         lines.append(line)
+        if line.startswith("EnvironmentFile=") and not saw_path:
+            lines.append(path_env)
+            saw_path = True
+    if not saw_path:
+        lines.append(path_env)
     file.write_text("\n".join(lines) + "\n")
 
+# Invoke node directly so pnpm's `#!/usr/bin/env node` cannot pick v24 from the manager PATH.
 rewrite(
     api,
     f"core5 API ({short}) on localhost",
     f"{dest}/apps/api",
-    f"{pnpm} exec tsx ops-boot.mts",
+    f"{node} {pnpm} exec tsx ops-boot.mts",
 )
 rewrite(
     web,
     f"core5 web ({short}) on localhost",
     f"{dest}/apps/web",
-    f"{pnpm} exec next start -H 127.0.0.1 -p 4313",
+    f"{node} {pnpm} exec next start -H 127.0.0.1 -p 4313",
 )
 proxy_path = pathlib.Path(proxy)
 if proxy_path.exists():
-    text = proxy_path.read_text()
-    text2 = []
-    for line in text.splitlines():
-        if line.startswith("ExecStart=") and "/bin/node " in line:
-            rest = line.split("/bin/node ", 1)[1]
-            line = f"ExecStart={node} {rest}"
-        text2.append(line)
-    proxy_path.write_text("\n".join(text2) + "\n")
+    text = proxy_path.read_text().splitlines()
+    exec_line = next((line for line in text if line.startswith("ExecStart=")), "")
+    rest = exec_line.split("/bin/node ", 1)[1] if "/bin/node " in exec_line else "/home/jm/.config/core5/bind-proxy.mjs"
+    rewrite(proxy, "core5 Tailscale bind proxy (100.87.81.57 only)", "", f"{node} {rest}")
+    # proxy has no WorkingDirectory requirement; drop an empty assignment if rewrite added one
+    fixed = []
+    for line in pathlib.Path(proxy).read_text().splitlines():
+        if line == "WorkingDirectory=":
+            continue
+        fixed.append(line)
+    pathlib.Path(proxy).write_text("\n".join(fixed) + "\n")
 PY
 
 systemctl --user daemon-reload

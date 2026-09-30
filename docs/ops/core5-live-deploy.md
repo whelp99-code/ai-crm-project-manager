@@ -8,7 +8,7 @@ Repeatable switch of the user units onto a built git ref. The script is `ops/dep
 2. Takes a custom-format `pg_dump` of `ai_crm` into `/home/jm/.local/state/omonyang/core5-backups/` with mode `0600` before any unit change.
 3. Collects required migration ids from `requiredMigration = "..."` in `apps/api` and from `ops/core5-required-migrations.txt`. If any id is missing from `schema_migrations`, it exits and does not switch units. It does not apply migrations.
 4. Builds the web app with Node 22 (`~/.nvm/versions/node/v22.23.2`) and `pnpm install --frozen-lockfile`.
-5. Points `core5-api.service` and `core5-web.service` at the new tree and Node 22 `pnpm`. Restarts those units.
+5. Points `core5-api.service` and `core5-web.service` at the new tree. `ExecStart` is `node22 node22/pnpm ...` and each unit sets `Environment=PATH=<node22 bin>:/usr/bin:/bin`, so `#!/usr/bin/env node` cannot select another Node. Restarts the API, web, and Tailscale proxy units.
 6. Checks `GET /health`, `GET /ready`, and the accounts count from `GET /api/cwos/accounts` against the web page.
 7. On a failed health check after the switch, restores the previous unit files and restarts the previous tree.
 
