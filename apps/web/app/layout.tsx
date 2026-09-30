@@ -52,7 +52,7 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
             <div className="topbar-inner">
               <span className="brand">AI 업무 운영실</span>
               <span className="context">
-                <a href="/" style={{ color: "#dcebe3" }}>고객</a>
+                <a href="/accounts" style={{ color: "#dcebe3" }}>계정</a>
                 {" · "}
                 <a href="/work" style={{ color: "#dcebe3" }}>작업실</a>
                 {" · "}

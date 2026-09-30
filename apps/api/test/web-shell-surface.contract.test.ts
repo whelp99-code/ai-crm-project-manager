@@ -34,16 +34,30 @@ describe("G003 web shell surface contracts (E2E-S0-01 static)", () => {
     expect(src).toContain("작업실을 사용할 수 없습니다");
   });
 
-  it("layout links /work and /approvals", () => {
+  it("layout links /accounts, /work and /approvals", () => {
     const src = read("layout.tsx");
+    expect(src).toContain('href="/accounts"');
+    expect(src).toContain(">계정<");
     expect(src).toContain('href="/work"');
     expect(src).toContain('href="/approvals"');
   });
 
-  it("360 page create-work posts only to agent commands with resourceBinding", () => {
+  it("home redirects to the accounts list", () => {
     const page = read("page.tsx");
+    expect(page).toContain('redirect("/accounts")');
+    expect(page).not.toContain("S1CreateWorkClient");
+  });
+
+  it("accounts page reads the read-only accounts API", () => {
+    const page = read("accounts/page.tsx");
+    expect(page).toContain("/api/cwos/accounts");
+    expect(page).toContain("계정 {result.count}");
+    expect(page).toContain('data-testid="account-count"');
+    expect(page).toContain("AUTH_API_KEY");
+  });
+
+  it("create-work client posts only to agent commands with resourceBinding", () => {
     const client = read("s1-create-work-client.tsx");
-    expect(page).toContain("S1CreateWorkClient");
     expect(client).toContain("/api/agent/commands");
     expect(client).toContain("resourceBinding");
     expect(client).toContain("idempotency-key");

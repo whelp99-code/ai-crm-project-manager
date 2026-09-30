@@ -1,0 +1,3 @@
+# Migrations the live boot path requires before a directory switch.
+# The deploy script also scans apps/api for requiredMigration = "..." literals.
+0019_customer_work_os_v2_runtime
