@@ -1275,7 +1275,7 @@ export class CustomerWorkOsService {
     if (map.has(id)) throw new CustomerWorkOsError("DUPLICATE_ID", `${label} already exists: ${id}`);
   }
 
-  private byEngagement<T extends { workspaceId: string; engagementId: string }>(map: Map<string, T>, workspaceId: string, engagementId: string): T[] {
+  private byEngagement<T extends { workspaceId: string; engagementId: string | null }>(map: Map<string, T>, workspaceId: string, engagementId: string): T[] {
     return [...map.values()]
       .filter((item) => item.workspaceId === workspaceId && item.engagementId === engagementId)
       .map((item) => copy(item));

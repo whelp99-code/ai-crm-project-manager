@@ -112,7 +112,7 @@ describe("owner override apply", () => {
     const recorded: Array<{ engagementId: string | null; accountId?: string }> = [];
     const original = service.recordActivity.bind(service);
     service.recordActivity = (input) => {
-      recorded.push({ engagementId: input.engagementId, accountId: input.accountId });
+      recorded.push({ engagementId: input.engagementId, ...(input.accountId ? { accountId: input.accountId } : {}) });
       return original(input);
     };
     const result = applyNotionPlanToDomain({ service, record: record(), principalId: "owner", receipt: receipt() });

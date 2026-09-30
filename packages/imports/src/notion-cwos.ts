@@ -842,7 +842,9 @@ export class NotionCwosImportPlanner {
           continue;
         }
         const projectPartyName = direction === "IN" ? "매출처" : "매입처";
-        const projectParties = [...new Set(projectCounterparties.get(engagementSourceId)?.[direction === "IN" ? "billed" : "suppliers"] ?? [])];
+        const projectParties = engagementSourceId
+          ? [...new Set(projectCounterparties.get(engagementSourceId)?.[direction === "IN" ? "billed" : "suppliers"] ?? [])]
+          : [];
         const accountSourceId = listedAccountSourceId ?? (projectParties.length === 1 ? projectParties[0] : undefined);
         if (!accountSourceId) {
           quarantine("financial_item", row, ["MISSING_REQUIRED_FIELD"], `financial item has no 거래처 and its project has ${projectParties.length} ${projectPartyName}; cwos_financial_items.account_id is required`);
