@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import { enforceOwnerPage } from "./owner-server";
 import { OwnerFetchPatch } from "./owner-fetch-patch";
 
 export const metadata: Metadata = {
@@ -82,7 +83,8 @@ const styles = `
   }
 `;
 
-export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
+export default async function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
+  await enforceOwnerPage();
   return (
     <html lang="ko">
       <head><style>{styles}</style></head>

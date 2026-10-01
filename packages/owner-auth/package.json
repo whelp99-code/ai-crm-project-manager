@@ -9,7 +9,8 @@
     ".": "./src/index.ts",
     "./file-store": "./src/file-store.ts",
     "./cli": "./src/cli.ts",
-    "./page-gate": "./src/page-gate.ts"
+    "./page-gate": "./src/page-gate.ts",
+    "./page-session": "./src/page-session.ts"
   },
   "scripts": {
     "typecheck": "tsc -b --noEmit",

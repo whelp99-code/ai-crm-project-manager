@@ -14,6 +14,8 @@ export type OwnerRecord = {
   pendingCodeHash?: string;
   pendingCodeExp?: number;
   totpPending: boolean;
+  lastTotpStep?: number;
+  rate?: RateState;
 };
 
 export interface OwnerStore {
@@ -174,16 +176,73 @@ export function totpCode(secretBase32: string, nowMs: number, step = 30): string
   return hotp(base32Decode(secretBase32), counter);
 }
 
-export function totpMatches(secretBase32: string, code: string, nowMs: number): boolean {
-  if (!/^\d{6}$/.test(code)) return false;
+export function acceptedTotpStep(secretBase32: string, code: string, nowMs: number): number | undefined {
+  if (!/^\d{6}$/.test(code)) return undefined;
+  const base = Math.floor(nowMs / 1000 / 30);
   for (const skew of [-1, 0, 1]) {
-    const counter = Math.floor(nowMs / 1000 / 30) + skew;
+    const counter = base + skew;
     const expected = hotp(base32Decode(secretBase32), counter);
     const a = Buffer.from(code);
     const b = Buffer.from(expected);
-    if (a.length === b.length && timingSafeEqual(a, b)) return true;
+    if (a.length === b.length && timingSafeEqual(a, b)) return counter;
   }
-  return false;
+  return undefined;
+}
+
+export function totpMatches(secretBase32: string, code: string, nowMs: number): boolean {
+  return acceptedTotpStep(secretBase32, code, nowMs) !== undefined;
+}
+
+export type RateState = {
+  lockoutUntil: number;
+  failures: number;
+  globalHits: number[];
+  perIp: Record<string, number[]>;
+};
+
+export function emptyRate(): RateState {
+  return { lockoutUntil: 0, failures: 0, globalHits: [], perIp: {} };
+}
+
+export function takePersisted(
+  state: RateState,
+  ip: string,
+  now: number,
+  opts: { windowLimit: number; windowMs: number; lockoutFailures: number; lockoutMs: number },
+): { state: RateState; ok: true } | { state: RateState; ok: false; retryAfterSec: number } {
+  if (state.lockoutUntil > now) {
+    return { state, ok: false, retryAfterSec: Math.max(1, Math.ceil((state.lockoutUntil - now) / 1000)) };
+  }
+  const globalHits = state.globalHits.filter((t) => now - t < opts.windowMs);
+  const ipHits = (state.perIp[ip] ?? []).filter((t) => now - t < opts.windowMs);
+  if (globalHits.length >= opts.windowLimit || ipHits.length >= opts.windowLimit) {
+    const oldest = Math.min(globalHits[0] ?? now, ipHits[0] ?? now);
+    return {
+      state: { ...state, globalHits, perIp: { ...state.perIp, [ip]: ipHits } },
+      ok: false,
+      retryAfterSec: Math.max(1, Math.ceil((opts.windowMs - (now - oldest)) / 1000)),
+    };
+  }
+  globalHits.push(now);
+  ipHits.push(now);
+  return { state: { ...state, globalHits, perIp: { ...state.perIp, [ip]: ipHits } }, ok: true };
+}
+
+export function noteFailure(state: RateState, now: number, opts: { lockoutFailures: number; lockoutMs: number }): RateState {
+  const failures = state.failures + 1;
+  if (failures >= opts.lockoutFailures) return { ...state, failures, lockoutUntil: now + opts.lockoutMs };
+  return { ...state, failures };
+}
+
+export function clientIp(input: {
+  socketIp: string | undefined;
+  forwardedFor?: string | undefined;
+  trustedProxies: readonly string[];
+}): string {
+  const socketIp = input.socketIp?.trim() || "unknown";
+  if (!input.trustedProxies.includes(socketIp)) return socketIp;
+  const first = input.forwardedFor?.split(",").map((part) => part.trim()).find(Boolean);
+  return first || socketIp;
 }
 
 function sha256(value: string): string {
@@ -201,6 +260,10 @@ export class OwnerAuthService {
       sessionTtlMs?: number;
       cookieSecure?: boolean;
       rateLimit?: LoginRateLimit;
+      windowLimit?: number;
+      windowMs?: number;
+      lockoutFailures?: number;
+      lockoutMs?: number;
     },
   ) {
     if (opts.sessionSecret.length < 32) throw new Error("OWNER_SESSION_SECRET must be at least 32 characters");
@@ -210,8 +273,30 @@ export class OwnerAuthService {
     return this.opts.now?.() ?? Date.now();
   }
 
-  private limiter(): LoginRateLimit {
-    return this.opts.rateLimit ?? new LoginRateLimit(10, 15 * 60_000, () => this.now());
+  private rateOpts() {
+    return {
+      windowLimit: this.opts.windowLimit ?? 10,
+      windowMs: this.opts.windowMs ?? 15 * 60_000,
+      lockoutFailures: this.opts.lockoutFailures ?? 10,
+      lockoutMs: this.opts.lockoutMs ?? 15 * 60_000,
+    };
+  }
+
+  private guard(action: string, ip: string): { ok: true } | { ok: false; retryAfterSec: number } {
+    if (this.opts.rateLimit) return this.opts.rateLimit.take(`${action}:${ip}`);
+    const rec = this.store.read();
+    const taken = takePersisted(rec.rate ?? emptyRate(), ip, this.now(), this.rateOpts());
+    this.store.write({ ...rec, rate: taken.state });
+    return taken.ok ? { ok: true } : { ok: false, retryAfterSec: taken.retryAfterSec };
+  }
+
+  private fail(ip: string, status: 401, error: string): AuthFailure {
+    if (!this.opts.rateLimit) {
+      const rec = this.store.read();
+      this.store.write({ ...rec, rate: noteFailure(rec.rate ?? emptyRate(), this.now(), this.rateOpts()) });
+    }
+    void ip;
+    return { ok: false, status, error };
   }
 
   issueEnrollmentCode(): { code: string; expiresAt: string } {
@@ -230,18 +315,18 @@ export class OwnerAuthService {
   }
 
   enroll(code: string, password: string, ip: string): { ok: true; otpauth: string } | AuthFailure {
-    const limited = this.limiter().take(`enroll:${ip}`);
+    const limited = this.guard("enroll", ip);
     if (!limited.ok) return { ok: false, status: 429, error: "RATE_LIMITED", retryAfterSec: limited.retryAfterSec };
-    if (!passwordAcceptable(password)) return { ok: false, status: 401, error: "PASSWORD_REJECTED" };
+    if (!passwordAcceptable(password)) return this.fail(ip, 401, "PASSWORD_REJECTED");
     const rec = this.store.read();
-    if (rec.enrolled) return { ok: false, status: 401, error: "ALREADY_ENROLLED" };
+    if (rec.enrolled) return this.fail(ip, 401, "ALREADY_ENROLLED");
     if (!rec.pendingCodeHash || rec.pendingCodeExp === undefined || rec.pendingCodeExp <= this.now()) {
-      return { ok: false, status: 401, error: "ENROLL_CODE_INVALID" };
+      return this.fail(ip, 401, "ENROLL_CODE_INVALID");
     }
     const presented = Buffer.from(sha256(code));
     const expected = Buffer.from(rec.pendingCodeHash);
     if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) {
-      return { ok: false, status: 401, error: "ENROLL_CODE_INVALID" };
+      return this.fail(ip, 401, "ENROLL_CODE_INVALID");
     }
     const salt = randomBytes(16);
     const totpSecret = base32Encode(randomBytes(20));
@@ -252,36 +337,43 @@ export class OwnerAuthService {
       totpSecret,
       enrolled: false,
       totpPending: true,
+      ...(rec.rate ? { rate: rec.rate } : {}),
+      ...(rec.lastTotpStep !== undefined ? { lastTotpStep: rec.lastTotpStep } : {}),
     });
     return { ok: true, otpauth: `otpauth://totp/core5:owner?secret=${totpSecret}&issuer=core5&digits=6&period=30` };
   }
 
   confirmTotp(code: string, ip: string): { ok: true } | AuthFailure {
-    const limited = this.limiter().take(`confirm:${ip}`);
+    const limited = this.guard("confirm", ip);
     if (!limited.ok) return { ok: false, status: 429, error: "RATE_LIMITED", retryAfterSec: limited.retryAfterSec };
     const rec = this.store.read();
-    if (!rec.totpPending || !rec.totpSecret) return { ok: false, status: 401, error: "ENROLL_INCOMPLETE" };
-    if (!totpMatches(rec.totpSecret, code, this.now())) return { ok: false, status: 401, error: "TOTP_INVALID" };
-    this.store.write({ ...rec, totpPending: false, enrolled: true });
+    if (!rec.totpPending || !rec.totpSecret) return this.fail(ip, 401, "ENROLL_INCOMPLETE");
+    const step = acceptedTotpStep(rec.totpSecret, code, this.now());
+    if (step === undefined) return this.fail(ip, 401, "TOTP_INVALID");
+    if (rec.lastTotpStep !== undefined && step <= rec.lastTotpStep) return this.fail(ip, 401, "TOTP_REPLAY");
+    this.store.write({ ...rec, totpPending: false, enrolled: true, lastTotpStep: step });
     return { ok: true };
   }
 
   login(password: string, totp: string, ip: string): { ok: true; setCookie: string[]; csrf: string; exp: number } | AuthFailure {
-    const limited = this.limiter().take(`login:${ip}`);
+    const limited = this.guard("login", ip);
     if (!limited.ok) return { ok: false, status: 429, error: "RATE_LIMITED", retryAfterSec: limited.retryAfterSec };
     const rec = this.store.read();
     if (!rec.enrolled || !rec.passwordSalt || !rec.passwordHash || !rec.totpSecret) {
-      return { ok: false, status: 401, error: "UNAUTHENTICATED" };
+      return this.fail(ip, 401, "UNAUTHENTICATED");
     }
     const salt = Buffer.from(rec.passwordSalt, "base64url");
     const actual = hashPassword(password, salt);
     const expected = Buffer.from(rec.passwordHash, "base64url");
     const passwordOk = actual.length === expected.length && timingSafeEqual(actual, expected);
-    const totpOk = totpMatches(rec.totpSecret, totp, this.now());
-    if (!passwordOk || !totpOk) return { ok: false, status: 401, error: "UNAUTHENTICATED" };
+    const step = acceptedTotpStep(rec.totpSecret, totp, this.now());
+    if (!passwordOk || step === undefined) return this.fail(ip, 401, "UNAUTHENTICATED");
+    if (rec.lastTotpStep !== undefined && step <= rec.lastTotpStep) return this.fail(ip, 401, "TOTP_REPLAY");
+    const generation = rec.generation + 1;
     const exp = this.now() + (this.opts.sessionTtlMs ?? SESSION_TTL_MS);
     const csrf = randomBytes(18).toString("base64url");
-    const token = signSession({ exp, csrf, gen: rec.generation }, this.opts.sessionSecret);
+    this.store.write({ ...rec, generation, lastTotpStep: step, rate: { ...(rec.rate ?? emptyRate()), failures: 0 } });
+    const token = signSession({ exp, csrf, gen: generation }, this.opts.sessionSecret);
     const maxAge = Math.max(1, Math.floor((exp - this.now()) / 1000));
     const secure = this.opts.cookieSecure === true;
     return {

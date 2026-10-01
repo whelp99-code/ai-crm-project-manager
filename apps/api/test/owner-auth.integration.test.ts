@@ -69,6 +69,7 @@ describe("owner session gate", () => {
       payload: { totp: totpCode(secret!, now) },
     });
     expect(confirm.statusCode).toBe(200);
+    now += 30_000;
 
     const login = await api.inject({
       method: "POST",

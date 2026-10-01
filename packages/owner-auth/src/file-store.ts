@@ -17,9 +17,12 @@ export class FileOwnerStore implements OwnerStore {
         ...(typeof parsed.totpSecret === "string" ? { totpSecret: parsed.totpSecret } : {}),
         ...(typeof parsed.pendingCodeHash === "string" ? { pendingCodeHash: parsed.pendingCodeHash } : {}),
         ...(typeof parsed.pendingCodeExp === "number" ? { pendingCodeExp: parsed.pendingCodeExp } : {}),
+        ...(typeof parsed.lastTotpStep === "number" ? { lastTotpStep: parsed.lastTotpStep } : {}),
+        ...(parsed.rate && typeof parsed.rate === "object" ? { rate: parsed.rate } : {}),
       };
-    } catch {
-      return emptyRecord();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptyRecord();
+      throw error;
     }
   }
 

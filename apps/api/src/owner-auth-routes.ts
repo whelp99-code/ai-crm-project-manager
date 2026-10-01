@@ -1,5 +1,5 @@
-import type { FastifyInstance } from "fastify";
-import { isOwnerPublicPath, OwnerAuthService, type OwnerStore } from "@ai-crm/owner-auth";
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import { clientIp as peerIp, isOwnerPublicPath, OwnerAuthService, type OwnerStore } from "@ai-crm/owner-auth";
 import { FileOwnerStore } from "@ai-crm/owner-auth/file-store";
 
 export type OwnerAuthOptions = {
@@ -17,8 +17,14 @@ function requestPath(url: string): string {
   return q === -1 ? url : url.slice(0, q);
 }
 
-function clientIp(ip: string): string {
-  return ip || "unknown";
+function clientIp(request: FastifyRequest): string {
+  const trusted = (process.env.OWNER_TRUSTED_PROXIES ?? "").split(",").map((part) => part.trim()).filter(Boolean);
+  const forwarded = request.headers["x-forwarded-for"];
+  return peerIp({
+    socketIp: request.socket?.remoteAddress,
+    forwardedFor: Array.isArray(forwarded) ? forwarded.join(",") : forwarded,
+    trustedProxies: trusted,
+  });
 }
 
 export function registerOwnerAuth(app: FastifyInstance, options: OwnerAuthOptions = {}): OwnerAuthService | undefined {
@@ -57,7 +63,7 @@ export function registerOwnerAuth(app: FastifyInstance, options: OwnerAuthOption
     const body = request.body as { code?: unknown; password?: unknown } | null;
     const code = typeof body?.code === "string" ? body.code : "";
     const password = typeof body?.password === "string" ? body.password : "";
-    const result = service.enroll(code, password, clientIp(request.ip));
+    const result = service.enroll(code, password, clientIp(request));
     if (!result.ok) {
       if (result.retryAfterSec) reply.header("retry-after", String(result.retryAfterSec));
       return reply.code(result.status).send({ error: result.error });
@@ -68,7 +74,7 @@ export function registerOwnerAuth(app: FastifyInstance, options: OwnerAuthOption
   app.post("/api/auth/enroll/confirm", async (request, reply) => {
     const body = request.body as { totp?: unknown } | null;
     const totp = typeof body?.totp === "string" ? body.totp : "";
-    const result = service.confirmTotp(totp, clientIp(request.ip));
+    const result = service.confirmTotp(totp, clientIp(request));
     if (!result.ok) {
       if (result.retryAfterSec) reply.header("retry-after", String(result.retryAfterSec));
       return reply.code(result.status).send({ error: result.error });
@@ -80,7 +86,7 @@ export function registerOwnerAuth(app: FastifyInstance, options: OwnerAuthOption
     const body = request.body as { password?: unknown; totp?: unknown } | null;
     const password = typeof body?.password === "string" ? body.password : "";
     const totp = typeof body?.totp === "string" ? body.totp : "";
-    const result = service.login(password, totp, clientIp(request.ip));
+    const result = service.login(password, totp, clientIp(request));
     if (!result.ok) {
       if (result.retryAfterSec) reply.header("retry-after", String(result.retryAfterSec));
       return reply.code(result.status).send({ error: result.error });

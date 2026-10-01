@@ -29,7 +29,27 @@ function bytesToB64url(bytes: Uint8Array): string {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-export async function sessionTokenActive(token: string, secret: string, nowMs: number): Promise<boolean> {
+export async function sessionSignatureLive(token: string, secret: string, nowMs: number): Promise<boolean> {
+  return sessionTokenActive(token, secret, nowMs, readGen(token) ?? Number.NaN);
+}
+
+function readGen(token: string): number | undefined {
+  const payload = token.split(".")[1];
+  if (!payload) return undefined;
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(b64urlToBytes(payload))) as { gen?: number };
+    return typeof parsed.gen === "number" ? parsed.gen : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function sessionTokenActive(
+  token: string,
+  secret: string,
+  nowMs: number,
+  generation: number,
+): Promise<boolean> {
   const parts = token.split(".");
   if (parts.length !== 3 || parts[0] !== "v1" || !parts[1] || !parts[2]) return false;
   const expected = bytesToB64url(await hmac(secret, parts[1]));
@@ -38,8 +58,8 @@ export async function sessionTokenActive(token: string, secret: string, nowMs: n
   for (let i = 0; i < expected.length; i += 1) diff |= expected.charCodeAt(i) ^ parts[2].charCodeAt(i);
   if (diff !== 0) return false;
   try {
-    const parsed = JSON.parse(new TextDecoder().decode(b64urlToBytes(parts[1]))) as { exp?: number };
-    return typeof parsed.exp === "number" && parsed.exp > nowMs;
+    const parsed = JSON.parse(new TextDecoder().decode(b64urlToBytes(parts[1]))) as { exp?: number; gen?: number };
+    return typeof parsed.exp === "number" && parsed.exp > nowMs && parsed.gen === generation;
   } catch {
     return false;
   }
@@ -51,9 +71,10 @@ export async function pageAllowsEdge(input: {
   token: string | undefined;
   secret: string | undefined;
   nowMs: number;
+  generation: number | undefined;
 }): Promise<boolean> {
   if (!input.enabled) return true;
   if (input.pathname === "/login" || input.pathname === "/health" || input.pathname.startsWith("/api/owner/")) return true;
-  if (!input.token || !input.secret) return false;
-  return sessionTokenActive(input.token, input.secret, input.nowMs);
+  if (!input.token || !input.secret || input.generation === undefined) return false;
+  return sessionTokenActive(input.token, input.secret, input.nowMs, input.generation);
 }
