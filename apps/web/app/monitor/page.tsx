@@ -1,3 +1,5 @@
+import { withOwnerCookie } from "../owner-server";
+
 interface Metrics {
   status: string;
   agent: { jobsTotal: number; jobsByStatus: Record<string, number> };
@@ -23,7 +25,7 @@ async function loadMetrics(): Promise<LoadResult> {
     // same posture as /health (see apps/api/src/app.ts). The monitor page
     // never issues domain PATCH/POST — mutations stay confined to
     // /api/agent/commands on the work page.
-    const response = await fetch(`${apiBase}/metrics`, { cache: "no-store" });
+    const response = await fetch(`${apiBase}/metrics`, await withOwnerCookie({ cache: "no-store" }));
     if (!response.ok) {
       return { ok: false, message: `모니터 데이터를 불러오지 못했습니다. API 상태: ${response.status}` };
     }

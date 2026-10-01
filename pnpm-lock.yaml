@@ -58,6 +58,9 @@ importers:
       '@ai-crm/orchestration':
         specifier: workspace:*
         version: link:../../packages/orchestration
+      '@ai-crm/owner-auth':
+        specifier: workspace:*
+        version: link:../../packages/owner-auth
       '@ai-crm/policy-engine':
         specifier: workspace:*
         version: link:../../packages/policy-engine
@@ -83,6 +86,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@ai-crm/owner-auth':
+        specifier: workspace:*
+        version: link:../../packages/owner-auth
       next:
         specifier: 15.5.26
         version: 15.5.26(@playwright/test@1.61.1)(@types/node@22.20.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -252,6 +258,15 @@ importers:
       '@ai-crm/contracts':
         specifier: workspace:*
         version: link:../contracts
+    devDependencies:
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
+  packages/owner-auth:
     devDependencies:
       typescript:
         specifier: ^5.7.2

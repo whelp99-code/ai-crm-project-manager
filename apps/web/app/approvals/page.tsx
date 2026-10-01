@@ -1,3 +1,4 @@
+import { withOwnerCookie } from "../owner-server";
 import { DecideClient } from "./decide-client";
 
 interface ControlRequest {
@@ -36,7 +37,7 @@ type LoadResult =
   | { ok: false; message: string };
 
 async function fetchJson<T>(base: string, ws: string, path: string): Promise<T> {
-  const response = await fetch(`${base}${path}`, { headers: { "x-workspace-id": ws }, cache: "no-store" });
+  const response = await fetch(`${base}${path}`, await withOwnerCookie({ headers: { "x-workspace-id": ws }, cache: "no-store" }));
   if (!response.ok) throw new Error(`${path} -> ${response.status}`);
   return (await response.json()) as T;
 }

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import { OwnerFetchPatch } from "./owner-fetch-patch";
 
 export const metadata: Metadata = {
   title: "AI 업무 운영실",
@@ -86,6 +87,7 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
     <html lang="ko">
       <head><style>{styles}</style></head>
       <body>
+        <OwnerFetchPatch />
         <div className="shell">
           <header className="topbar">
             <div className="topbar-inner">

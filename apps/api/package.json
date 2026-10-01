@@ -18,6 +18,7 @@
     "@ai-crm/imports": "workspace:*",
     "@ai-crm/model-gateway": "workspace:*",
     "@ai-crm/orchestration": "workspace:*",
+    "@ai-crm/owner-auth": "workspace:*",
     "@ai-crm/policy-engine": "workspace:*",
     "@ai-crm/reports": "workspace:*",
     "fastify": "^5.6.2",

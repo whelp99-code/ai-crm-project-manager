@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { ownerFetchInit } from "../owner-browser";
 
 type Props = {
   apiBase: string;
@@ -18,14 +19,14 @@ export function DecideClient({ apiBase, workspaceId, controlId, defaultApproverI
     setBusy(true);
     setMessage(null);
     try {
-      const response = await fetch(`${apiBase}/api/governance/controls/${controlId}/decide`, {
+      const response = await fetch(`${apiBase}/api/governance/controls/${controlId}/decide`, ownerFetchInit({
         method: "POST",
         headers: {
           "content-type": "application/json",
           "x-workspace-id": workspaceId,
         },
         body: JSON.stringify({ principalId, decision }),
-      });
+      }));
       const body = (await response.json()) as { error?: string; status?: string };
       if (!response.ok) {
         throw new Error(body.error ?? `decide ${response.status}`);
