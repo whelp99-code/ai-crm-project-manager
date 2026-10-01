@@ -8,6 +8,7 @@ import {
   OwnerAuthService,
   clientIp,
   cookieFlags,
+  webLoginPeer,
   pageAllows,
   signSession,
   totpCode,
@@ -126,6 +127,9 @@ describe("owner auth", () => {
     expect(globalSvc.login("x", "000000", "1.1.1.1")).toMatchObject({ status: 401 });
     expect(globalSvc.login("x", "000000", "2.2.2.2")).toMatchObject({ status: 401 });
     expect(globalSvc.login("x", "000000", "3.3.3.3")).toMatchObject({ status: 429 });
+    const spoofed = new Headers({ "x-owner-socket-ip": "1.2.3.4", "x-forwarded-for": "8.8.8.8" });
+    expect(webLoginPeer(spoofed)).toBe("unknown");
+    expect(webLoginPeer(spoofed, "127.0.0.1")).toBe("127.0.0.1");
     expect(clientIp({ socketIp: "127.0.0.1", forwardedFor: "1.2.3.4", trustedProxies: [] })).toBe("127.0.0.1");
     expect(clientIp({ socketIp: "10.0.0.8", forwardedFor: "1.2.3.4", trustedProxies: ["10.0.0.8"] })).toBe("1.2.3.4");
     const store = new MemoryOwnerStore();

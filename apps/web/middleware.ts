@@ -3,6 +3,7 @@ import { OWNER_COOKIE, sessionSignatureLive } from "@ai-crm/owner-auth/page-gate
 
 export async function middleware(request: NextRequest) {
   const headers = new Headers(request.headers);
+  headers.delete("x-owner-socket-ip");
   headers.set("x-pathname", request.nextUrl.pathname);
   const enabled = process.env.OWNER_AUTH === "1";
   const path = request.nextUrl.pathname;

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { clientIp, OwnerAuthService } from "@ai-crm/owner-auth";
+import { OwnerAuthService, webLoginPeer } from "@ai-crm/owner-auth";
 import { FileOwnerStore } from "@ai-crm/owner-auth/file-store";
 
 function service(): OwnerAuthService {
@@ -13,12 +13,7 @@ function service(): OwnerAuthService {
 }
 
 function ipOf(request: Request): string {
-  const trusted = (process.env.OWNER_TRUSTED_PROXIES ?? "").split(",").map((part) => part.trim()).filter(Boolean);
-  return clientIp({
-    socketIp: request.headers.get("x-owner-socket-ip") ?? undefined,
-    forwardedFor: request.headers.get("x-forwarded-for") ?? undefined,
-    trustedProxies: trusted,
-  });
+  return webLoginPeer(request.headers);
 }
 
 export async function postOwner(request: Request, action: "enroll" | "confirm" | "login"): Promise<NextResponse> {

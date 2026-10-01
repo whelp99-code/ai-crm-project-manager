@@ -234,6 +234,19 @@ export function noteFailure(state: RateState, now: number, opts: { lockoutFailur
   return { ...state, failures };
 }
 
+/** Login peer for the Next route. Client headers are not a socket. */
+export function webLoginPeer(
+  headers: { get(name: string): string | null },
+  socketIp?: string,
+): string {
+  const trusted = (process.env.OWNER_TRUSTED_PROXIES ?? "").split(",").map((part) => part.trim()).filter(Boolean);
+  return clientIp({
+    socketIp,
+    forwardedFor: headers.get("x-forwarded-for") ?? undefined,
+    trustedProxies: trusted,
+  });
+}
+
 export function clientIp(input: {
   socketIp: string | undefined;
   forwardedFor?: string | undefined;
