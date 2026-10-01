@@ -12,6 +12,7 @@
     "e2e": "playwright test"
   },
   "dependencies": {
+    "@ai-crm/owner-auth": "workspace:*",
     "next": "15.5.26",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"

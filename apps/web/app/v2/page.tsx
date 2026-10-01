@@ -1,3 +1,5 @@
+import { withOwnerCookie } from "../owner-server";
+
 interface Readiness {
   workspaceId: string;
   runtimeVersion: number;
@@ -36,10 +38,10 @@ async function loadReadiness(): Promise<LoadResult> {
   if (apiKey) headers.authorization = `Bearer ${apiKey}`;
 
   try {
-    const response = await fetch(`${apiBase}/api/cwos/v2/readiness`, {
+    const response = await fetch(`${apiBase}/api/cwos/v2/readiness`, await withOwnerCookie({
       headers,
       cache: "no-store",
-    });
+    }));
     if (!response.ok) {
       return { ok: false, message: `v2 런타임 상태를 불러오지 못했습니다. API 상태: ${response.status}` };
     }

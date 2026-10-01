@@ -8,6 +8,7 @@ import {
   type CustomerWorkOsV2ActorBinding,
 } from "./customer-work-os-v2-routes.js";
 import type { CwosV2StateStore } from "./customer-work-os-v2-runtime.js";
+import { registerOwnerAuth, type OwnerAuthOptions } from "./owner-auth-routes.js";
 
 export * from "./app-base.js";
 
@@ -24,6 +25,8 @@ export type CustomerWorkOsV2AppOptions = CreateAppOptions & {
   customerWorkOsV2Profile?: "test" | "development" | "production";
   /** Server-authenticated API-key operator; request headers must match and cannot assert step-up. */
   customerWorkOsV2ActorBinding?: CustomerWorkOsV2ActorBinding;
+  /** Single-owner session gate. Off unless `enabled` or `OWNER_AUTH=1`. */
+  ownerAuth?: OwnerAuthOptions;
 };
 
 function configuredActorBinding(options: CustomerWorkOsV2AppOptions): CustomerWorkOsV2ActorBinding | undefined {
@@ -67,6 +70,7 @@ export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInst
     throw new Error("[CWOS_V2_ACTOR_BINDING_REQUIRES_API_KEY] trusted operator binding requires AUTH_API_KEY/API_AUTH_TOKEN");
   }
   const app = createBaseApp(options);
+  registerOwnerAuth(app, options.ownerAuth ?? {});
   const configuredDatabaseUrl =
     typeof options.databaseUrl === "string" && options.databaseUrl.trim()
       ? options.databaseUrl.trim()

@@ -1,3 +1,4 @@
+import { withOwnerCookie } from "../owner-server";
 import { RecordList } from "../record-list";
 import { directionLabel, formatKrw } from "./labels";
 
@@ -29,13 +30,13 @@ async function loadFinance(): Promise<LoadResult> {
     return { ok: false, message: "API_BASE_URL, WORKSPACE_ID, AUTH_API_KEY 서버 설정이 필요합니다." };
   }
   try {
-    const response = await fetch(`${apiBase}/api/cwos/finance`, {
+    const response = await fetch(`${apiBase}/api/cwos/finance`, await withOwnerCookie({
       headers: {
         authorization: `Bearer ${apiKey}`,
         "x-workspace-id": workspaceId,
       },
       cache: "no-store",
-    });
+    }));
     if (!response.ok) {
       return { ok: false, message: `재무 목록을 불러오지 못했습니다. API 상태: ${response.status}` };
     }
