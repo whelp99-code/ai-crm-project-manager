@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
@@ -141,22 +142,19 @@ function bridgeOf(instance: FastifyInstance): PgNotifyBridge {
 }
 
 /** Waits for `hub.subscribe(ws, jobId, ...)` to fire once, or rejects on timeout. */
-function waitForHubEvent(hub: EventHub, ws: string, jobId: string, timeoutMs = 5000): Promise<{ kind: string }> {
+function waitForHubEvent(hub: EventHub, ws: string, jobId: string, timeoutMs = 5000, kind?: string): Promise<{ kind: string }> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       unsubscribe();
       reject(new Error(`timed out waiting for EventHub event on (${ws}, ${jobId})`));
     }, timeoutMs);
     const unsubscribe = hub.subscribe(ws, jobId, (event) => {
+      if (kind && event.kind !== kind) return;
       clearTimeout(timer);
       unsubscribe();
       resolve({ kind: event.kind });
     });
   });
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -402,11 +400,11 @@ describe.skipIf(!LIVE)("N-09 cross-process eventing via PG LISTEN/NOTIFY against
       expect(created.status).toBe(202);
       const jobId = (JSON.parse(created.body) as { jobId: string }).jobId;
 
-      // Give instance B's bridge time to receive + reconcile the first NOTIFY
-      // (job creation) so it starts tracking WS_XPROC before we subscribe.
-      await sleep(300);
+      // Establish the durable cursor, rather than guessing when the creation
+      // NOTIFY has been processed. Cancellation still requires real NOTIFY.
+      await bridgeOf(instanceB).reconcileWorkspace(WS_XPROC);
 
-      const waiter = waitForHubEvent(hubOf(instanceB), WS_XPROC, jobId, 5000);
+      const waiter = waitForHubEvent(hubOf(instanceB), WS_XPROC, jobId, 5000, "work_item.cancelled");
       const cancelled = await httpPost(portA, `/api/agent/jobs/${jobId}/cancel`, WS_XPROC, {});
       expect(cancelled.status).toBe(200);
 
@@ -437,51 +435,98 @@ describe.skipIf(!LIVE)("N-09 cross-process eventing via PG LISTEN/NOTIFY against
           },
         ]),
       });
-      const instanceB = await bootApp({ databaseUrl: DATABASE_URL, pgNotifyChannel: channel });
-      const portA = await listen(instanceA);
-
-      const planCreated = await httpPost(portA, "/api/pm/plans", WS_RECONNECT, {
-        id: "plan-n09-reconnect",
-        projectId: "p",
-        objective: "c",
-        taskIds: ["t1"],
-        createdByPrincipalId: OPERATOR,
-        createdAt: "2026-07-19T00:00:00.000Z",
+      const instanceB = await bootApp({ databaseUrl: DATABASE_URL, pgNotify: false });
+      const { Pool, Client } = (await import("pg")) as typeof import("pg");
+      const pool = new Pool({ connectionString: DATABASE_URL });
+      let releaseReconnect!: () => void;
+      const reconnectPermission = new Promise<void>(resolve => { releaseReconnect = resolve; });
+      let reconnectRequested!: () => void;
+      const reconnectRequest = new Promise<void>(resolve => { reconnectRequested = resolve; });
+      let connections = 0;
+      let listens = 0;
+      // This is the same production bridge and real pg client/pool. Hold only
+      // its fresh reconnect factory so the outage lasts until we release it.
+      const bridgeB = new PgNotifyBridge({
+        pool: rlsEnforcedQueryable(pool), channel,
+        connect: async () => {
+          connections++;
+          if (connections > 1) {
+            reconnectRequested();
+            await reconnectPermission;
+          }
+          const client = new Client({ connectionString: DATABASE_URL });
+          await client.connect();
+          return {
+            connect: async () => { await client.connect(); },
+            query: async (sql: string) => {
+              const result = await client.query(sql);
+              if (sql === `LISTEN ${channel}`) listens++;
+              return result;
+            },
+            on: (event, callback) => EventEmitter.prototype.on.call(client, event, callback),
+            end: () => client.end(),
+          };
+        },
+        onEvent: event => hubOf(instanceB).publish(event),
       });
-      expect(planCreated.status).toBe(201);
+      try {
+        await bridgeB.start();
+        bridgeB.trackWorkspace(WS_RECONNECT);
+        const portA = await listen(instanceA);
 
-      const created = await httpPost(portA, "/api/agent/commands", WS_RECONNECT, {
-        text: "assign for reconnect",
-        idempotencyKey: "idem-n09-reconnect-1",
-      });
-      expect(created.status).toBe(202);
-      const jobId = (JSON.parse(created.body) as { jobId: string }).jobId;
+        const planCreated = await httpPost(portA, "/api/pm/plans", WS_RECONNECT, {
+          id: "plan-n09-reconnect",
+          projectId: "p",
+          objective: "c",
+          taskIds: ["t1"],
+          createdByPrincipalId: OPERATOR,
+          createdAt: "2026-07-19T00:00:00.000Z",
+        });
+        expect(planCreated.status).toBe(201);
 
-      // Let instance B's bridge see + reconcile the creation NOTIFY, so
-      // WS_RECONNECT is tracked (cursor established) before we cut it off.
-      await sleep(300);
-      const cursorBeforeDrop = bridgeOf(instanceB).cursorFor(WS_RECONNECT);
-      expect(cursorBeforeDrop).toBeDefined();
+        const created = await httpPost(portA, "/api/agent/commands", WS_RECONNECT, {
+          text: "assign for reconnect",
+          idempotencyKey: "idem-n09-reconnect-1",
+        });
+        expect(created.status).toBe(202);
+        const jobId = (JSON.parse(created.body) as { jobId: string }).jobId;
 
-      // Simulate the listener connection dropping.
-      await bridgeOf(instanceB).simulateDisconnect();
+        await bridgeB.reconcileWorkspace(WS_RECONNECT);
+        const cursorBeforeDrop = bridgeB.cursorFor(WS_RECONNECT);
+        expect(cursorBeforeDrop).toBeDefined();
 
-      // Mutate on instance A while instance B's LISTEN connection is down —
-      // the NOTIFY fires but nobody on instance B is listening to receive it.
-      const cancelled = await httpPost(portA, `/api/agent/jobs/${jobId}/cancel`, WS_RECONNECT, {});
-      expect(cancelled.status).toBe(200);
+        // Arm both event signals before the drop. Hold the reconnect factory
+        // so scheduling/HTTP latency cannot close the outage prematurely.
+        const waiter = waitForHubEvent(hubOf(instanceB), WS_RECONNECT, jobId, 8000, "work_item.cancelled");
+        await bridgeB.simulateDisconnect();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([reconnectRequest, new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => reject(new Error("reconnect factory was not requested")), 8000);
+          })]);
+        } finally {
+          clearTimeout(timer);
+        }
+        expect(listens).toBe(1);
 
-      // Subscribe on instance B BEFORE reconnect completes, so the
-      // reconnect-triggered reconcileAll's publish lands on an active
-      // subscriber (proves recovery, not just a lucky race on the NOTIFY).
-      const waiter = waitForHubEvent(hubOf(instanceB), WS_RECONNECT, jobId, 8000);
+        // The HTTP cancellation commits its durable event and sends NOTIFY
+        // while B has no fresh client/LISTEN.
+        const cancelled = await httpPost(portA, `/api/agent/jobs/${jobId}/cancel`, WS_RECONNECT, {});
+        expect(cancelled.status).toBe(200);
+        expect(listens).toBe(1);
+        releaseReconnect();
 
-      const recovered = await waiter;
-      expect(recovered.kind).toBe("work_item.cancelled");
-
-      const cursorAfterReconnect = bridgeOf(instanceB).cursorFor(WS_RECONNECT);
-      expect(cursorAfterReconnect).toBeDefined();
-      expect(cursorAfterReconnect!.id).not.toBe(cursorBeforeDrop!.id);
+        const recovered = await waiter;
+        expect(recovered.kind).toBe("work_item.cancelled");
+        expect(listens).toBe(2);
+        const cursorAfterReconnect = bridgeB.cursorFor(WS_RECONNECT);
+        expect(cursorAfterReconnect).toBeDefined();
+        expect(cursorAfterReconnect!.id).not.toBe(cursorBeforeDrop!.id);
+      } finally {
+        releaseReconnect();
+        await bridgeB.stop();
+        await pool.end();
+      }
     },
     20_000,
   );
