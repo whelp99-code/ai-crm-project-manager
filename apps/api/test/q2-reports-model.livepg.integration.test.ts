@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { createApp, type CreateAppOptions } from "../src/app.js";
+import { pgSmokeConnectionEnv } from "./pg-smoke-connection-env.js";
 import type { ModelClient } from "@ai-crm/model-gateway";
 
 /**
@@ -86,11 +87,7 @@ describe.skipIf(!LIVE)("Q2 reports + model-gateway PG-primary against REAL Postg
     execFileSync("bash", [smokeScript], {
       env: {
         ...process.env,
-        PGHOST: "localhost",
-        PGPORT: "5432",
-        PGUSER: "ai_crm",
-        PGPASSWORD: "ai_crm_dev",
-        PGDATABASE: "ai_crm",
+        ...pgSmokeConnectionEnv(DATABASE_URL),
       },
       stdio: "pipe",
     });

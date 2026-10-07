@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadGovernance, runDurableOutboxDrainTick, type WorkerRuntime } from "../src/main.js";
+import { pgSmokeConnectionEnv } from "./pg-smoke-connection-env.js";
 
 /**
  * D3 outbox drainer/relay against REAL PostgreSQL (LIVE_PG_TEST=1).
@@ -79,11 +80,7 @@ describe.skipIf(!LIVE)("D3 outbox_events drainer/relay against REAL Postgres (LI
     execFileSync("bash", [smokeScript], {
       env: {
         ...process.env,
-        PGHOST: "localhost",
-        PGPORT: "5432",
-        PGUSER: "ai_crm",
-        PGPASSWORD: "ai_crm_dev",
-        PGDATABASE: "ai_crm",
+        ...pgSmokeConnectionEnv(DATABASE_URL),
       },
       stdio: "pipe",
     });

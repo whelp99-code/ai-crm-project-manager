@@ -6,6 +6,7 @@ import type { FastifyInstance } from "fastify";
 import { createApp, type CreateAppOptions } from "../src/app.js";
 import type { GovernanceRepository, GovernancePgQueryable } from "@ai-crm/governance";
 import { createPgGovernanceRepository } from "@ai-crm/governance";
+import { pgSmokeConnectionEnv } from "./pg-smoke-connection-env.js";
 
 /**
  * N-08 (D3 + D4) request-path acceptance against REAL PostgreSQL.
@@ -110,11 +111,7 @@ describe.skipIf(!LIVE)("N-08 PG-primary governance read + audit dual-write again
     execFileSync("bash", [smokeScript], {
       env: {
         ...process.env,
-        PGHOST: "localhost",
-        PGPORT: "5432",
-        PGUSER: "ai_crm",
-        PGPASSWORD: "ai_crm_dev",
-        PGDATABASE: "ai_crm",
+        ...pgSmokeConnectionEnv(DATABASE_URL),
       },
       stdio: "pipe",
     });

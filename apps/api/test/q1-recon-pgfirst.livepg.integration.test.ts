@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { pgSmokeConnectionEnv } from "./pg-smoke-connection-env.js";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -159,11 +160,7 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
     execFileSync("bash", [smokeScript], {
       env: {
         ...process.env,
-        PGHOST: "localhost",
-        PGPORT: "5432",
-        PGUSER: "ai_crm",
-        PGPASSWORD: "ai_crm_dev",
-        PGDATABASE: "ai_crm",
+        ...pgSmokeConnectionEnv(DATABASE_URL),
       },
       stdio: "pipe",
     });

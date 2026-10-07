@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Pool as PgPool } from "pg";
 import { LedgerService, type ChartAccount, type FinancePackConfig, type JournalEntry } from "@ai-crm/finance";
 import { createPgLedgerRepository, type LedgerRepository, type PgQueryable } from "@ai-crm/finance/pg-finance-ledger-adapter";
+import { pgSmokeConnectionEnv } from "./pg-smoke-connection-env.js";
 
 /**
  * PG-C1 (F6 double-entry ledger) acceptance against REAL PostgreSQL.
@@ -193,11 +194,7 @@ describe.skipIf(!LIVE)("PG-C1 finance ledger PG-primary + immutability against R
     execFileSync("bash", [smokeScript], {
       env: {
         ...process.env,
-        PGHOST: "localhost",
-        PGPORT: "5432",
-        PGUSER: "ai_crm",
-        PGPASSWORD: "ai_crm_dev",
-        PGDATABASE: "ai_crm",
+        ...pgSmokeConnectionEnv(DATABASE_URL),
       },
       stdio: "pipe",
     });
