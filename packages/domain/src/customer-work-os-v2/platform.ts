@@ -5,7 +5,10 @@ import { ReadFirstConnectorService, type ConnectorState } from "./connectors.js"
 import { DynamicGraphRuntime, type GraphState } from "./graphs.js";
 import { IdentityTeamService, type IdentityState } from "./identity.js";
 import { UnifiedInboxService, type InboxState } from "./inbox.js";
+import { W04DeliveryFixtureService, type DeliveryFixtureState } from "./delivery.js";
 import { FollowUpService, type FollowUpState } from "./follow-up.js";
+import { W05RenewalRevisionService, type RenewalState } from "./renewals.js";
+import { ContractComparisonService, type ContractComparisonState } from "./contract-comparisons.js";
 import { ProductionReadinessService, type OperationsState } from "./operations.js";
 import { PortalMobileService, type PortalState } from "./portal.js";
 import { PsaCapacityService, type PsaState } from "./psa.js";
@@ -17,6 +20,7 @@ import {
   assertWorkspace,
   copy,
   required,
+  integer,
   type CwosV2Version,
   type Finding,
   type V2Actor,
@@ -64,9 +68,32 @@ export interface CustomerWorkOsV2State {
   portal: PortalState;
   admin: AdminState;
   operations: OperationsState;
+  /** Optional when loading snapshots written before the local W04 fixture path existed. */
+  delivery?: DeliveryFixtureState;
+  /** Optional when loading snapshots written before the local W05 fixture path existed. */
+  renewals?: RenewalState;
+  contractComparisons?: ContractComparisonState;
+  normalizedArchiveRefs?: NormalizedArchiveReference[];
   milestones: ReleaseMilestone[];
   findings: Finding[];
   releaseManifests: ReleaseManifest[];
+}
+
+export interface NormalizedArchiveReference {
+  readonly id: string;
+  readonly workspaceId: string;
+  readonly planId: string;
+  readonly snapshotHash: string;
+  readonly planHash: string;
+  readonly planVersion: number;
+  readonly sourceDigest: string;
+  readonly sourceObservedAt: string;
+  readonly accountIds: readonly string[];
+  readonly engagementIds: readonly string[];
+  readonly financialItemIds: readonly string[];
+  readonly approved: false;
+  readonly createdByPrincipalId: string;
+  readonly createdAt: string;
 }
 
 function stable(value: unknown): unknown {
@@ -161,7 +188,10 @@ export class CustomerWorkOsV2Platform {
   readonly identity = new IdentityTeamService();
   readonly psa = new PsaCapacityService();
   readonly inbox = new UnifiedInboxService();
+  readonly deliveries = new W04DeliveryFixtureService();
   readonly followUps = new FollowUpService();
+  readonly renewals = new W05RenewalRevisionService();
+  readonly contractComparisons = new ContractComparisonService();
   readonly connectors = new ReadFirstConnectorService();
   readonly graphs = new DynamicGraphRuntime();
   readonly ai = new AiCouncilService();
@@ -172,6 +202,7 @@ export class CustomerWorkOsV2Platform {
   private milestones = initialMilestones();
   private findings = new Map<string, Finding>();
   private releaseManifests = new Map<string, ReleaseManifest>();
+  private normalizedArchiveRefs = new Map<string, NormalizedArchiveReference>();
 
   constructor(
     readonly workspaceId: string,
@@ -344,6 +375,10 @@ export class CustomerWorkOsV2Platform {
       portal: this.portal.exportState(),
       admin: this.admin.exportState(),
       operations: this.operations.exportState(),
+      delivery: this.deliveries.exportState(),
+      renewals: this.renewals.exportState(),
+      contractComparisons: this.contractComparisons.exportState(),
+      normalizedArchiveRefs: [...this.normalizedArchiveRefs.values()].map(item => copy(item)),
       milestones: this.milestones.map((item) => copy(item)),
       findings: [...this.findings.values()].map((item) => copy(item)).sort((left, right) => left.id.localeCompare(right.id)),
       releaseManifests: [...this.releaseManifests.values()].map((item) => copy(item)).sort((left, right) => left.id.localeCompare(right.id)),
@@ -398,6 +433,9 @@ export class CustomerWorkOsV2Platform {
     this.identity.hydrateState(copy(input.identity));
     this.psa.hydrateState(copy(input.psa));
     this.inbox.hydrateState(copy(input.inbox));
+    this.deliveries.hydrateState(copy(input.delivery ?? { schemaVersion: 1, orders: [] }));
+    this.renewals.hydrateState(copy(input.renewals ?? { schemaVersion: 1, drafts: [] }));
+    this.contractComparisons.hydrateState(copy(input.contractComparisons ?? { schemaVersion: 1, comparisons: [] }));
     this.followUps.hydrateState(copy(input.followUps ?? { schemaVersion: 1, items: [] }));
     this.connectors.hydrateState(copy(input.connectors));
     this.graphs.hydrateState(copy(input.graphs));
@@ -412,6 +450,36 @@ export class CustomerWorkOsV2Platform {
     });
     this.findings = findings;
     this.releaseManifests = manifests;
+    this.normalizedArchiveRefs = new Map((input.normalizedArchiveRefs ?? []).map(item => [item.id, copy(item)]));
+  }
+
+  recordNormalizedArchiveReference(
+    input: Omit<NormalizedArchiveReference, "id" | "approved" | "createdByPrincipalId" | "createdAt">,
+    actor: V2Actor,
+    now: string,
+  ): NormalizedArchiveReference {
+    assertStepUp(actor);
+    assertWorkspace(this.workspaceId, input.workspaceId);
+    if (!/^[0-9a-f]{64}$/.test(input.sourceDigest)) {
+      throw new CustomerWorkOsV2Error("INVALID_INPUT", "normalized source digest must be SHA-256");
+    }
+    const id = `normalized-${input.sourceDigest}`;
+    const prior = this.normalizedArchiveRefs.get(id);
+    if (prior) return copy(prior);
+    const result: NormalizedArchiveReference = {
+      ...copy(input), id,
+      planId: required(input.planId, "planId"),
+      snapshotHash: required(input.snapshotHash, "snapshotHash"),
+      planHash: required(input.planHash, "planHash"),
+      planVersion: integer(input.planVersion, "planVersion", 1),
+      sourceObservedAt: validIso(input.sourceObservedAt, "sourceObservedAt"),
+      accountIds: uniqueStrings(input.accountIds, "accountIds", true),
+      engagementIds: uniqueStrings(input.engagementIds, "engagementIds", true),
+      financialItemIds: uniqueStrings(input.financialItemIds, "financialItemIds", true),
+      approved: false, createdByPrincipalId: actor.principalId, createdAt: validIso(now, "createdAt"),
+    };
+    this.normalizedArchiveRefs.set(id, result);
+    return copy(result);
   }
 
   private versionIndex(version: CwosV2Version): number {

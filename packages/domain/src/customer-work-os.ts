@@ -161,7 +161,7 @@ export interface Commitment {
   ownerPrincipalId: string;
   counterpartyAccountId?: string;
   description: string;
-  dueAt: string;
+  dueAt: string | null;
   status: "OPEN" | "IN_PROGRESS" | "WAITING" | "DONE" | "CANCELLED";
   priority: number;
   financialImpact: boolean;
@@ -491,6 +491,7 @@ export class CustomerWorkOsService {
   private readonly commitments = new Map<string, Commitment>();
   private readonly products = new Map<string, Product>();
   private readonly quotes = new Map<string, Quote>();
+  private readonly quoteCorrections = new Map<string, Array<{ versionLabel: string; validUntil: string; scope: string; exclusions: string[]; version: number }>>();
   private readonly contracts = new Map<string, Contract>();
   private readonly deliveryProjects = new Map<string, DeliveryProject>();
   private readonly changes = new Map<string, ChangeRequest>();
@@ -669,6 +670,9 @@ export class CustomerWorkOsService {
     this.engagement(input.workspaceId, input.engagementId);
     if (input.sourceActivityId) this.owned(this.activities, input.workspaceId, input.sourceActivityId, "activity");
     if (input.counterpartyAccountId) this.account(input.workspaceId, input.counterpartyAccountId);
+    if (typeof input.dueAt === "string" && input.dueAt.trim() === "") {
+      throw new CustomerWorkOsError("INVALID_INPUT", "commitment.dueAt is required");
+    }
     if (!Number.isInteger(input.priority) || input.priority < 0 || input.priority > 100) {
       throw new CustomerWorkOsError("INVALID_PRIORITY", "commitment priority must be 0..100");
     }
@@ -734,6 +738,37 @@ export class CustomerWorkOsService {
       engagement.version += 1;
     }
     return copy(stored);
+  }
+
+  correctRenewalQuote(
+    workspaceId: string,
+    quoteId: string,
+    expectedVersion: number,
+    patch: { versionLabel: string; validUntil: string; scope: string; exclusions: string[] },
+  ): Quote {
+    const quote = this.versioned(this.quotes, workspaceId, quoteId, expectedVersion, "quote");
+    const engagement = this.engagement(workspaceId, quote.engagementId);
+    if (engagement.type !== "renewal") throw new CustomerWorkOsError("NOT_RENEWAL", "quote correction history is for renewal engagements");
+    const prior = {
+      versionLabel: quote.versionLabel,
+      validUntil: quote.validUntil,
+      scope: quote.scope,
+      exclusions: [...quote.exclusions],
+      version: quote.version,
+    };
+    const key = `${workspaceId}:${quoteId}`;
+    this.quoteCorrections.set(key, [...(this.quoteCorrections.get(key) ?? []), prior]);
+    quote.versionLabel = required(patch.versionLabel, "quote.versionLabel");
+    quote.validUntil = required(patch.validUntil, "quote.validUntil");
+    quote.scope = required(patch.scope, "quote.scope");
+    quote.exclusions = patch.exclusions.map((item) => required(item, "quote.exclusion"));
+    quote.version += 1;
+    return copy(quote);
+  }
+
+  renewalQuoteHistory(workspaceId: string, quoteId: string): Array<{ versionLabel: string; validUntil: string; scope: string; exclusions: string[]; version: number }> {
+    this.owned(this.quotes, workspaceId, quoteId, "quote");
+    return (this.quoteCorrections.get(`${workspaceId}:${quoteId}`) ?? []).map((item) => ({ ...item, exclusions: [...item.exclusions] }));
   }
 
   approveQuote(workspaceId: string, quoteId: string, expectedVersion: number, receipt: ApprovalReceipt, minimumMarginBps: number): Quote {
@@ -1180,7 +1215,12 @@ export class CustomerWorkOsService {
       activities: this.byEngagement(this.activities, workspaceId, engagementId).sort((left, right) => right.occurredAt.localeCompare(left.occurredAt)),
       artifacts: this.byEngagement(this.artifacts, workspaceId, engagementId),
       knowledge: this.byEngagement(this.knowledge, workspaceId, engagementId),
-      commitments: this.byEngagement(this.commitments, workspaceId, engagementId).sort((left, right) => left.dueAt.localeCompare(right.dueAt)),
+      commitments: this.byEngagement(this.commitments, workspaceId, engagementId).sort((left, right) => {
+        if (left.dueAt == null && right.dueAt == null) return 0;
+        if (left.dueAt == null) return 1;
+        if (right.dueAt == null) return -1;
+        return left.dueAt.localeCompare(right.dueAt);
+      }),
       quotes: this.byEngagement(this.quotes, workspaceId, engagementId),
       contracts: this.byEngagement(this.contracts, workspaceId, engagementId),
       deliveryProjects: this.byEngagement(this.deliveryProjects, workspaceId, engagementId),

@@ -86,13 +86,12 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
       - name: Apply every migration in lexical order
-        shell: bash
-        run: |
-          set -euo pipefail
-          for migration in $(find packages/persistence/migrations -maxdepth 1 -type f -name '*.sql' | sort); do
-            echo "=== $migration ==="
-            psql "$PG_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
-          done
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: postgres
+          PGDATABASE: ai_crm
+        run: ./packages/persistence/scripts/pg-rls-smoke.sh
       - name: Live PostgreSQL adversarial checks
         run: psql "$PG_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/cwos-pg-adversarial.sql
       - name: Persistence tests

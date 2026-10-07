@@ -6,3 +6,5 @@ export * from "./customer-work-os-graphs.js";
 export * from "./pg-crm-adapter.js";
 export * from "./pg-crm-sub-adapter.js";
 export * from "./pg-pm-adapter.js";
+export * from "./w01-quote-draft.js";
+export * from "./f2-clause-compare.js";

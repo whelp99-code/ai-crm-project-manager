@@ -101,6 +101,12 @@ DATABASE_URL=postgres://ai_crm_runtime_api:CHANGE_ME@CHANGE_ME_HOST:5432/ai_crm
 # unless ALLOW_INSECURE_PROD=1 is an audited insecure bring-up escape hatch.
 AUTH_API_KEY=CHANGE_ME
 # API_AUTH_TOKEN=CHANGE_ME
+# --- CWOS v2 operator authority: production API-key mode refuses to boot
+# without all three. The request must echo matching identity headers, but
+# cannot assert x-step-up; step-up is trusted only from this server config.
+CWOS_V2_OPERATOR_WORKSPACE_ID=CHANGE_ME_UUID
+CWOS_V2_OPERATOR_PRINCIPAL_ID=CHANGE_ME_PRINCIPAL
+CWOS_V2_OPERATOR_STEP_UP_VERIFIED=1
 # --- Admin pool: a SEPARATE, dedicated cross-workspace-capable (BYPASSRLS)
 # role, used ONLY for hydrate-on-boot (listAllControls/listAllIntents/
 # listJobSnapshots/listAllReports/listAllEntries/listAllInvocations) and
@@ -147,6 +153,10 @@ Checklist before go-live:
       otherwise production `createApp()` throws `AUTH_REQUIRED_IN_PROD` unless
       `ALLOW_INSECURE_PROD=1` is explicitly approved for an audited insecure
       bring-up.
+- [ ] `CWOS_V2_OPERATOR_WORKSPACE_ID`, `CWOS_V2_OPERATOR_PRINCIPAL_ID`, and
+      `CWOS_V2_OPERATOR_STEP_UP_VERIFIED=1` bind that key to the approved human
+      operator. Production API-key mode fails boot without the binding; callers
+      cannot supply `x-step-up`.
 - [ ] None of the configured DSNs above are left as the shipped dev value
       (`postgres://ai_crm:ai_crm_dev@localhost:5432/ai_crm`).
 

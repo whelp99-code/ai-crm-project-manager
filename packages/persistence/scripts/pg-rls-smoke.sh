@@ -171,28 +171,13 @@ apply_migrations() {
   backfill_if_present "0011_reports_model_invocations" \
     "SELECT CASE WHEN to_regclass('public.report_snapshots') IS NOT NULL THEN 1 ELSE 0 END"
 
-  apply_migration_file "0001_foundation" \
-    "${MIGRATIONS_DIR}/0001_foundation.sql" || true
-  apply_migration_file "0002_model_gateway_and_break_glass_roles" \
-    "${MIGRATIONS_DIR}/0002_model_gateway_and_break_glass_roles.sql" || true
-  apply_migration_file "0003_orchestration" \
-    "${MIGRATIONS_DIR}/0003_orchestration.sql" || true
-  apply_migration_file "0004_governance_snapshot" \
-    "${MIGRATIONS_DIR}/0004_governance_snapshot.sql" || true
-  apply_migration_file "0005_crm_customers" \
-    "${MIGRATIONS_DIR}/0005_crm_customers.sql" || true
-  apply_migration_file "0006_outbox_consumer" \
-    "${MIGRATIONS_DIR}/0006_outbox_consumer.sql" || true
-  apply_migration_file "0007_crm_subaggregates" \
-    "${MIGRATIONS_DIR}/0007_crm_subaggregates.sql" || true
-  apply_migration_file "0008_pm_delivery" \
-    "${MIGRATIONS_DIR}/0008_pm_delivery.sql" || true
-  apply_migration_file "0009_finance_ledger" \
-    "${MIGRATIONS_DIR}/0009_finance_ledger.sql" || true
-  apply_migration_file "0010_finance_recon_dailygate" \
-    "${MIGRATIONS_DIR}/0010_finance_recon_dailygate.sql" || true
-  apply_migration_file "0011_reports_model_invocations" \
-    "${MIGRATIONS_DIR}/0011_reports_model_invocations.sql" || true
+  local file
+  for file in "${MIGRATIONS_DIR}"/*.sql; do
+    [[ -e "${file}" ]] || continue
+    local id="${file##*/}"
+    id="${id%.sql}"
+    apply_migration_file "${id}" "${file}" || return 1
+  done
 }
 
 check_force_rls() {

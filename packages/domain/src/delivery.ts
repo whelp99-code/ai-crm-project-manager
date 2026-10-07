@@ -24,6 +24,10 @@ export interface Deliverable {
   required: boolean;
   status: "pending" | "submitted" | "approved" | "rejected";
   requirementIds: string[];
+  statusHistory?: Array<{ status: Deliverable["status"]; version: number }>;
+  quantityOrdered?: number;
+  quantityAccepted?: number;
+  quantityHistory?: Array<{ accepted: number; version: number }>;
 }
 
 export interface ProjectTask {
@@ -164,8 +168,32 @@ export class DeliveryService {
     const project = this.requireVersion(workspaceId, projectId, expectedVersion);
     const deliverable = project.deliverables.find((item) => item.id === deliverableId);
     if (!deliverable) throw new DeliveryDomainError("NOT_FOUND", `deliverable not found: ${deliverableId}`);
+    const history = deliverable.statusHistory ?? [];
     deliverable.status = status;
     project.version += 1;
+    deliverable.statusHistory = [...history, { status, version: project.version }];
+    return structuredClone(project);
+  }
+
+  recordPartialAcceptance(
+    workspaceId: string,
+    projectId: string,
+    expectedVersion: number,
+    deliverableId: string,
+    acceptedQuantity: number,
+  ): DeliveryProject {
+    const project = this.requireVersion(workspaceId, projectId, expectedVersion);
+    const deliverable = project.deliverables.find((item) => item.id === deliverableId);
+    if (!deliverable) throw new DeliveryDomainError("NOT_FOUND", `deliverable not found: ${deliverableId}`);
+    if (!Number.isInteger(acceptedQuantity) || acceptedQuantity < 0) {
+      throw new DeliveryDomainError("INVALID_QUANTITY", "accepted quantity must be a non-negative integer");
+    }
+    if (deliverable.quantityOrdered !== undefined && acceptedQuantity > deliverable.quantityOrdered) {
+      throw new DeliveryDomainError("QUANTITY_EXCEEDED", "accepted quantity cannot exceed ordered quantity");
+    }
+    project.version += 1;
+    deliverable.quantityAccepted = acceptedQuantity;
+    deliverable.quantityHistory = [...(deliverable.quantityHistory ?? []), { accepted: acceptedQuantity, version: project.version }];
     return structuredClone(project);
   }
 

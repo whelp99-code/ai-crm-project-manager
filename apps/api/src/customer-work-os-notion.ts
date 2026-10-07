@@ -2,13 +2,21 @@ import {
   CustomerWorkOsError,
   type ApprovalReceipt,
   type CustomerWorkOsService,
+  type CustomerWorkOsState,
 } from "@ai-crm/domain/customer-work-os";
 import {
+  NOTION_CWOS_WORKSPACE_NAMESPACE,
   NotionCwosImportPlanner,
   notionCwosHash,
+  resolveNotionWorkspaceId,
   type NotionCwosImportPlan,
   type NotionCwosSnapshot,
 } from "@ai-crm/imports";
+import {
+  CustomerWorkOsRuntimeManager,
+  type SnapshotTransaction,
+} from "./customer-work-os-runtime.js";
+import { writeNormalizedCustomerWorkState } from "./customer-work-os-normalized-write.js";
 
 export interface NotionPlanRecord {
   id: string;
@@ -26,6 +34,7 @@ export interface NotionPlanRecord {
   approvedAt?: string;
   appliedAt?: string;
   version: number;
+  workspaceBinding?: NotionCwosImportPlan["workspaceBinding"];
 }
 
 export interface NotionPlanStore {
@@ -33,6 +42,7 @@ export interface NotionPlanStore {
   get(workspaceId: string, planId: string): Promise<NotionPlanRecord | undefined>;
   list(workspaceId: string): Promise<NotionPlanRecord[]>;
   compareAndSwap(workspaceId: string, planId: string, expectedVersion: number, next: NotionPlanRecord, reason: string): Promise<NotionPlanRecord>;
+  markAppliedInTransaction?(connection: SnapshotTransaction | undefined, workspaceId: string, planId: string, expectedVersion: number, principalId: string, reason: string, appliedAt: string): Promise<NotionPlanRecord>;
   close?(): Promise<void>;
 }
 
@@ -72,6 +82,15 @@ export class InMemoryNotionPlanStore implements NotionPlanStore {
     if (next.workspaceId !== workspaceId || next.id !== planId || next.version !== expectedVersion + 1 || next.planHash !== current.planHash) throw new CustomerWorkOsError("INVALID_STATE", "invalid Notion plan CAS payload");
     this.rows.set(key, copy(next));
     return copy(next);
+  }
+
+  async markAppliedInTransaction(_connection: SnapshotTransaction | undefined, workspaceId: string, planId: string, expectedVersion: number, principalId: string, reason: string, appliedAt: string): Promise<NotionPlanRecord> {
+    const current = await this.get(workspaceId, planId);
+    if (!current) throw new CustomerWorkOsError("NOT_FOUND", `Notion plan not found: ${planId}`);
+    if (current.status === "APPLIED") return current;
+    if (current.version !== expectedVersion || current.status !== "APPROVED") throw new CustomerWorkOsError("INVALID_STATE", "only the current APPROVED plan can be applied");
+    void reason;
+    return this.compareAndSwap(workspaceId, planId, expectedVersion, { ...current, status: "APPLIED", appliedByPrincipalId: principalId, appliedAt, version: expectedVersion + 1 });
   }
 }
 
@@ -140,6 +159,7 @@ function rowToPlan(row: PlanRow): NotionPlanRecord {
     ...(row.approved_at ? { approvedAt: iso(row.approved_at) } : {}),
     ...(row.applied_at ? { appliedAt: iso(row.applied_at) } : {}),
     version: row.version,
+    ...(row.plan.workspaceBinding ? { workspaceBinding: copy(row.plan.workspaceBinding) } : {}),
   };
 }
 
@@ -229,6 +249,36 @@ export class PgNotionPlanStore implements NotionPlanStore {
     });
   }
 
+  async markAppliedInTransaction(connection: SnapshotTransaction, workspaceId: string, planId: string, expectedVersion: number, principalId: string, reason: string, appliedAt: string): Promise<NotionPlanRecord> {
+    const updated = await connection.query<PlanRow>(
+      `UPDATE cwos_notion_import_plans
+          SET status = 'APPLIED',
+              applied_by_principal_id = $4,
+              applied_at = $5::timestamptz,
+              version = version + 1
+        WHERE workspace_id = $1 AND id = $2 AND version = $3 AND status = 'APPROVED'
+        RETURNING ${PLAN_COLUMNS}`,
+      [workspaceId, planId, expectedVersion, principalId, appliedAt],
+    );
+    const row = updated.rows[0];
+    if (!row) {
+      const current = await connection.query<PlanRow>(
+        `SELECT ${PLAN_COLUMNS} FROM cwos_notion_import_plans WHERE workspace_id = $1 AND id = $2`,
+        [workspaceId, planId],
+      );
+      const existing = current.rows[0];
+      if (existing?.status === "APPLIED") return rowToPlan(existing);
+      throw new CustomerWorkOsError("INVALID_STATE", "only the current APPROVED plan can be applied");
+    }
+    await connection.query(
+      `INSERT INTO cwos_notion_import_plan_events
+        (workspace_id, plan_id, event_type, actor_principal_id, plan_hash, reason, occurred_at)
+       VALUES ($1,$2,'APPLIED',$3,$4,$5,$6::timestamptz)`,
+      [workspaceId, planId, principalId, row.plan_hash, reason, appliedAt],
+    );
+    return rowToPlan(row);
+  }
+
   async close(): Promise<void> { await this.pool.end(); }
 }
 
@@ -237,15 +287,24 @@ export class CustomerWorkOsNotionService {
   constructor(private readonly store: NotionPlanStore, private readonly now: () => string = () => new Date().toISOString()) {}
 
   async plan(snapshot: NotionCwosSnapshot, principalId: string): Promise<NotionPlanRecord> {
-    const plan = this.planner.plan(snapshot);
+    const resolved = resolveNotionWorkspaceId(snapshot.workspaceId);
+    const boundSnapshot = resolved.rewritten ? { ...snapshot, workspaceId: resolved.workspaceId } : snapshot;
+    const plan = this.planner.plan(boundSnapshot);
+    const workspaceBinding = {
+      algorithm: "uuidv5" as const,
+      namespace: NOTION_CWOS_WORKSPACE_NAMESPACE,
+      sourceWorkspaceKey: resolved.rewritten ? snapshot.workspaceId.trim() : resolved.workspaceId,
+      workspaceId: resolved.workspaceId,
+    };
     const record: NotionPlanRecord = {
-      id: `notion-plan-${notionCwosHash({ workspaceId: snapshot.workspaceId, snapshotHash: snapshot.snapshotHash }).slice(-8)}`,
-      workspaceId: snapshot.workspaceId,
+      id: `notion-plan-${notionCwosHash({ workspaceId: resolved.workspaceId, snapshotHash: snapshot.snapshotHash }).slice(-8)}`,
+      workspaceId: resolved.workspaceId,
       snapshotId: snapshot.snapshotId,
       snapshotHash: snapshot.snapshotHash,
       planHash: plan.planHash,
       capturedAt: snapshot.capturedAt,
-      plan,
+      plan: { ...plan, workspaceBinding },
+      workspaceBinding,
       status: "PLANNED",
       createdByPrincipalId: principalId,
       createdAt: this.now(),
@@ -274,6 +333,11 @@ export class CustomerWorkOsNotionService {
 
   get(workspaceId: string, planId: string): Promise<NotionPlanRecord | undefined> { return this.store.get(workspaceId, planId); }
   list(workspaceId: string): Promise<NotionPlanRecord[]> { return this.store.list(workspaceId); }
+
+  async markAppliedInTransaction(connection: SnapshotTransaction | undefined, workspaceId: string, planId: string, expectedVersion: number, principalId: string, reason: string, appliedAt: string): Promise<NotionPlanRecord> {
+    if (!this.store.markAppliedInTransaction) throw new CustomerWorkOsError("INVALID_STATE", "plan store cannot join an open transaction");
+    return this.store.markAppliedInTransaction(connection, workspaceId, planId, expectedVersion, principalId, reason, appliedAt);
+  }
 
   private async require(workspaceId: string, planId: string): Promise<NotionPlanRecord> {
     const current = await this.store.get(workspaceId, planId);
@@ -352,23 +416,18 @@ export function applyNotionPlanToDomain(input: {
       ...(item.targetDate ? { targetDate: item.targetDate } : {}),
       ...(["LOST", "CANCELLED"].includes(item.stage) ? { terminalReason: "Imported terminal state from Notion" } : {}),
     });
-    for (const source of item.accountSourceIds) {
-      const accountId = accountIds.get(source)!;
-      service.assignParty({ id: `party-${notionCwosHash({ engagement: item.id, accountId, role: "customer" }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, accountId, role: "customer", primary: true, commercialResponsibility: true, deliveryResponsibility: false });
-      parties += 1;
-    }
-    for (const source of item.partnerSourceIds) {
-      const accountId = accountIds.get(source)!;
-      service.assignParty({ id: `party-${notionCwosHash({ engagement: item.id, accountId, role: "partner" }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, accountId, role: "partner", primary: false, commercialResponsibility: false, deliveryResponsibility: true });
+    for (const party of item.parties) {
+      const accountId = accountIds.get(party.accountSourceId)!;
+      service.assignParty({ id: `party-${notionCwosHash({ engagement: item.id, accountId, role: party.role }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, accountId, role: party.role, primary: party.primary, commercialResponsibility: party.commercialResponsibility, deliveryResponsibility: party.deliveryResponsibility });
       parties += 1;
     }
     if (item.nextAction && !["CLOSED", "LOST", "CANCELLED"].includes(item.stage)) {
-      service.addCommitment({ id: `commitment-${notionCwosHash({ engagement: item.id, action: item.nextAction }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, ownerPrincipalId: principalId, description: item.nextAction, dueAt: item.targetDate ?? plan.capturedAt.slice(0, 10), status: "OPEN", priority: 50, financialImpact: false, approvalRequired: false });
+      service.addCommitment({ id: `commitment-${notionCwosHash({ engagement: item.id, action: item.nextAction }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, ownerPrincipalId: principalId, description: item.nextAction, dueAt: item.targetDate ?? null, status: "OPEN", priority: 50, financialImpact: false, approvalRequired: false });
       commitments += 1;
     }
     for (const [kind, refs] of Object.entries(item.artifactRefs)) {
       refs.forEach((storageUri, index) => {
-        service.addArtifact({ id: `artifact-${notionCwosHash({ engagement: item.id, kind, storageUri }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, type: kind === "quote" ? "customer_quote" : kind === "proposal" ? "proposal" : kind === "contract" ? "contract" : "completion_report", title: `${kind} imported from Notion`, versionLabel: `legacy-${index + 1}`, status: "REVIEW", storageUri, metadata: { legacySourceId: item.legacySourceId, importedFrom: "Notion" } });
+        service.addArtifact({ id: `artifact-${notionCwosHash({ engagement: item.id, kind, storageUri }).slice(-8)}`, workspaceId: item.workspaceId, engagementId: item.id, type: kind === "quote" ? "customer_quote" : kind === "proposal" ? "proposal" : kind === "contract" ? "contract" : "completion_report", title: `${kind} imported from Notion`, versionLabel: `legacy-${index + 1}`, status: "REVIEW", storageUri, metadata: { legacySourceId: item.legacySourceId, provenance: item.provenance, importedFrom: "Notion" } });
         artifacts += 1;
       });
     }
@@ -377,7 +436,7 @@ export function applyNotionPlanToDomain(input: {
   for (const item of plan.activities) {
     const engagementId = item.projectSourceIds.map((source) => engagementIds.get(source)).find(Boolean);
     if (!engagementId) continue;
-    service.recordActivity({ id: item.id, workspaceId: item.workspaceId, engagementId, type: item.activityType === "메일 수신" ? "email_in" : item.activityType === "메일 발신" ? "email_out" : item.activityType === "전화" ? "call" : item.activityType === "미팅" ? "meeting" : item.activityType === "메신저" ? "message" : item.activityType === "결정" ? "decision" : "note", occurredAt: item.occurredAt, summary: item.summary, ...(item.decision ? { decision: item.decision } : {}), evidenceRef: item.sourceUrl ?? `notion://${item.legacySourceId}`, humanReviewed: true });
+    service.recordActivity({ id: item.id, workspaceId: item.workspaceId, engagementId, type: item.activityType, occurredAt: item.occurredAt, summary: item.summary, ...(item.decision ? { decision: item.decision } : {}), evidenceRef: item.sourceUrl ?? `notion://${item.legacySourceId}`, humanReviewed: true });
   }
 
   for (const item of plan.financialItems) {
@@ -394,6 +453,55 @@ export function applyNotionPlanToDomain(input: {
 
   service.markImportPlanApplied(record.workspaceId, record.id, receipt.resourceVersion, record.planHash, receipt);
   return { alreadyApplied: false, accounts: plan.accounts.length, contacts, engagements: plan.engagements.length, parties, activities: plan.activities.length, commitments, artifacts, financialItems: plan.financialItems.length, settlements, quarantined: plan.quarantined.length };
+}
+
+export async function applyApprovedNotionPlan(input: {
+  service: CustomerWorkOsNotionService;
+  manager: CustomerWorkOsRuntimeManager;
+  workspaceId: string;
+  planId: string;
+  expectedVersion: number;
+  principalId: string;
+  idempotencyKey: string;
+  receipt: ApprovalReceipt;
+  reason: string;
+  now?: string;
+  participate?: (connection: SnapshotTransaction) => Promise<void>;
+}): Promise<{ replayed: boolean; payload: ApplyNotionPlanResult; plan: NotionPlanRecord }> {
+  const current = await input.service.get(input.workspaceId, input.planId);
+  if (!current || current.version !== input.expectedVersion || current.status !== "APPROVED") {
+    throw new CustomerWorkOsError("INVALID_STATE", "only the current APPROVED plan can be applied");
+  }
+  const appliedAt = input.now ?? new Date().toISOString();
+  const excludeSourceIds = new Set(current.plan.quarantined.map((row) => row.sourceId));
+  let domain: CustomerWorkOsState | undefined;
+  const result = await input.manager.mutate({
+    workspaceId: input.workspaceId,
+    principalId: input.principalId,
+    idempotencyKey: input.idempotencyKey,
+    requestHash: current.planHash,
+    operationId: "NOTION_IMPORT_APPLY",
+    now: appliedAt,
+    operation: (service) => {
+      const payload = applyNotionPlanToDomain({
+        service,
+        record: current,
+        principalId: input.principalId,
+        receipt: input.receipt,
+      });
+      domain = service.exportState();
+      return payload;
+    },
+    participate: async (connection) => {
+      if (!domain) throw new CustomerWorkOsError("INVALID_STATE", "normalized write has no domain state");
+      await writeNormalizedCustomerWorkState(connection, domain, { excludeSourceIds });
+      await input.participate?.(connection);
+      await input.service.markAppliedInTransaction(connection, input.workspaceId, input.planId, input.expectedVersion, input.principalId, input.reason, appliedAt);
+    },
+  });
+  const plan = await input.service.get(input.workspaceId, input.planId);
+  if (!plan) throw new CustomerWorkOsError("NOT_FOUND", `Notion plan not found: ${input.planId}`);
+  return { replayed: result.replayed, payload: result.payload, plan };
 }
 
 export async function createPgNotionPlanStoreFromEnvironment(): Promise<PgNotionPlanStore | undefined> {

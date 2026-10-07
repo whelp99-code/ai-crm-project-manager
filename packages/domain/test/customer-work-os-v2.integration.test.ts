@@ -118,6 +118,40 @@ function seedOperations(platform: CustomerWorkOsV2Platform): void {
 }
 
 describe("Customer Work OS v2 aggregate", () => {
+  it("retains an unapproved normalized reference across semantic replay and hydration", () => {
+    const platform = new CustomerWorkOsV2Platform(workspaceId);
+    const input = {
+      workspaceId, planId: "plan-1", planVersion: 1,
+      snapshotHash: "sha256:snapshot", planHash: "fnv1a32:plan",
+      sourceDigest: "a".repeat(64), sourceObservedAt: "2026-10-06T00:00:00.000Z",
+      accountIds: ["account-1"], engagementIds: [], financialItemIds: ["financial-1"],
+    };
+    const first = platform.recordNormalizedArchiveReference(input, owner, "2026-10-06T01:00:00.000Z");
+    const reopened = new CustomerWorkOsV2Platform(workspaceId);
+    reopened.hydrateState(platform.exportState());
+    const replay = reopened.recordNormalizedArchiveReference(input, owner, "2026-10-06T02:00:00.000Z");
+    expect(replay).toEqual(first);
+    expect(replay.approved).toBe(false);
+    expect(reopened.exportState().normalizedArchiveRefs).toEqual([first]);
+  });
+
+  it("denies machine or unverified human normalized-reference mutation", () => {
+    const platform = new CustomerWorkOsV2Platform(workspaceId);
+    const input = {
+      workspaceId, planId: "plan-1", planVersion: 1,
+      snapshotHash: "sha256:snapshot", planHash: "fnv1a32:plan",
+      sourceDigest: "a".repeat(64), sourceObservedAt: "2026-10-06T00:00:00.000Z",
+      accountIds: [], engagementIds: [], financialItemIds: [],
+    };
+    expectCode(() => platform.recordNormalizedArchiveReference(
+      input, { ...owner, kind: "ai" }, "2026-10-06T01:00:00.000Z",
+    ), "HUMAN_REQUIRED");
+    expectCode(() => platform.recordNormalizedArchiveReference(
+      input, { ...owner, stepUpVerified: false }, "2026-10-06T01:00:00.000Z",
+    ), "STEP_UP_REQUIRED");
+    expect(platform.exportState().normalizedArchiveRefs).toEqual([]);
+  });
+
   it("rejects cross-workspace hydration and duplicate milestone state", () => {
     const platform = new CustomerWorkOsV2Platform(workspaceId, () => "2026-08-15T00:00:00.000Z");
     platform.identity.registerPrincipal(

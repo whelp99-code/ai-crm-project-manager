@@ -10,6 +10,7 @@ import {
 } from "@ai-crm/domain/pg-pm-adapter";
 import type { PmPlan, PmAssignment, PmTarget, TargetObservation, VarianceException } from "@ai-crm/domain/pm";
 import type { DeliveryProject } from "@ai-crm/domain/delivery";
+import { pgSmokeConnectionEnv } from "./pg-smoke-connection-env.js";
 
 /**
  * Ultragoal P6-b G001 / PG-B (PM + delivery) acceptance against REAL
@@ -101,11 +102,7 @@ describe.skipIf(!LIVE)("PG-B PM + delivery PG-primary + restart-survival against
     execFileSync("bash", [smokeScript], {
       env: {
         ...process.env,
-        PGHOST: "localhost",
-        PGPORT: "5432",
-        PGUSER: "ai_crm",
-        PGPASSWORD: "ai_crm_dev",
-        PGDATABASE: "ai_crm",
+        ...pgSmokeConnectionEnv(DATABASE_URL),
       },
       stdio: "pipe",
     });

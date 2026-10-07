@@ -12,6 +12,24 @@ a Core5-only local checkpoint using elevated Git write permission. This is
 an implementation checkpoint, not runtime acceptance: Vitest and live PG
 validation have not passed. `pnpm run typecheck` and `git diff --check` passed.
 
+## Company-memory donor (2026-09-23)
+
+CRM-only `sb-company` donor publisher is in
+`packages/domain/src/customer-work-os-v2/company-memory-donor.ts` with focused
+unit tests. Outbox acknowledgement is fail-closed (matching receipt required).
+Mail product adapter is explicitly not implemented. No live company writes,
+personal `sb remember`, or shared signing key.
+See `docs/core5/COMPANY-MEMORY-DONOR.md`.
+
+Worker bind is env-gated in `apps/worker/src/company-memory-donor-bind.ts`:
+command + key files must all be present or the tick stays disabled. Incomplete
+or unknown `COMPANY_MEMORY_*` fails closed. Personal `sb` is rejected. Default
+worker process.env does not enable the donor (including loopback :4311).
+When `DATABASE_URL` is set, the tick reads `cwos_v2_mail_outbox` and fails
+closed if the schema/queryable is unavailable. Empty outbox is used only when
+no DB. `mail.inbox.receive` now dual-writes keys-only receipt and
+`INBOX_RECEIVED` outbox rows into those tables on PostgreSQL CAS.
+
 ## Progress
 
 - C01 and C02 are complete in their existing evidence documents.

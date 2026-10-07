@@ -52,7 +52,7 @@ export interface CustomerContextPack {
   accountId?: string;
   engagementId?: string;
   facts: ContextFact[];
-  openCommitments: Array<{ id: string; description: string; dueAt: string; status: string }>;
+  openCommitments: Array<{ id: string; description: string; dueAt: string | null; status: string }>;
   recentChanges: string[];
   artifactRefs: string[];
   generatedAt: string;

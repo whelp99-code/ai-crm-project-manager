@@ -3,6 +3,7 @@ import {
   CustomerWorkOsV2Platform,
   customerWorkOsV2StateHash,
   type CustomerWorkOsV2State,
+  type InboxState,
 } from "@ai-crm/domain/customer-work-os-v2";
 import {
   UUID_PATTERN,
@@ -79,7 +80,10 @@ export class PgCwosV2StateStore implements CwosV2StateStore {
         "PostgreSQL v2 state access requires a transaction-scoped workspace context",
       );
     }
-    return this.pool.withWorkspaceScope(workspaceId, fn);
+    return this.pool.withWorkspaceScope(workspaceId, async (db) => {
+      await db.query("SELECT set_config('app.workspace_id',$1,true)", [workspaceId]);
+      return fn(db);
+    });
   }
 
   async load(workspaceId: string): Promise<V2RuntimeEnvelope | undefined> {
@@ -123,8 +127,9 @@ export class PgCwosV2StateStore implements CwosV2StateStore {
     const prospective: V2RuntimeEnvelope = { ...structuredClone(next), version: expectedVersion + 1 };
     validateEnvelope(prospective);
     return this.scope(workspaceId, async (db) => {
-      // SELECT ... FOR UPDATE cannot lock a row that does not exist. The transaction-level
+      // SELECT ... FOR UPDATE cannot lock a missing first snapshot. The transaction-level
       // advisory lock serializes the first insert as well as subsequent CAS updates.
+      // Append-only audit is SELECT/INSERT for the runtime role; FOR UPDATE needs UPDATE.
       await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [workspaceId]);
 
       const current = await db.query<{ version: string | number; state_hash: string }>(
@@ -144,7 +149,7 @@ export class PgCwosV2StateStore implements CwosV2StateStore {
       }
 
       const previous = await db.query<{ sequence: string | number; event_hash: string }>(
-        "SELECT sequence,event_hash FROM cwos_v2_audit_events WHERE workspace_id=$1 ORDER BY sequence DESC LIMIT 1 FOR UPDATE",
+        "SELECT sequence,event_hash FROM cwos_v2_audit_events WHERE workspace_id=$1 ORDER BY sequence DESC LIMIT 1",
         [workspaceId],
       );
       const prior = previous.rows[0];
@@ -201,7 +206,79 @@ export class PgCwosV2StateStore implements CwosV2StateStore {
         ],
       );
 
+      await projectCwosMailTables(db, workspaceId, next.state.inbox);
       return prospective;
     });
+  }
+}
+
+async function projectCwosMailTables(
+  db: V2PgQueryable,
+  workspaceId: string,
+  inbox: InboxState,
+): Promise<void> {
+  const receipts = inbox.mailInboxReceipts ?? [];
+  const outbox = inbox.mailOutbox ?? [];
+  if (receipts.length === 0 && outbox.length === 0) return;
+
+  await assertCwosMailSchema(db);
+  try {
+    for (const receipt of receipts) {
+      if (receipt.workspaceId !== workspaceId) {
+        throw new CustomerWorkOsV2Error("CROSS_WORKSPACE", "mail inbox receipt workspace mismatch");
+      }
+      await db.query(
+        "INSERT INTO cwos_v2_mail_inbox_receipts(id,workspace_id,provider,mailbox,source_locator,provider_event_id,received_at,version) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (workspace_id, provider, mailbox, source_locator, provider_event_id) DO NOTHING",
+        [
+          receipt.id,
+          receipt.workspaceId,
+          receipt.provider,
+          receipt.mailbox,
+          receipt.sourceLocator,
+          receipt.providerEventId,
+          receipt.receivedAt,
+          receipt.version,
+        ],
+      );
+    }
+    for (const event of outbox) {
+      if (event.workspaceId !== workspaceId) {
+        throw new CustomerWorkOsV2Error("CROSS_WORKSPACE", "mail outbox workspace mismatch");
+      }
+      await db.query(
+        "INSERT INTO cwos_v2_mail_outbox(id,workspace_id,kind,work_item_id,source_event_id,link_id,status,created_at,version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (id) DO NOTHING",
+        [
+          event.id,
+          event.workspaceId,
+          event.kind,
+          event.workItemId,
+          event.sourceEventId,
+          event.linkId,
+          event.status,
+          event.createdAt,
+          event.version,
+        ],
+      );
+    }
+  } catch (error) {
+    if (error instanceof CustomerWorkOsV2Error) throw error;
+    throw new CustomerWorkOsV2Error("MAIL_OUTBOX_PERSIST_FAILED", "failed to persist cwos mail outbox");
+  }
+}
+
+async function assertCwosMailSchema(db: V2PgQueryable): Promise<void> {
+  let result: { rows: Array<{ receipts_reg?: unknown; outbox_reg?: unknown }> };
+  try {
+    result = await db.query(
+      "SELECT to_regclass('public.cwos_v2_mail_inbox_receipts') AS receipts_reg, to_regclass('public.cwos_v2_mail_outbox') AS outbox_reg",
+    );
+  } catch {
+    throw new CustomerWorkOsV2Error("MAIL_SCHEMA_NOT_READY", "cwos mail outbox schema is unavailable");
+  }
+  const row = result.rows[0];
+  const receiptsReg = typeof row?.receipts_reg === "string" ? row.receipts_reg.trim() : "";
+  const outboxReg = typeof row?.outbox_reg === "string" ? row.outbox_reg.trim() : "";
+  if (!receiptsReg || !outboxReg) {
+    throw new CustomerWorkOsV2Error("MAIL_SCHEMA_NOT_READY", "cwos mail outbox schema is unavailable");
   }
 }

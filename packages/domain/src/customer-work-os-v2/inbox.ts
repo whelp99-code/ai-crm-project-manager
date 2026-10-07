@@ -37,6 +37,7 @@ export class UnifiedInboxService {
     assertHuman(actor); assertWorkspace(actor.workspaceId, input.workspaceId);
     const provider = required(input.provider, "provider"); const mailbox = required(input.mailbox, "mailbox"); const sourceLocator = required(input.sourceLocator, "sourceLocator"); const workItemId = required(input.workItemId, "workItemId");
     const duplicate = [...this.mailWorkLinks.values()].find((item) => item.workspaceId === input.workspaceId && item.provider === provider && item.mailbox === mailbox && item.sourceLocator === sourceLocator && item.linkStatus !== "CORRECTED");
+    if (duplicate && duplicate.workItemId === workItemId) return copy(duplicate);
     if (duplicate && duplicate.workItemId !== workItemId) {
       if (!input.correctionReason?.trim()) throw new CustomerWorkOsV2Error("CORRECTION_REASON_REQUIRED", "correcting a mail work mapping requires a reason");
       const corrected = { ...duplicate, correctionReason: input.correctionReason.trim(), linkStatus: "CORRECTED" as const, version: duplicate.version + 1 };
@@ -57,6 +58,19 @@ export class UnifiedInboxService {
     if (input.event) this.ingest(input.event);
     const receipt: MailInboxReceipt = { ...copy(input), id: required(input.id, "receipt.id"), provider: required(input.provider, "provider"), mailbox: required(input.mailbox, "mailbox"), sourceLocator: required(input.sourceLocator, "sourceLocator"), providerEventId: required(input.providerEventId, "providerEventId"), receivedAt: required(input.receivedAt, "receivedAt"), version: 1 };
     this.mailInboxReceipts.set(receipt.id, receipt); this.enqueue({ id: `outbox-inbox-${receipt.id}`, workspaceId: receipt.workspaceId, kind: "INBOX_RECEIVED", workItemId: null, sourceEventId: input.event?.id ?? null, linkId: null, status: "PENDING", createdAt, version: 1 }); return copy(receipt);
+  }
+  pendingMailOutbox(workspaceId: string): MailOutboxEvent[] {
+    assertWorkspace(workspaceId, workspaceId);
+    return sorted([...this.mailOutbox.values()].filter((item) => item.workspaceId === workspaceId && item.status === "PENDING"));
+  }
+  markMailOutboxEmitted(workspaceId: string, id: string): MailOutboxEvent {
+    const item = this.mailOutbox.get(required(id, "outbox.id"));
+    if (!item) throw new CustomerWorkOsV2Error("OUTBOX_NOT_FOUND", "mail outbox event not found");
+    assertWorkspace(workspaceId, item.workspaceId);
+    if (item.status === "EMITTED") return copy(item);
+    const next: MailOutboxEvent = { ...item, status: "EMITTED", version: item.version + 1 };
+    this.mailOutbox.set(item.id, next);
+    return copy(next);
   }
   private enqueue(event: MailOutboxEvent): void { if (!this.mailOutbox.has(event.id)) this.mailOutbox.set(event.id, event); }
   exportState(): InboxState { return { schemaVersion: 1, events: sorted(this.events.values()), attachments: sorted(this.attachments.values()), links: sorted(this.links.values()), drafts: sorted(this.drafts.values()), mailWorkLinks: sorted(this.mailWorkLinks.values()), mailInboxReceipts: sorted(this.mailInboxReceipts.values()), mailOutbox: sorted(this.mailOutbox.values()) }; }

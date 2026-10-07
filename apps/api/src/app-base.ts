@@ -269,6 +269,10 @@ function isAgentPath(path: string): boolean {
   );
 }
 
+function isCustomerWorkOsV2Path(path: string): boolean {
+  return path === "/api/cwos/v2" || path.startsWith("/api/cwos/v2/");
+}
+
 function isMutatingMethod(method: string): boolean {
   const m = method.toUpperCase();
   return m === "POST" || m === "PUT" || m === "PATCH" || m === "DELETE";
@@ -386,7 +390,8 @@ export interface CreateAppOptions {
   /**
    * Optional shared API key for fail-closed authn. When set (or when
    * `AUTH_API_KEY` / `API_AUTH_TOKEN` env is set), mutating `/api/*` methods
-   * and all `/api/agent/*` routes require `x-api-key` or `Authorization: Bearer`.
+   * all `/api/agent/*` routes, and every `/api/cwos/v2/*` route require
+   * `x-api-key` or `Authorization: Bearer`.
    * See `docs/ops/authn.md`.
    */
   authApiKey?: string;
@@ -551,7 +556,7 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     if (!configuredApiKey) return;
     const path = requestPath(request);
     if (!isApiPath(path)) return;
-    const requiresKey = isMutatingMethod(request.method) || isAgentPath(path);
+    const requiresKey = isMutatingMethod(request.method) || isAgentPath(path) || isCustomerWorkOsV2Path(path);
     if (!requiresKey) return;
     const presented = extractPresentedApiKey(request);
     if (!presented || !apiKeysEqual(presented, configuredApiKey)) {

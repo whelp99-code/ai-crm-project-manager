@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { createApp, type CreateAppOptions } from "../src/app.js";
+import { pgSmokeConnectionEnv } from "./pg-smoke-connection-env.js";
 
 /**
  * N-13 (D3) + N-12 (D2) acceptance against REAL PostgreSQL.
@@ -59,11 +60,7 @@ describe.skipIf(!LIVE)(
       execFileSync("bash", [smokeScript], {
         env: {
           ...process.env,
-          PGHOST: "localhost",
-          PGPORT: "5432",
-          PGUSER: "ai_crm",
-          PGPASSWORD: "ai_crm_dev",
-          PGDATABASE: "ai_crm",
+          ...pgSmokeConnectionEnv(DATABASE_URL),
         },
         stdio: "pipe",
       });

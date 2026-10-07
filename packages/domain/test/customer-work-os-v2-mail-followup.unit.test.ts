@@ -10,7 +10,9 @@ describe("CWOS v2 mail/work and follow-up boundaries", () => {
     const duplicate = platform.inbox.receiveMail({ ...first }, "2026-09-22T00:00:01.000Z");
     expect(duplicate).toEqual(first);
     const link = platform.inbox.mapWork({ id: "link-1", workspaceId: "ws-1", provider: "gmail", mailbox: "ops@example.test", sourceLocator: "thread/t1", sourceEventId: "event-1", workItemId: "work-1" }, actor, "2026-09-22T00:00:00.000Z");
+    const repeated = platform.inbox.mapWork({ id: "link-duplicate", workspaceId: "ws-1", provider: "gmail", mailbox: "ops@example.test", sourceLocator: "thread/t1", sourceEventId: "event-1", workItemId: "work-1" }, actor, "2026-09-22T00:00:01.000Z");
     expect(link.workItemId).toBe("work-1");
+    expect(repeated.id).toBe("link-1");
     expect(platform.inbox.exportState().mailOutbox).toHaveLength(2);
   });
 

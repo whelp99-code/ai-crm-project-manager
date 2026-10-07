@@ -8,6 +8,7 @@ import {
   intentToPersisted,
 } from "@ai-crm/governance";
 import { loadGovernance, runDurableWorkerTick } from "../src/main.js";
+import { pgSmokeConnectionEnv } from "./pg-smoke-connection-env.js";
 
 /**
  * G-02 worker lease recovery against REAL PostgreSQL (not the in-memory
@@ -45,11 +46,7 @@ describe.skipIf(!LIVE)("G-02 worker durable lease recovery against REAL Postgres
     execFileSync("bash", [smokeScript], {
       env: {
         ...process.env,
-        PGHOST: "localhost",
-        PGPORT: "5432",
-        PGUSER: "ai_crm",
-        PGPASSWORD: "ai_crm_dev",
-        PGDATABASE: "ai_crm",
+        ...pgSmokeConnectionEnv(DATABASE_URL),
       },
       stdio: "pipe",
     });

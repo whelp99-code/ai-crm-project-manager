@@ -8,6 +8,7 @@ import {
   runDurableOutboxConsumerTick,
   type WorkerRuntime,
 } from "../src/main.js";
+import { pgSmokeConnectionEnv } from "./pg-smoke-connection-env.js";
 
 /**
  * D3 outbox_events durable ACKED CONSUMER against REAL PostgreSQL
@@ -97,11 +98,7 @@ describe.skipIf(!LIVE)("D3 outbox_events durable acked consumer against REAL Pos
     execFileSync("bash", [smokeScript], {
       env: {
         ...process.env,
-        PGHOST: "localhost",
-        PGPORT: "5432",
-        PGUSER: "ai_crm",
-        PGPASSWORD: "ai_crm_dev",
-        PGDATABASE: "ai_crm",
+        ...pgSmokeConnectionEnv(DATABASE_URL),
       },
       stdio: "pipe",
     });
