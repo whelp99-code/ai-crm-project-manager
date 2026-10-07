@@ -78,8 +78,9 @@ describe("worker package start script", () => {
 
     expect(output).toContain("worker.interval_start");
     expect(output).toContain('"intervalMs":25');
+    const closed = once(child, "close");
     child.kill("SIGTERM");
-    const [code, signal] = await once(child, "close") as [number | null, NodeJS.Signals | null];
+    const [code, signal] = await closed as [number | null, NodeJS.Signals | null];
     // pnpm may expose SIGTERM directly or translate it to the conventional
     // 128 + signal-number exit code; either means the script did not mask it.
     expect(signal === "SIGTERM" || code === 143).toBe(true);
