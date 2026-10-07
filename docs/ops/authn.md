@@ -105,9 +105,9 @@ test/development bindings. Its programmatic fixture proof is not the
 operating H environment contract.
 
 `apps/api/test/ops-boot.unit.test.ts` covers the H boot rejection of global
-step-up and private-file requirements. `operator-step-up.security.test.ts`
-covers password/TOTP, scoped sessions, CSRF, expiry/replay and fail-closed
-pre-enrollment. Some cases create isolated temporary auth fixtures; do not
+step-up. Missing/unregistered auth-file refusal: 테스트 미검증. `operator-step-up.security.test.ts`
+covers password/TOTP, scoped sessions, CSRF, expiry/replay and boot without an auth mechanism, not
+missing/unregistered auth files. Some cases create isolated temporary auth fixtures; do not
 run those as an operating-profile preparation step or claim they enrolled
 the real owner.
 
