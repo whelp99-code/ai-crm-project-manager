@@ -8,6 +8,7 @@
   },
   "packageManager": "pnpm@9.15.0",
   "scripts": {
+    "lint:self-entry": "eslint apps/web/app/login apps/web/app/self-entry apps/web/app/api/self-entry apps/web/app/self-entry-server.ts apps/web/test/self-entry-server.integration.test.ts apps/api/test/self-entry-session.security.test.ts apps/api/src/customer-work-os-v2-routes.ts",
     "typecheck": "pnpm -r --if-present run typecheck",
     "test": "vitest run",
     "test:unit": "vitest run unit",
@@ -27,6 +28,8 @@
     }
   },
   "devDependencies": {
+    "eslint": "10.12.0",
+    "typescript-eslint": "8.71.1",
     "@types/node": "^22.10.2",
     "tsx": "4.23.1",
     "typescript": "^5.7.2",
