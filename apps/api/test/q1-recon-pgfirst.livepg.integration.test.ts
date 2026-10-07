@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { createApp, type CreateAppOptions } from "../src/app.js";
+import { createApp, type CreateAppOptions, type DailyGateControlPlane } from "../src/app.js";
 import type { PgQueryable } from "@ai-crm/orchestration";
 import type { FinancePackConfig } from "@ai-crm/finance";
 
@@ -96,7 +96,38 @@ const FINANCE_PACK: FinancePackConfig = {
 
 const apps: FastifyInstance[] = [];
 async function bootApp(options: CreateAppOptions): Promise<FastifyInstance> {
-  const instance = createApp(options);
+  const dailyGateControlPlane: DailyGateControlPlane = {
+    async dayFacts({ workspaceId, date }) {
+      return {
+        actor: {
+          id: workspaceId.replace(/^b/, "d"),
+          workspaceId,
+          role: "CONTROLLER",
+          kind: "HUMAN",
+          active: true,
+        },
+        metrics: { importsCompleted: true, entriesBalanced: true, openFinanceExceptions: 0 },
+        receivedAt: `${date}T09:00:00+09:00`,
+        provenance: {
+          refs: [`q1-import:${workspaceId}:${date}`, `q1-ledger:${workspaceId}:${date}`],
+          digests: ["a".repeat(64), "b".repeat(64)],
+          observedAt: `${date}T08:55:00+09:00`,
+          expiresAt: "2026-06-02T00:00:00+09:00",
+        },
+        matrixVersion: 1,
+        matrixActive: true,
+        policyVersion: FINANCE_PACK.packVersion,
+        packVersion: FINANCE_PACK.packVersion,
+        evidenceId: `q1-evidence:${workspaceId}:${date}`,
+        evidenceSecret: "q1-owned-fixture-evidence-secret",
+      };
+    },
+    async activationFacts() {
+      throw new Error("Q1 does not exercise daily-gate activation");
+    },
+    now: () => new Date("2026-06-01T00:00:00+09:00"),
+  };
+  const instance = createApp({ ...options, dailyGateControlPlane });
   apps.push(instance);
   await instance.ready();
   return instance;
@@ -183,6 +214,20 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
         `INSERT INTO workspaces (id, name) VALUES ${values} ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
         params,
       );
+      for (const ws of ALL_WS) {
+        const userId = ws.replace(/^b/, "c");
+        const principalId = ws.replace(/^b/, "d");
+        await client.query(
+          `INSERT INTO users (id, workspace_id, email, display_name, role)
+           VALUES ($1, $2, $3, 'Q1 Controller', 'CONTROLLER') ON CONFLICT (id) DO NOTHING`,
+          [userId, ws, `q1-${ws}@example.invalid`],
+        );
+        await client.query(
+          `INSERT INTO principals (id, workspace_id, kind, user_id, role, display_name)
+           VALUES ($1, $2, 'HUMAN', $3, 'CONTROLLER', 'Q1 Controller') ON CONFLICT (id) DO NOTHING`,
+          [principalId, ws, userId],
+        );
+      }
     } finally {
       await client.end();
     }
@@ -198,9 +243,11 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
     try {
       await client.query(`ALTER TABLE audit_events DISABLE TRIGGER audit_events_append_only`);
       await client.query(`ALTER TABLE audit_chain_heads DISABLE TRIGGER audit_chain_heads_no_delete`);
+      await client.query(`ALTER TABLE finance_daily_gate_evidence DISABLE TRIGGER finance_daily_gate_evidence_immutable`);
       try {
         for (const ws of ALL_WS) {
           await client.query(`SELECT set_config('app.workspace_id', $1, false)`, [ws]);
+          await client.query(`DELETE FROM finance_daily_gate_evidence WHERE workspace_id = $1`, [ws]);
           await client.query(`DELETE FROM finance_day_records WHERE workspace_id = $1`, [ws]);
           await client.query(`DELETE FROM finance_daily_gate_state WHERE workspace_id = $1`, [ws]);
           await client.query(`DELETE FROM finance_exceptions WHERE workspace_id = $1`, [ws]);
@@ -212,8 +259,11 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
       } finally {
         await client.query(`ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only`);
         await client.query(`ALTER TABLE audit_chain_heads ENABLE TRIGGER audit_chain_heads_no_delete`);
+        await client.query(`ALTER TABLE finance_daily_gate_evidence ENABLE TRIGGER finance_daily_gate_evidence_immutable`);
       }
       await client.query(`RESET app.workspace_id`);
+      await client.query(`DELETE FROM principals WHERE id = ANY($1::uuid[])`, [ALL_WS.map((ws) => ws.replace(/^b/, "d"))]);
+      await client.query(`DELETE FROM users WHERE id = ANY($1::uuid[])`, [ALL_WS.map((ws) => ws.replace(/^b/, "c"))]);
       await client.query(`DELETE FROM workspaces WHERE id = ANY($1::uuid[])`, [ALL_WS]);
     } finally {
       await client.end();
@@ -291,10 +341,6 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
           headers: { "x-workspace-id": WS_HAPPY },
           payload: {
             date: "2026-03-01",
-            importsCompleted: true,
-            entriesBalanced: true,
-            openFinanceExceptions: 0,
-            receivedAt: "2026-03-01T09:00:00+09:00",
           },
         });
         expect(recordDay.statusCode).toBe(201);
@@ -426,10 +472,6 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
           headers: { "x-workspace-id": WS_FAIL_DAY },
           payload: {
             date: "2026-04-01",
-            importsCompleted: true,
-            entriesBalanced: true,
-            openFinanceExceptions: 0,
-            receivedAt: "2026-04-01T09:00:00+09:00",
           },
         });
         expect(doomed.statusCode).toBeGreaterThanOrEqual(500);
@@ -459,10 +501,6 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
           headers: { "x-workspace-id": WS_CROSS_UNTOUCHED },
           payload: {
             date: "2026-04-01",
-            importsCompleted: true,
-            entriesBalanced: true,
-            openFinanceExceptions: 0,
-            receivedAt: "2026-04-01T09:00:00+09:00",
           },
         });
         expect(untouched.statusCode).toBe(201);
@@ -493,10 +531,6 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
               headers: { "x-workspace-id": WS_CONCURRENT },
               payload: {
                 date,
-                importsCompleted: true,
-                entriesBalanced: true,
-                openFinanceExceptions: 0,
-                receivedAt: `${date}T09:00:00+09:00`,
               },
             }),
           ),
@@ -627,10 +661,6 @@ describe.skipIf(!LIVE)("Q1 (D3/D4) reconciliation + daily-gate PG-primary fail-c
           headers: { "x-workspace-id": WS_FAIL_DAY_SECOND },
           payload: {
             date: "2026-04-02",
-            importsCompleted: true,
-            entriesBalanced: true,
-            openFinanceExceptions: 0,
-            receivedAt: "2026-04-02T09:00:00+09:00",
           },
         });
         expect(doomed.statusCode).toBeGreaterThanOrEqual(500);
