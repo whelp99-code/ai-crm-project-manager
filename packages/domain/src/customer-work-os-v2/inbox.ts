@@ -7,9 +7,10 @@ export interface InboxDraft { id: string; workspaceId: string; sourceEventId: st
 export interface MailWorkLink { id: string; workspaceId: string; provider: string; mailbox: string; sourceLocator: string; sourceEventId: string; workItemId: string; linkedByPrincipalId: string; correctionReason: string | null; linkStatus: "ACTIVE" | "CORRECTED"; version: number; }
 export interface MailInboxReceipt { id: string; workspaceId: string; provider: string; mailbox: string; sourceLocator: string; providerEventId: string; receivedAt: string; version: number; }
 export interface MailOutboxEvent { id: string; workspaceId: string; kind: "WORK_LINKED" | "INBOX_RECEIVED" | "WORK_LINK_CORRECTED"; workItemId: string | null; sourceEventId: string | null; linkId: string | null; status: "PENDING" | "EMITTED"; createdAt: string; version: number; }
-export interface InboxState { schemaVersion: 1; events: SourceEvent[]; attachments: InboxAttachment[]; links: InboxLink[]; drafts: InboxDraft[]; mailWorkLinks: MailWorkLink[]; mailInboxReceipts: MailInboxReceipt[]; mailOutbox: MailOutboxEvent[]; }
+export interface MailCandidate { readonly id: string; readonly workspaceId: string; readonly provider: "GMAIL" | "OUTLOOK"; readonly mailbox: string; readonly sourceLocator: string; readonly providerEventId: string; readonly subject: string; readonly bodyDigest: string; readonly status: "CANDIDATE"; readonly confirmed: false; readonly freshness: "producer_unverified"; readonly createdByPrincipalId: string; readonly createdAt: string; readonly version: 1; }
+export interface InboxState { schemaVersion: 1; events: SourceEvent[]; attachments: InboxAttachment[]; links: InboxLink[]; drafts: InboxDraft[]; mailWorkLinks: MailWorkLink[]; mailInboxReceipts: MailInboxReceipt[]; mailOutbox: MailOutboxEvent[]; mailCandidates?: MailCandidate[]; }
 export class UnifiedInboxService {
-  private events = new Map<string, SourceEvent>(); private attachments = new Map<string, InboxAttachment>(); private links = new Map<string, InboxLink>(); private drafts = new Map<string, InboxDraft>(); private mailWorkLinks = new Map<string, MailWorkLink>(); private mailInboxReceipts = new Map<string, MailInboxReceipt>(); private mailOutbox = new Map<string, MailOutboxEvent>();
+  private events = new Map<string, SourceEvent>(); private attachments = new Map<string, InboxAttachment>(); private links = new Map<string, InboxLink>(); private drafts = new Map<string, InboxDraft>(); private mailWorkLinks = new Map<string, MailWorkLink>(); private mailInboxReceipts = new Map<string, MailInboxReceipt>(); private mailOutbox = new Map<string, MailOutboxEvent>(); private mailCandidates = new Map<string, MailCandidate>();
   ingest(input: Omit<SourceEvent, "version" | "status">): SourceEvent {
     assertWorkspace(input.workspaceId, input.workspaceId); const duplicate = [...this.events.values()].find((item) => item.workspaceId === input.workspaceId && item.source === input.source && item.providerEventId === input.providerEventId);
     if (duplicate) return copy(duplicate);
@@ -59,6 +60,22 @@ export class UnifiedInboxService {
     const receipt: MailInboxReceipt = { ...copy(input), id: required(input.id, "receipt.id"), provider: required(input.provider, "provider"), mailbox: required(input.mailbox, "mailbox"), sourceLocator: required(input.sourceLocator, "sourceLocator"), providerEventId: required(input.providerEventId, "providerEventId"), receivedAt: required(input.receivedAt, "receivedAt"), version: 1 };
     this.mailInboxReceipts.set(receipt.id, receipt); this.enqueue({ id: `outbox-inbox-${receipt.id}`, workspaceId: receipt.workspaceId, kind: "INBOX_RECEIVED", workItemId: null, sourceEventId: input.event?.id ?? null, linkId: null, status: "PENDING", createdAt, version: 1 }); return copy(receipt);
   }
+  createMailCandidate(input: { id: string; workspaceId: string; provider: "GMAIL" | "OUTLOOK"; mailbox: string; sourceLocator: string; providerEventId: string; subject: string; bodyDigest: string }, actor: V2Actor, createdAt: string): MailCandidate {
+    if (actor.kind !== "service") throw new CustomerWorkOsV2Error("MAIL_CANDIDATE_WRITER_REQUIRED", "mail candidates may only be created by a service actor");
+    assertWorkspace(actor.workspaceId, input.workspaceId);
+    const id = required(input.id, "candidate.id");
+    const content = { id, workspaceId: input.workspaceId, provider: input.provider, mailbox: required(input.mailbox, "mailbox"), sourceLocator: required(input.sourceLocator, "sourceLocator"), providerEventId: required(input.providerEventId, "providerEventId"), subject: input.subject, bodyDigest: required(input.bodyDigest, "bodyDigest") };
+    const sameSource = [...this.mailCandidates.values()].find((item) => item.workspaceId === content.workspaceId && item.provider === content.provider && item.mailbox === content.mailbox && item.providerEventId === content.providerEventId);
+    if (sameSource) {
+      if (sameSource.id === content.id && sameSource.sourceLocator === content.sourceLocator && sameSource.subject === content.subject && sameSource.bodyDigest === content.bodyDigest) return copy(sameSource);
+      throw new CustomerWorkOsV2Error("CANDIDATE_CONFLICT", "mail candidate source or content conflicts with an existing candidate");
+    }
+    const reusedId = this.mailCandidates.get(id);
+    if (reusedId) throw new CustomerWorkOsV2Error("CANDIDATE_CONFLICT", "mail candidate id is already used for another source");
+    const item: MailCandidate = { ...content, status: "CANDIDATE", confirmed: false, freshness: "producer_unverified", createdByPrincipalId: actor.principalId, createdAt: required(createdAt, "createdAt"), version: 1 };
+    this.mailCandidates.set(item.id, item);
+    return copy(item);
+  }
   pendingMailOutbox(workspaceId: string): MailOutboxEvent[] {
     assertWorkspace(workspaceId, workspaceId);
     return sorted([...this.mailOutbox.values()].filter((item) => item.workspaceId === workspaceId && item.status === "PENDING"));
@@ -73,7 +90,7 @@ export class UnifiedInboxService {
     return copy(next);
   }
   private enqueue(event: MailOutboxEvent): void { if (!this.mailOutbox.has(event.id)) this.mailOutbox.set(event.id, event); }
-  exportState(): InboxState { return { schemaVersion: 1, events: sorted(this.events.values()), attachments: sorted(this.attachments.values()), links: sorted(this.links.values()), drafts: sorted(this.drafts.values()), mailWorkLinks: sorted(this.mailWorkLinks.values()), mailInboxReceipts: sorted(this.mailInboxReceipts.values()), mailOutbox: sorted(this.mailOutbox.values()) }; }
-  hydrateState(input: InboxState): void { if (input.schemaVersion !== 1) throw new CustomerWorkOsV2Error("UNSUPPORTED_STATE", "unsupported inbox state"); this.events = mapValues(input.events, "sourceEvent"); this.attachments = mapValues(input.attachments, "attachment"); this.links = mapValues(input.links, "inboxLink"); this.drafts = mapValues(input.drafts, "inboxDraft"); this.mailWorkLinks = mapValues(input.mailWorkLinks ?? [], "mailWorkLink"); this.mailInboxReceipts = mapValues(input.mailInboxReceipts ?? [], "mailInboxReceipt"); this.mailOutbox = mapValues(input.mailOutbox ?? [], "mailOutbox"); }
+  exportState(): InboxState { return { schemaVersion: 1, events: sorted(this.events.values()), attachments: sorted(this.attachments.values()), links: sorted(this.links.values()), drafts: sorted(this.drafts.values()), mailWorkLinks: sorted(this.mailWorkLinks.values()), mailInboxReceipts: sorted(this.mailInboxReceipts.values()), mailOutbox: sorted(this.mailOutbox.values()), mailCandidates: sorted(this.mailCandidates.values()) }; }
+  hydrateState(input: InboxState): void { if (input.schemaVersion !== 1) throw new CustomerWorkOsV2Error("UNSUPPORTED_STATE", "unsupported inbox state"); this.events = mapValues(input.events, "sourceEvent"); this.attachments = mapValues(input.attachments, "attachment"); this.links = mapValues(input.links, "inboxLink"); this.drafts = mapValues(input.drafts, "inboxDraft"); this.mailWorkLinks = mapValues(input.mailWorkLinks ?? [], "mailWorkLink"); this.mailInboxReceipts = mapValues(input.mailInboxReceipts ?? [], "mailInboxReceipt"); this.mailOutbox = mapValues(input.mailOutbox ?? [], "mailOutbox"); this.mailCandidates = mapValues(input.mailCandidates ?? [], "mailCandidate"); }
   private event(workspaceId: string, id: string): SourceEvent { const item = this.events.get(id); if (!item) throw new CustomerWorkOsV2Error("SOURCE_EVENT_NOT_FOUND", "source event not found"); assertWorkspace(workspaceId, item.workspaceId); return item; }
 }
