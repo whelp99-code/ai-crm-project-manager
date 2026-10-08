@@ -94,6 +94,24 @@ that authentication or an operating transition has completed.
 
 ## Tests
 
+### Dedicated Mail account-master admission
+
+After approval and deployment, set `CWOS_V2_MAIL_READER_ACCOUNT_MASTER_GET=1`
+only in the admitted BLRO Mail reader profile. Its existing dedicated key,
+`WORKSPACE_ID` and `CWOS_V2_MAIL_READER_PRINCIPAL_ID` remain unchanged.
+This permits only `GET /api/cwos/accounts` with matching workspace, service
+principal and kind headers. The response and parameterized workspace-scoped
+transaction remain the maintained account-master contract. HEAD, writes,
+engagement/finance routes and other workspace/principal claims remain denied.
+Without explicit admission the machine credential still rejects legacy routes.
+
+The maintained v2 Mail reader consumes `/api/cwos/v2/state` and
+`/api/cwos/v2/normalized-projections/:planId`. An existing APPLIED source plan
+can be linked using native `business.reconcileNormalized` with only `planId`;
+the server binds original hashes/version and preserves
+`ARCHIVE_PROJECTION_ONLY`/`approved=false`. This is archive context for
+read-only mailbox intake and candidates, not mailbox-send/write permission.
+
 `apps/api/test/authn.integration.test.ts` — key required when configured;
 wrong/missing key → 401; agent without principal still fails; dev mode without
 key still accepts principal headers.

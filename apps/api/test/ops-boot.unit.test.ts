@@ -62,6 +62,15 @@ describe("operating boot configuration", () => {
     })).toThrowError(/OPS_BOOT_DATABASE_ROLES_NOT_DISTINCT/);
   });
 
+  it("requires explicit account-master GET admission on the dedicated Mail profile", () => {
+    const env = baseEnv();
+    expect(parseOperatingConfig(env).mailAccountMasterRead).toBeUndefined();
+    expect(parseOperatingConfig({ ...env, CWOS_V2_MAIL_READER_ACCOUNT_MASTER_GET: "1" }).mailAccountMasterRead)
+      .toBe(true);
+    expect(() => parseOperatingConfig({ ...env, CWOS_V2_MAIL_READER_ACCOUNT_MASTER_GET: "true" }))
+      .toThrow(/OPS_BOOT_READER_ACCOUNT_MASTER_INVALID/);
+  });
+
   it("refuses query parameters that override the declared driver role", () => {
     expect(() => parseOperatingConfig({
       ...baseEnv(), DATABASE_URL: "postgres://runtime_api@localhost/owned_fixture?user=admin",

@@ -34,6 +34,8 @@ export type CustomerWorkOsV2AppOptions = CreateAppOptions & {
     readonly kind: "ai" | "service";
     /** Reader-only credential: reject all non-read HTTP methods before command dispatch. */
     readonly readOnly?: boolean;
+    /** Explicitly admitted Mail reader may GET its bound workspace's account master. */
+    readonly mailAccountMasterRead?: true;
   };
   customerWorkOsV2NormalizedProjectionPool?: V2PgQueryable;
 };
@@ -87,6 +89,9 @@ export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInst
   )) {
     throw new Error("[CWOS_V2_MACHINE_BINDING_INVALID] workspace, principal, and machine kind are required");
   }
+  if (machineBinding?.mailAccountMasterRead && (machineBinding.kind !== "service" || !machineBinding.readOnly)) {
+    throw new Error("[CWOS_V2_MAIL_ACCOUNT_MASTER_BINDING_INVALID] account master requires a read-only service binding");
+  }
   const actorBinding = machineBinding ? {
     workspaceId: machineBinding.workspaceId.trim(),
     principalId: machineBinding.principalId.trim(),
@@ -110,8 +115,21 @@ export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInst
   const app = createBaseApp(options);
   if (machineBinding) {
     app.addHook("onRequest", async (request, reply) => {
-      if (!request.url.split("?")[0]?.startsWith("/api/cwos/v2/")) {
+      const path = request.url.split("?")[0];
+      const mailAccountMaster = machineBinding.mailAccountMasterRead && request.method === "GET"
+        && path === "/api/cwos/accounts";
+      if (!path?.startsWith("/api/cwos/v2/") && !mailAccountMaster) {
         return reply.status(403).send({ error: "MACHINE_ROUTE_DENIED" });
+      }
+      if (mailAccountMaster) {
+        if (request.headers["x-workspace-id"] !== machineBinding.workspaceId
+          || request.headers["x-principal-id"] !== machineBinding.principalId
+          || request.headers["x-principal-kind"] !== "service") {
+          return reply.status(403).send({ error: "ACTOR_BINDING_MISMATCH" });
+        }
+        if (request.headers["x-step-up"]) {
+          return reply.status(403).send({ error: "UNTRUSTED_STEP_UP" });
+        }
       }
       if (machineBinding.readOnly && request.method !== "GET" && request.method !== "HEAD") {
         return reply.status(403).send({ error: "MACHINE_READ_ONLY" });
