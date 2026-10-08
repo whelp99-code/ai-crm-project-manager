@@ -23,6 +23,7 @@ export interface OperatingEnv {
   readonly CWOS_V2_OPERATOR_STEP_UP_VERIFIED?: string;
   readonly CWOS_V2_MAIL_READER_PRINCIPAL_ID?: string;
   readonly CWOS_V2_MAIL_READER_KEY_FILE?: string;
+  readonly CWOS_V2_MAIL_READER_ACCOUNT_MASTER_GET?: string;
   readonly [key: string]: string | undefined;
 }
 
@@ -37,6 +38,7 @@ export interface OperatingConfig {
   readonly principalId: string;
   readonly authStatePath?: string;
   readonly sessionSecret?: string;
+  readonly mailAccountMasterRead?: true;
 }
 
 function required(env: OperatingEnv, name: keyof OperatingEnv): string {
@@ -163,6 +165,10 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
   if (apiKey.length < 32 || /\s/u.test(apiKey)) {
     throw new Error("[OPS_BOOT_READER_KEY_TOO_SHORT] mail-reader key requires at least 32 non-whitespace characters");
   }
+  const accountMasterGet = env.CWOS_V2_MAIL_READER_ACCOUNT_MASTER_GET?.trim();
+  if (accountMasterGet && accountMasterGet !== "1") {
+    throw new Error("[OPS_BOOT_READER_ACCOUNT_MASTER_INVALID] account master GET admission must be 1 or unset");
+  }
   return {
     mode,
     databaseUrl,
@@ -172,6 +178,7 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
     workspaceId,
     apiKey,
     principalId,
+    ...(accountMasterGet === "1" ? { mailAccountMasterRead: true } : {}),
   };
 }
 
@@ -218,6 +225,7 @@ export function createOperatingApp(
             principalId: config.principalId,
             kind: "service",
             readOnly: true,
+            ...(config.mailAccountMasterRead ? { mailAccountMasterRead: true } : {}),
           },
       });
   const listPool = seams.readonlyPool ?? new Pool({
