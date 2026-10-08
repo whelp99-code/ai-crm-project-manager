@@ -71,6 +71,25 @@ describe("operating boot configuration", () => {
       .toThrow(/OPS_BOOT_READER_ACCOUNT_MASTER_INVALID/);
   });
 
+  it("requires a separate candidate-writer profile, private key and explicit port", () => {
+    const env = { ...baseEnv(), CWOS_V2_MAIL_READER_PRINCIPAL_ID: "", CWOS_V2_MAIL_READER_KEY_FILE: "",
+      CORE5_API_MODE: "mail-candidate-writer", CORE5_API_PORT: "44321",
+      CWOS_V2_MAIL_CANDIDATE_WRITER_PRINCIPAL_ID: "candidate-writer",
+      CWOS_V2_MAIL_CANDIDATE_WRITER_KEY_FILE: privateFile("writer.key", "w".repeat(40)) };
+    expect(parseOperatingConfig(env)).toMatchObject({ mode: "mail-candidate-writer", port: 44321,
+      principalId: "candidate-writer", apiKey: "w".repeat(40) });
+    const missingPort = { ...env, CORE5_API_PORT: "" };
+    expect(() => parseOperatingConfig(missingPort)).toThrow(/OPS_BOOT_CONFIG_REQUIRED/);
+    expect(() => parseOperatingConfig({ ...env, AUTH_API_KEY: "human-key" })).toThrow(/READER_OPERATOR_ENV_FORBIDDEN/);
+    expect(() => parseOperatingConfig({ ...env, CWOS_V2_MAIL_READER_PRINCIPAL_ID: "reader" }))
+      .toThrow(/WRITER_READER_ENV_FORBIDDEN/);
+    expect(() => parseOperatingConfig({ ...baseEnv(), CWOS_V2_MAIL_CANDIDATE_WRITER_PRINCIPAL_ID: "writer" }))
+      .toThrow(/READER_WRITER_ENV_FORBIDDEN/);
+    expect(() => parseOperatingConfig({ ...env,
+      CWOS_V2_MAIL_CANDIDATE_WRITER_KEY_FILE: privateFile("short-writer.key", "short") }))
+      .toThrow(/WRITER_KEY_TOO_SHORT/);
+  });
+
   it("refuses query parameters that override the declared driver role", () => {
     expect(() => parseOperatingConfig({
       ...baseEnv(), DATABASE_URL: "postgres://runtime_api@localhost/owned_fixture?user=admin",

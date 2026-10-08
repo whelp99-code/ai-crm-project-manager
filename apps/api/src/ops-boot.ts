@@ -24,11 +24,13 @@ export interface OperatingEnv {
   readonly CWOS_V2_MAIL_READER_PRINCIPAL_ID?: string;
   readonly CWOS_V2_MAIL_READER_KEY_FILE?: string;
   readonly CWOS_V2_MAIL_READER_ACCOUNT_MASTER_GET?: string;
+  readonly CWOS_V2_MAIL_CANDIDATE_WRITER_PRINCIPAL_ID?: string;
+  readonly CWOS_V2_MAIL_CANDIDATE_WRITER_KEY_FILE?: string;
   readonly [key: string]: string | undefined;
 }
 
 export interface OperatingConfig {
-  readonly mode: "human" | "mail-reader";
+  readonly mode: "human" | "mail-reader" | "mail-candidate-writer";
   readonly databaseUrl: string;
   readonly adminDatabaseUrl: string;
   readonly modelGatewayDatabaseUrl: string;
@@ -90,8 +92,8 @@ function rejectInheritedOperatorIdentity(env: OperatingEnv): void {
 
 export function parseOperatingConfig(env: OperatingEnv = process.env): OperatingConfig {
   const mode = required(env, "CORE5_API_MODE");
-  if (mode !== "human" && mode !== "mail-reader") {
-    throw new Error("[OPS_BOOT_MODE_INVALID] CORE5_API_MODE must be human or mail-reader");
+  if (mode !== "human" && mode !== "mail-reader" && mode !== "mail-candidate-writer") {
+    throw new Error("[OPS_BOOT_MODE_INVALID] CORE5_API_MODE must be human, mail-reader or mail-candidate-writer");
   }
   const databaseUrl = required(env, "DATABASE_URL");
   const adminDatabaseUrl = required(env, "ADMIN_DATABASE_URL");
@@ -120,7 +122,8 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
   if (new Set(roles).size !== 3) {
     throw new Error("[OPS_BOOT_DATABASE_ROLES_NOT_DISTINCT] API, admin and model gateway roles must differ");
   }
-  const portText = env.CORE5_API_PORT?.trim() || "4312";
+  const portText = mode === "mail-candidate-writer" ? required(env, "CORE5_API_PORT")
+    : env.CORE5_API_PORT?.trim() || "4312";
   const port = Number(portText);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("[OPS_BOOT_PORT_INVALID] CORE5_API_PORT must be an integer from 1 to 65535");
@@ -159,6 +162,20 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
   }
 
   rejectInheritedOperatorIdentity(env);
+  if (mode === "mail-candidate-writer") {
+    if (Object.keys(env).some(name => name.startsWith("CWOS_V2_MAIL_READER_") && env[name]?.trim())) {
+      throw new Error("[OPS_BOOT_WRITER_READER_ENV_FORBIDDEN] candidate writer must not inherit the Mail reader profile");
+    }
+    const principalId = required(env, "CWOS_V2_MAIL_CANDIDATE_WRITER_PRINCIPAL_ID");
+    const apiKey = privateTextFile(required(env, "CWOS_V2_MAIL_CANDIDATE_WRITER_KEY_FILE"), "Mail candidate writer key");
+    if (apiKey.length < 32 || /\s/u.test(apiKey)) {
+      throw new Error("[OPS_BOOT_WRITER_KEY_TOO_SHORT] candidate writer key requires at least 32 non-whitespace characters");
+    }
+    return { mode, databaseUrl, adminDatabaseUrl, modelGatewayDatabaseUrl, port, workspaceId, apiKey, principalId };
+  }
+  if (Object.keys(env).some(name => name.startsWith("CWOS_V2_MAIL_CANDIDATE_WRITER_") && env[name]?.trim())) {
+    throw new Error("[OPS_BOOT_READER_WRITER_ENV_FORBIDDEN] Mail reader must not inherit the candidate writer profile");
+  }
   const principalId = required(env, "CWOS_V2_MAIL_READER_PRINCIPAL_ID");
   const keyFile = required(env, "CWOS_V2_MAIL_READER_KEY_FILE");
   const apiKey = privateTextFile(keyFile, "mail reader key");
@@ -224,10 +241,11 @@ export function createOperatingApp(
             workspaceId: config.workspaceId,
             principalId: config.principalId,
             kind: "service",
-            readOnly: true,
+            ...(config.mode === "mail-candidate-writer" ? { mailCandidateCreateOnly: true } : { readOnly: true }),
             ...(config.mailAccountMasterRead ? { mailAccountMasterRead: true } : {}),
           },
       });
+  if (config.mode === "mail-candidate-writer") return app;
   const listPool = seams.readonlyPool ?? new Pool({
     connectionString: config.databaseUrl,
     max: 4,

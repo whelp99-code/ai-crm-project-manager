@@ -326,6 +326,18 @@ export function executeV2Command(
         sender: str(input, "sender"),
         promptInjectionSuspected: bool(input, "promptInjectionSuspected"),
       });
+    case "mail.candidate.create": {
+      const provider = str(input, "provider");
+      if (provider !== "GMAIL" && provider !== "OUTLOOK") {
+        throw new CustomerWorkOsV2Error("INVALID_INPUT", "Mail candidate provider must be GMAIL or OUTLOOK");
+      }
+      return platform.inbox.createMailCandidate({
+        id: str(input, "id"), workspaceId: actor.workspaceId, provider,
+        mailbox: str(input, "mailbox"), sourceLocator: str(input, "sourceLocator"),
+        providerEventId: str(input, "providerEventId"), subject: str(input, "subject"),
+        bodyDigest: str(input, "bodyDigest"),
+      }, actor, now);
+    }
     case "mail.inbox.receive":
       return platform.inbox.receiveMail({
         id: str(input, "id"), workspaceId: actor.workspaceId, provider: str(input, "provider"), mailbox: str(input, "mailbox"), sourceLocator: str(input, "sourceLocator"), providerEventId: str(input, "providerEventId"), receivedAt: str(input, "receivedAt"),

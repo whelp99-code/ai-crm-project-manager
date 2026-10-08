@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import { z } from "zod";
 import {
   CustomerWorkOsV2Error,
   buildCompanyOverview,
@@ -36,7 +37,19 @@ export interface CustomerWorkOsV2RouteOptions {
   profile?: "test" | "development" | "production";
   /** Existing workspace-scoped business producer, injectable for isolated PG verification. */
   normalizedProjectionPool?: V2PgQueryable;
+  readonly mailCandidateWriter?: true;
 }
+
+const mailCandidateRequestSchema = z.object({
+  expectedVersion: z.number().int().nonnegative(),
+  workspaceId: z.string().trim().min(1).optional(),
+  provider: z.enum(["GMAIL", "OUTLOOK"]),
+  mailbox: z.string().trim().email().max(254),
+  sourceLocator: z.string().trim().min(1).max(1000),
+  providerEventId: z.string().trim().min(1).max(500),
+  subject: z.string().trim().min(1).max(500),
+  bodyDigest: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
 
 interface RawConnection {
   query(text: string, values?: readonly unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>;
@@ -175,6 +188,7 @@ function status(error: CustomerWorkOsV2Error): number {
       "INVALID_BOOTSTRAP_PRINCIPAL",
       "ACTOR_BINDING_MISMATCH",
       "UNTRUSTED_STEP_UP",
+      "MAIL_CANDIDATE_WRITER_REQUIRED",
     ].includes(error.code)
   ) {
     return 403;
@@ -185,6 +199,7 @@ function status(error: CustomerWorkOsV2Error): number {
       "IDEMPOTENCY_CONFLICT",
       "REPLAYED_APPROVAL",
       "STALE_APPROVAL",
+      "CANDIDATE_CONFLICT",
     ].includes(error.code)
   ) {
     return 409;
@@ -235,6 +250,9 @@ export function registerCustomerWorkOsV2Routes(
     || options.actorBinding.workspaceId !== options.operatorStepUp.workspaceId
     || options.actorBinding.principalId !== options.operatorStepUp.principalId)) {
     throw new Error("[CWOS_V2_OPERATOR_AUTH_SCOPE] step-up authentication requires its admitted human binding");
+  }
+  if (options.mailCandidateWriter && options.actorBinding?.kind !== "service") {
+    throw new Error("[CWOS_V2_MAIL_CANDIDATE_BINDING_INVALID] candidate writer requires its server-bound service principal");
   }
   if (profile === "production" && options.actorBinding?.kind === "human" && !options.operatorStepUp) {
     throw new Error("[CWOS_V2_OPERATOR_AUTH_REQUIRED] production human actor requires fresh authenticated proof");
@@ -295,6 +313,36 @@ export function registerCustomerWorkOsV2Routes(
       return sendKnownError(reply, error);
     }
   });
+
+  if (options.mailCandidateWriter) {
+    app.post("/api/cwos/v2/mail-candidates", async (request, reply) => {
+      try {
+        const authenticatedActor = actor(request, options.actorBinding);
+        const parsed = mailCandidateRequestSchema.safeParse(request.body);
+        if (!parsed.success) {
+          throw new CustomerWorkOsV2Error("INVALID_INPUT", "invalid Mail candidate creation payload");
+        }
+        const input = parsed.data;
+        if (input.workspaceId && input.workspaceId !== authenticatedActor.workspaceId) {
+          throw new CustomerWorkOsV2Error("CROSS_WORKSPACE", "candidate workspace must match the admitted writer");
+        }
+        const result = await runtime.command({
+          workspaceId: authenticatedActor.workspaceId, actor: authenticatedActor,
+          expectedVersion: input.expectedVersion, idempotencyKey: header(request, "idempotency-key"),
+          command: "mail.candidate.create",
+          payload: {
+            id: `mail-candidate-${v2Hash({ workspaceId: authenticatedActor.workspaceId, provider: input.provider,
+              mailbox: input.mailbox, providerEventId: input.providerEventId })}`,
+            provider: input.provider, mailbox: input.mailbox, sourceLocator: input.sourceLocator,
+            providerEventId: input.providerEventId, subject: input.subject, bodyDigest: input.bodyDigest,
+          },
+        });
+        return reply.status(201).send({ candidate: result.result, runtimeVersion: result.envelope.version });
+      } catch (error) {
+        return sendKnownError(reply, error);
+      }
+    });
+  }
 
   app.get("/api/cwos/v2/company-overview", async (request, reply) => {
     try {

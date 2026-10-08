@@ -94,6 +94,30 @@ that authentication or an operating transition has completed.
 
 ## Tests
 
+### MR candidate-only writer
+
+The separate `CORE5_API_MODE=mail-candidate-writer` profile uses its own
+`CWOS_V2_MAIL_CANDIDATE_WRITER_PRINCIPAL_ID` and
+`CWOS_V2_MAIL_CANDIDATE_WRITER_KEY_FILE`, three distinct DB profiles,
+`WORKSPACE_ID` and an explicit `CORE5_API_PORT`. It rejects inherited operator
+or Mail reader identity/credentials. The existing reader remains GET-only.
+After a separately approved merge/deployment, the planned writer key path is
+`/home/jm/.config/core5/crm/blro-mail-candidate-writer.key` (0600).
+This code change does not enroll that principal or generate the key.
+
+Only `POST /api/cwos/v2/mail-candidates` is admitted, plus data-free
+`GET /health`. Send matching workspace/service principal headers,
+`idempotency-key`, and JSON `{expectedVersion,provider,mailbox,sourceLocator,
+providerEventId,subject,bodyDigest}`. Provider is GMAIL or OUTLOOK; bodyDigest
+is lowercase SHA-256. Use the separate existing reader or the previous create
+response to obtain the workspace runtime version; the writer cannot read state.
+Creation returns201 with only the candidate and runtimeVersion, not business
+state. Records are append-only CANDIDATE/confirmed=false/producer_unverified.
+Source replay is immutable; changed source content conflicts409. Native
+CAS/audit checks active principal/membership before replay or mutation.
+PUT/PATCH/DELETE, confirmation, commands, customer/project/quotation routes,
+and other workspaces are denied. No mailbox send or work confirmation occurs.
+
 ### Dedicated Mail account-master admission
 
 After approval and deployment, set `CWOS_V2_MAIL_READER_ACCOUNT_MASTER_GET=1`

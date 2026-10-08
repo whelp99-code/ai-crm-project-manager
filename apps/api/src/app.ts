@@ -36,6 +36,8 @@ export type CustomerWorkOsV2AppOptions = CreateAppOptions & {
     readonly readOnly?: boolean;
     /** Explicitly admitted Mail reader may GET its bound workspace's account master. */
     readonly mailAccountMasterRead?: true;
+    /** Separate service credential: only the Mail candidate-create route is admitted. */
+    readonly mailCandidateCreateOnly?: true;
   };
   customerWorkOsV2NormalizedProjectionPool?: V2PgQueryable;
 };
@@ -92,6 +94,10 @@ export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInst
   if (machineBinding?.mailAccountMasterRead && (machineBinding.kind !== "service" || !machineBinding.readOnly)) {
     throw new Error("[CWOS_V2_MAIL_ACCOUNT_MASTER_BINDING_INVALID] account master requires a read-only service binding");
   }
+  if (machineBinding?.mailCandidateCreateOnly && (machineBinding.kind !== "service"
+    || machineBinding.readOnly || machineBinding.mailAccountMasterRead)) {
+    throw new Error("[CWOS_V2_MAIL_CANDIDATE_BINDING_INVALID] candidate writer requires a separate create-only service binding");
+  }
   const actorBinding = machineBinding ? {
     workspaceId: machineBinding.workspaceId.trim(),
     principalId: machineBinding.principalId.trim(),
@@ -116,6 +122,11 @@ export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInst
   if (machineBinding) {
     app.addHook("onRequest", async (request, reply) => {
       const path = request.url.split("?")[0];
+      if (machineBinding.mailCandidateCreateOnly) {
+        if ((request.method === "POST" && path === "/api/cwos/v2/mail-candidates")
+          || (request.method === "GET" && path === "/health")) return;
+        return reply.status(403).send({ error: "MAIL_CANDIDATE_CREATE_ONLY" });
+      }
       const mailAccountMaster = machineBinding.mailAccountMasterRead && request.method === "GET"
         && path === "/api/cwos/accounts";
       if (!path?.startsWith("/api/cwos/v2/") && !mailAccountMaster) {
@@ -150,6 +161,7 @@ export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInst
       ...(options.customerWorkOsV2Profile ? { profile: options.customerWorkOsV2Profile } : {}),
       ...(actorBinding ? { actorBinding } : {}),
       ...(operatorStepUp ? { operatorStepUp } : {}),
+      ...(machineBinding?.mailCandidateCreateOnly ? { mailCandidateWriter: true } : {}),
       ...(options.customerWorkOsV2NormalizedProjectionPool
         ? { normalizedProjectionPool: options.customerWorkOsV2NormalizedProjectionPool } : {}),
     },
