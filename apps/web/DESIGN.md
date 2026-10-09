@@ -29,6 +29,10 @@ default/hover/press/focus/disabled states; pending work disables controls
 immediately, errors are adjacent. Empty, loading and expired-session panels
 are explicit. Confirm and discard are peer44px controls. Undo remains
 visible for a current non-undone review; no destructive delete.
+Login reuses the panel as a centered max480px card. Its labeled password and
+masked OTP fields and peer buttons are48px high, with16px form gaps. Staged
+password, OTP, busy, generic denial, lock, expired and unconfigured states use
+the same tokens. Mobile controls use17px and secondary copy15px.
 
 ## 6. Motion and interaction
 No decorative animation; retain instant native selection and clear disabled
@@ -45,5 +49,7 @@ announcements and alert errors. No color-only statuses. Disclosure audit
 history, safe HTTP(S) evidence links with noreferrer. Existing shell is
 light-only; user scope requires1440/390 captures, not a theme redesign.
 No dev dependencies or broad audit tooling are added under the explicit
-related-check-only instruction. Review session import consumes an existing
-proof; passwords/OTP and production credentials are never collected here.
+related-check-only instruction. CRM-owned login collects masked password and
+OTP only for the existing admitted operator gate. Neither value is persisted
+in browser storage, rendered in plain text or logged. The existing session
+proof is HttpOnly; validated CSRF is obtained separately for review controls.

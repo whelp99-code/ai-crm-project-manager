@@ -9,6 +9,7 @@ import {
 } from "./customer-work-os-v2-routes.js";
 import type { CwosV2StateStore, V2PgQueryable } from "./customer-work-os-v2-runtime.js";
 import type { OperatorStepUpService } from "./operator-step-up.js";
+import { registerOperatorSession } from "./operator-session-routes.js";
 
 export * from "./app-base.js";
 
@@ -125,6 +126,7 @@ export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInst
     throw new Error("[CWOS_V2_ACTOR_BINDING_REQUIRES_API_KEY] trusted operator binding requires AUTH_API_KEY/API_AUTH_TOKEN");
   }
   const app = createBaseApp(options);
+  if (operatorStepUp) registerOperatorSession(app, operatorStepUp);
   if (machineBinding) {
     app.addHook("onRequest", async (request, reply) => {
       const path = request.url.split("?")[0];

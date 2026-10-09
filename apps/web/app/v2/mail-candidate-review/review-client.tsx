@@ -151,7 +151,17 @@ export function MailCandidateReviewClient() {
     setData(body);
   }, []);
   useEffect(() => {
-    void load().catch((failure: unknown) => setError(failure instanceof Error ? failure.message : "목록 연결 실패"))
+    const connect = async () => {
+      const response = await fetch("/api/self-entry", { cache: "no-store", signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) throw new Error("현재 로그인 세션을 확인하지 못했습니다. 다시 로그인해 주세요.");
+      const proof: unknown = await response.json();
+      if (!object(proof) || typeof proof.csrf !== "string" || typeof proof.expiresAt !== "string") {
+        throw new Error("로그인 세션 응답이 올바르지 않습니다.");
+      }
+      setCsrf(proof.csrf); setExpiresAt(proof.expiresAt);
+      await load();
+    };
+    void connect().catch((failure: unknown) => setError(failure instanceof Error ? failure.message : "목록 연결 실패"))
       .finally(() => setLoaded(true));
   }, [load]);
   const importProof = async (file: File) => {
@@ -195,13 +205,13 @@ export function MailCandidateReviewClient() {
       <header><p className="meta">W07 · OWNER REVIEW</p><h1>메일 후보 검토</h1>
         <p className="lead">메일 근거를 확인하고 거래처 연결을 결정하세요. 발송·외부 쓰기는 하지 않습니다.</p></header>
       <section className={`panel ${styles.session}`} aria-labelledby="owner-session-title">
-        <div><h2 id="owner-session-title">현재 운영 owner 세션</h2>
-          <p className="meta">기존 인증에서 받은 cookie·csrf JSON을 연결합니다. 새 로그인이나 키 발급은 하지 않습니다.</p>
+        <div><h2 id="owner-session-title">현재 로그인 세션</h2>
+          <p className="meta">CRM 비밀번호·OTP로 확인한 세션을 사용합니다.</p>
           {expiresAt && <p className="meta">세션 만료 {date(expiresAt)}</p>}</div>
-        <label className={styles.fileLabel}>운영 세션 연결
+        {!csrf && <label className={styles.fileLabel}>운영 세션 연결
           <input type="file" accept="application/json,.json" disabled={working} aria-label="운영 세션 증명 파일"
             onChange={e => { const file = e.target.files?.[0]; e.target.value = ""; if (file) void importProof(file); }} />
-        </label>
+        </label>}
       </section>
       {error && <p className={styles.error} role="alert">{error}</p>}
       {data && <div className={styles.toolbar}><p className="meta" aria-live="polite">

@@ -48,3 +48,23 @@ multiple concurrent replicas are not supported by the existing store contract.
 
 No database migration, listener/port change, mail send, external business write
 or payment is part of this authentication change.
+
+## Web entry
+
+The web server reuses `API_BASE_URL`, `WORKSPACE_ID`, `OPERATOR_PRINCIPAL_ID`
+and its private `AUTH_API_KEY`; set `CRM_WEB_ORIGIN` to the exact browser
+origin. Production origins must be HTTPS, without credentials or URL paths.
+The browser never receives the API key or a caller-selected principal.
+`/login` stages masked password and OTP and submits only to its same-origin
+`/api/self-entry` proxy. Missing configuration fails closed. All web pages and
+non-login web APIs require the existing admitted proof through middleware;
+static framework assets remain public. Successful login rotates the existing
+generation, clears a stale imported narrow-path cookie and enters the actual
+Mail candidate review screen. Its CSRF is loaded automatically from verified
+claims, not a manually exported credential file.
+
+The standalone API retains its existing API-key and v2 human-proof contracts;
+this change does not advertise legacy v1 API reads as a new public endpoint.
+Keep the admitted API reachable only through the existing private deployment
+boundary. No reverse proxy, machine identity or legacy business contract is
+changed here.

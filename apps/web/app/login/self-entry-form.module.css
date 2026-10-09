@@ -1,0 +1,18 @@
+.card {
+  --ink: #17221d; --muted: #526159; --border: #ccd7d1;
+  --surface: #fff; --primary: #176b47; --focus: #f0a43a; --error: #a53b32;
+  width: min(100%, 480px); margin: 0 auto;
+}
+.steps { font-size: 15px; color: var(--muted); margin-bottom: 24px; }
+.intro { word-break: keep-all; text-wrap: pretty; }
+.form { display: grid; gap: 16px; }
+.label { display: grid; gap: 8px; font-weight: 600; }
+.input { width: 100%; min-height: 48px; border: 1px solid var(--border); border-radius: 6px; padding: 12px; color: var(--ink); background: var(--surface); font: inherit; }
+.input:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+.primary, .secondary { min-height: 48px; border-radius: 6px; padding: 12px 16px; font: inherit; cursor: pointer; }
+.primary { border: 1px solid var(--primary); color: var(--surface); background: var(--primary); font-weight: 600; }
+.secondary { border: 1px solid var(--border); background: var(--surface); color: var(--ink); }
+.primary:disabled, .secondary:disabled { cursor: not-allowed; opacity: .65; }
+.notice { color: var(--error); margin-bottom: 16px; word-break: keep-all; }
+.hint { font-size: 15px; color: var(--muted); margin-top: 24px; word-break: keep-all; }
+@media (max-width: 640px) { .label, .primary, .secondary { font-size: 17px; } }
