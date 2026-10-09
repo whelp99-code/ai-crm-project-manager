@@ -30,6 +30,35 @@ export interface W05RenewalRevisionInput {
   unknownTerms: string[];
   content: string;
   citations: W05ClauseCitation[];
+  contractDraft?: W05ContractDraft;
+}
+
+export interface W05ContractItem {
+  id: string;
+  description: string;
+  quantity: number;
+  unitPriceKrw: string | null;
+}
+
+export interface W05ContractTerms {
+  startDate: string | null;
+  endDate: string | null;
+  valueKrw: string | null;
+  items: W05ContractItem[] | null;
+  conditions: string[] | null;
+}
+
+export interface W05ContractSource {
+  kind: "NORMALIZED" | "OWNER_INPUT";
+  id: string;
+  version: number | null;
+  reference: string;
+  terms: W05ContractTerms;
+}
+
+export interface W05ContractDraft {
+  source: W05ContractSource;
+  terms: W05ContractTerms;
 }
 
 export interface W05RenewalRevision extends W05RenewalRevisionInput {
@@ -109,6 +138,29 @@ function normalizeCitations(content: string, citations: W05ClauseCitation[], sou
   });
 }
 
+function contractTerms(input: W05ContractTerms): W05ContractTerms {
+  const startDate = validateDate(input.startDate);
+  const endDate = validateDate(input.endDate);
+  if (startDate !== null && endDate !== null && endDate < startDate) {
+    throw new CustomerWorkOsV2Error("INVALID_DATE", "contract end must not precede its start");
+  }
+  const money = (value: string | null): string | null => {
+    if (value === null) return null;
+    if (!/^\d{1,30}$/.test(value)) throw new CustomerWorkOsV2Error("INVALID_MONEY", "contract amount must be exact nonnegative integer KRW");
+    return BigInt(value).toString();
+  };
+  const ids = new Set<string>();
+  const items = input.items === null ? null : input.items.map(item => {
+    const id = required(item.id, "contract.item.id");
+    if (ids.has(id)) throw new CustomerWorkOsV2Error("DUPLICATE_ID", "contract item IDs must be distinct");
+    ids.add(id);
+    return { id, description: required(item.description, "contract.item.description"),
+      quantity: integer(item.quantity, "contract.item.quantity", 1), unitPriceKrw: money(item.unitPriceKrw) };
+  });
+  return { startDate, endDate, valueKrw: money(input.valueKrw), items,
+    conditions: input.conditions === null ? null : input.conditions.map(value => required(value, "contract.condition")) };
+}
+
 function revisionRequestHash(input: Omit<W05RenewalRevision, "version" | "recordedByPrincipalId">): string {
   const canonical = {
     renewalId: input.renewalId,
@@ -129,6 +181,43 @@ function revisionRequestHash(input: Omit<W05RenewalRevision, "version" | "record
 export class W05RenewalRevisionService {
   private drafts = new Map<string, W05RenewalDraft>();
 
+  recordContractDraft(
+    input: { renewalId: string; revisionId: string; revisionLabel: string; source: W05ContractSource; terms: W05ContractTerms },
+    actor: V2Actor,
+    now: string,
+  ): W05RenewalDraft {
+    const source: W05ContractSource = {
+      kind: input.source.kind, id: required(input.source.id, "sourceContractId"),
+      version: input.source.version === null ? null : integer(input.source.version, "sourceContractVersion", 1),
+      reference: required(input.source.reference, "sourceContractReference"), terms: contractTerms(input.source.terms),
+    };
+    if (source.kind !== "NORMALIZED" && source.kind !== "OWNER_INPUT") {
+      throw new CustomerWorkOsV2Error("INVALID_SOURCE", "contract source must identify its provenance");
+    }
+    if ((source.kind === "NORMALIZED") !== (source.version !== null)) {
+      throw new CustomerWorkOsV2Error("INVALID_SOURCE", "only a normalized contract has a stored source version");
+    }
+    const draft = { source, terms: contractTerms(input.terms) };
+    const content = JSON.stringify(draft);
+    const sourceHash = createHash("sha256").update(content).digest("hex");
+    return this.recordRevision({
+      renewalId: input.renewalId, workspaceId: actor.workspaceId,
+      revisionId: input.revisionId, revisionLabel: input.revisionLabel,
+      observedAt: now, expiresOn: draft.terms.endDate, noticePeriodDays: null,
+      unknownTerms: ["NOTICE_PERIOD", ...(source.kind === "OWNER_INPUT" ? ["SOURCE_VERIFICATION_REQUIRED"] : []),
+        ...(source.terms.startDate === null || source.terms.endDate === null ? ["SOURCE_PERIOD"] : []),
+        ...(source.terms.items === null ? ["SOURCE_ITEMS"] : []),
+        ...(source.terms.valueKrw === null ? ["SOURCE_AMOUNT"] : []),
+        ...(source.terms.conditions === null ? ["SOURCE_CONDITIONS"] : []),
+        ...(draft.terms.startDate === null || draft.terms.endDate === null ? ["RENEWAL_PERIOD"] : []),
+        ...(draft.terms.valueKrw === null ? ["RENEWAL_AMOUNT"] : []),
+        ...(draft.terms.conditions === null ? ["RENEWAL_CONDITIONS"] : [])],
+      content, citations: [{ clauseId: "structured-contract", startByte: 0,
+        endByte: Buffer.byteLength(content, "utf8"), text: content, sourceHash }],
+      contractDraft: draft,
+    }, actor, now);
+  }
+
   recordRevision(input: W05RenewalRevisionInput, actor: V2Actor, now: string): W05RenewalDraft {
     assertHuman(actor);
     assertStepUp(actor);
@@ -143,6 +232,9 @@ export class W05RenewalRevisionService {
     if (!Array.isArray(input.unknownTerms)) throw new CustomerWorkOsV2Error("INVALID_INPUT", "unknownTerms must be an array");
     const unknownTerms = [...new Set(input.unknownTerms.map((term) => required(term, "unknownTerm")))];
     const content = required(input.content, "content");
+    if (input.contractDraft !== undefined && JSON.stringify(input.contractDraft) !== content) {
+      throw new CustomerWorkOsV2Error("CONTRACT_CONTENT_MISMATCH", "structured terms must match the exactly cited content");
+    }
     const sourceHash = createHash("sha256").update(content, "utf8").digest("hex");
     const citations = normalizeCitations(content, input.citations, sourceHash);
     const normalized = {
@@ -157,6 +249,7 @@ export class W05RenewalRevisionService {
       content,
       sourceHash,
       citations,
+      ...(input.contractDraft === undefined ? {} : { contractDraft: copy(input.contractDraft) }),
     };
     const requestHash = revisionRequestHash(normalized);
     const prior = this.drafts.get(renewalId);

@@ -53,3 +53,12 @@ related-check-only instruction. CRM-owned login collects masked password and
 OTP only for the existing admitted operator gate. Neither value is persisted
 in browser storage, rendered in plain text or logged. The existing session
 proof is HttpOnly; validated CSRF is obtained separately for review controls.
+
+## 9. Quote, PO and renewal drafting
+Use the same owner proof, panels, labels and 44px controls. Three numbered
+sections follow the user's task order: quote/PO, source-contract renewal,
+side-by-side comparison. Input money has no suggested/default values.
+Two-column field groups collapse at 680px; BOM lines are editable fieldsets,
+not a horizontally scrolling table. Saved quote and PO previews show exact
+input amounts with source/approval state. Comparison pairs keep field labels
+on both sides when stacked at 390px, and changed values use text plus a wash.

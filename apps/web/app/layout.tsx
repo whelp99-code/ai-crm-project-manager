@@ -18,6 +18,7 @@ const styles = `
   .topbar-inner { display: flex; align-items: center; justify-content: space-between; padding: 18px 0; gap: 24px; }
   .brand { font-size: 21px; font-weight: 760; letter-spacing: -.02em; }
   .context { color: #dcebe3; font-size: 14px; }
+  .context a { display: inline-block; white-space: nowrap; }
   main { padding: 34px 0 64px; }
   h1 { margin: 0 0 8px; font-size: clamp(28px, 4vw, 42px); line-height: 1.2; letter-spacing: -.035em; }
   h2 { margin: 0 0 16px; font-size: 20px; }
@@ -65,6 +66,8 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
                 <a href="/v2" style={{ color: "#dcebe3" }}>v2</a>
                 {" · "}
                 <a href="/v2/mail-candidate-review" style={{ color: "#dcebe3" }}>메일 후보</a>
+                {" · "}
+                <a href="/v2/quote-renewal" style={{ color: "#dcebe3" }}>견적·재계약</a>
               </span>
             </div>
           </header>

@@ -3,9 +3,11 @@ import { z } from "zod";
 import {
   CustomerWorkOsV2Error,
   buildCompanyOverview,
+  compareW05ContractDraft,
   assertStepUp,
   type PrincipalKind,
   type V2Actor,
+  type W05ContractSource,
 } from "@ai-crm/domain/customer-work-os-v2";
 import {
   CustomerWorkOsV2RuntimeManager,
@@ -17,6 +19,7 @@ import {
 } from "./customer-work-os-v2-runtime.js";
 import { readNormalizedBusinessProjection } from "./customer-work-os-v2-normalized-projection.js";
 import { OperatorStepUpError, type OperatorStepUpService } from "./operator-step-up.js";
+import { contractTermsSchema, renewalDraftRequestSchema } from "./customer-work-os-v2-document-schemas.js";
 
 export interface CustomerWorkOsV2ActorBinding {
   workspaceId: string;
@@ -65,6 +68,75 @@ const reviewRequestSchema = z.discriminatedUnion("action", [
   z.object({ expectedVersion: z.number().int().nonnegative(), candidateId: z.string().trim().min(1), action: z.literal("DISCARD"), reason: z.enum(["NOT_RELEVANT", "DUPLICATE", "SPAM", "OTHER"]) }).strict(),
   z.object({ expectedVersion: z.number().int().nonnegative(), candidateId: z.string().trim().min(1), action: z.literal("UNDO"), reviewId: z.string().trim().min(1) }).strict(),
 ]);
+
+const draftMoneySchema = z.string().regex(/^\d+$/).max(30);
+const quoteDraftRequestSchema = z.object({
+  action: z.literal("QUOTE"),
+  expectedVersion: z.number().int().nonnegative(),
+  input: z.object({
+    engagement: z.object({ id: z.string().trim().min(1), version: z.number().int().positive() }).strict(),
+    versionLabel: z.string().trim().min(1).max(200),
+    validUntil: z.string().date(),
+    scope: z.string().trim().min(1).max(5000),
+    lines: z.array(z.object({
+      id: z.string().trim().min(1), sourceId: z.string().trim().min(1),
+      productId: z.string().trim().min(1), description: z.string().trim().min(1).max(2000),
+      quantity: z.number().int().positive().max(1_000_000),
+      unitCostKrw: draftMoneySchema, unitPriceKrw: draftMoneySchema,
+      vendorAccountId: z.string().trim().min(1).optional(),
+    }).strict()).min(1).max(100),
+    options: z.array(z.string().trim().min(1).max(2000)).max(100),
+    templateRef: z.string().trim().min(1).max(1000),
+    vat: z.object({
+      netAmountKrw: draftMoneySchema, vatAmountKrw: draftMoneySchema, grossAmountKrw: draftMoneySchema,
+    }).strict(),
+    po: z.object({ customerPoId: z.string().trim().min(1), supplierPoId: z.string().trim().min(1) }).strict(),
+  }).strict(),
+}).strict();
+
+const documentDraftRequestSchema = z.discriminatedUnion("action", [quoteDraftRequestSchema, renewalDraftRequestSchema]);
+const comparisonQuerySchema = z.object({
+  renewalId: z.string().trim().min(1).max(200),
+  revisionId: z.string().trim().min(1).max(200),
+}).strict();
+const contractRowSchema = z.object({
+  id: z.string(), version: z.number().int().positive(),
+  valueKrw: z.string(), startDate: z.string().nullable(), endDate: z.string().nullable(),
+  scope: z.string(), exclusions: z.array(z.unknown()), billingMilestones: z.array(z.unknown()).min(1), items: z.unknown(),
+});
+
+async function readContractSources(pool: V2PgQueryable, workspaceId: string, id?: string): Promise<W05ContractSource[]> {
+  if (!pool.withWorkspaceScope) throw new CustomerWorkOsV2Error("NORMALIZED_STORAGE_REQUIRED", "scoped contract storage is required");
+  const result = await pool.withWorkspaceScope(workspaceId, db => db.query(
+    `SELECT c.id,c.version,c.contract_value_krw::text AS "valueKrw",
+      c.effective_from::text AS "startDate",c.effective_to::text AS "endDate",
+      c.scope,c.exclusions,c.billing_milestones AS "billingMilestones",q.bom_lines AS items
+     FROM cwos_contracts c LEFT JOIN cwos_quotes q
+       ON q.workspace_id=c.workspace_id AND q.id=c.quote_id
+     WHERE c.workspace_id=$1::uuid${id === undefined ? "" : " AND c.id=$2"} ORDER BY c.id`,
+    id === undefined ? [workspaceId] : [workspaceId, id],
+  ));
+  return result.rows.map(value => {
+    const row = contractRowSchema.safeParse(value);
+    if (!row.success) throw new CustomerWorkOsV2Error("INVALID_STATE", "stored contract is not readable");
+    const source = row.data;
+    const items = z.array(contractTermsSchema.shape.items.unwrap().element.strip()
+      .extend({ unitPriceKrw: z.string().regex(/^\d+$/).nullable().default(null) }))
+      .nullable().safeParse(source.items);
+    const billing = source.billingMilestones;
+    const conditions = [source.scope,
+      ...source.exclusions.map(value => typeof value === "string" ? value : JSON.stringify(value)),
+      JSON.stringify(billing)].filter(Boolean);
+    const terms = contractTermsSchema.safeParse({
+      startDate: source.startDate, endDate: source.endDate, valueKrw: source.valueKrw,
+      items: items.success ? items.data : null,
+      conditions: conditions.length > 0 ? conditions : null,
+    });
+    if (!terms.success) throw new CustomerWorkOsV2Error("INVALID_STATE", "stored contract terms are not readable");
+    return { kind: "NORMALIZED", id: source.id, version: source.version,
+      reference: `cwos_contracts:${source.id}@${source.version}`, terms: terms.data };
+  });
+}
 
 interface RawConnection {
   query(text: string, values?: readonly unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>;
@@ -468,6 +540,95 @@ export function registerCustomerWorkOsV2Routes(
     } catch (error) { return sendKnownError(reply, error); }
   });
 
+  app.get("/api/cwos/v2/document-drafts", async (request, reply) => {
+    try {
+      const owner = actor(request, options.actorBinding, options.operatorStepUp);
+      if (owner.kind !== "human" || !owner.stepUpVerified || !options.operatorStepUp) {
+        throw new CustomerWorkOsV2Error("STEP_UP_REQUIRED", "fresh admitted operator proof is required");
+      }
+      const envelope = await runtime.readAuthorized(owner);
+      if (Object.keys(body(request.query)).length > 0) {
+        const selection = comparisonQuerySchema.safeParse(request.query);
+        if (!selection.success) throw new CustomerWorkOsV2Error("INVALID_INPUT", "comparison requires renewalId and revisionId");
+        const renewal = envelope.state.renewals?.drafts.find(draft => draft.id === selection.data.renewalId);
+        const revision = renewal?.revisions.find(item => item.revisionId === selection.data.revisionId);
+        if (!renewal || !revision?.contractDraft) throw new CustomerWorkOsV2Error("RENEWAL_NOT_FOUND", "structured renewal revision is not available");
+        return reply.status(200).send({
+          workspaceId: owner.workspaceId, runtimeVersion: envelope.version,
+          renewalId: renewal.id, revisionId: revision.revisionId,
+          source: revision.contractDraft.source, terms: revision.contractDraft.terms,
+          comparison: compareW05ContractDraft(revision.contractDraft),
+          approvalStatus: "NOT_APPROVED",
+        });
+      }
+      const pool = options.normalizedProjectionPool ?? (rawPool ? scopedPool(rawPool) : undefined);
+      if (!pool?.withWorkspaceScope) throw new CustomerWorkOsV2Error("NORMALIZED_STORAGE_REQUIRED", "workspace-scoped business data requires PostgreSQL");
+      const engagements = await pool.withWorkspaceScope(owner.workspaceId, async db =>
+        (await db.query<{ id: string; name: string; version: number }>(
+          "SELECT id,name,version FROM cwos_engagements WHERE workspace_id=$1::uuid ORDER BY name", [owner.workspaceId],
+        )).rows);
+      const sources = new Map((await readContractSources(pool, owner.workspaceId)).map(source => [`${source.kind}:${source.id}`, source]));
+      for (const revision of [...(envelope.state.renewals?.drafts.flatMap(draft => draft.revisions) ?? [])]
+        .sort((left, right) => left.observedAt.localeCompare(right.observedAt))) {
+        const source = revision.contractDraft?.source;
+        if (source?.kind === "OWNER_INPUT") sources.set(`${source.kind}:${source.id}`, source);
+      }
+      return reply.status(200).send({
+        workspaceId: owner.workspaceId, runtimeVersion: envelope.version, engagements,
+        quoteDrafts: envelope.state.quoteDrafts ?? [],
+        contracts: [...sources.values()],
+        renewalDrafts: envelope.state.renewals?.drafts.filter(draft => draft.revisions.some(revision => revision.contractDraft !== undefined)) ?? [],
+      });
+    } catch (error) { return sendKnownError(reply, error); }
+  });
+
+  app.post("/api/cwos/v2/document-drafts", async (request, reply) => {
+    try {
+      const owner = actor(request, options.actorBinding, options.operatorStepUp);
+      if (owner.kind !== "human" || !owner.stepUpVerified || !options.operatorStepUp) {
+        throw new CustomerWorkOsV2Error("STEP_UP_REQUIRED", "fresh admitted operator proof is required");
+      }
+      await runtime.readAuthorized(owner);
+      const parsed = documentDraftRequestSchema.safeParse(request.body);
+      if (!parsed.success) throw new CustomerWorkOsV2Error("INVALID_INPUT", "invalid document draft input");
+      const input = parsed.data;
+      const pool = options.normalizedProjectionPool ?? (rawPool ? scopedPool(rawPool) : undefined);
+      if (!pool?.withWorkspaceScope) throw new CustomerWorkOsV2Error("NORMALIZED_STORAGE_REQUIRED", "workspace-scoped business data requires PostgreSQL");
+      if (input.action === "RENEWAL") {
+        let source: W05ContractSource;
+        if (input.source.kind === "NORMALIZED") {
+          const stored = (await readContractSources(pool, owner.workspaceId, input.source.id))[0];
+          if (!stored) throw new CustomerWorkOsV2Error("CONTRACT_NOT_FOUND", "contract is not available in this workspace");
+          if (stored.version !== input.source.version) throw new CustomerWorkOsV2Error("CONCURRENT_MODIFICATION", "source contract changed; refresh before drafting");
+          source = stored;
+        } else {
+          source = { ...input.source, version: null };
+        }
+        const result = await runtime.command({
+          workspaceId: owner.workspaceId, actor: owner, expectedVersion: input.expectedVersion,
+          idempotencyKey: header(request, "idempotency-key"), command: "w05.contractDraft",
+          payload: { renewalId: input.renewalId, revisionId: input.revisionId,
+            revisionLabel: input.revisionLabel, source, terms: input.terms },
+        });
+        return reply.status(201).send({ draft: result.result, runtimeVersion: result.envelope.version });
+      }
+      const source = await pool.withWorkspaceScope(owner.workspaceId, db =>
+        db.query<{ version: number }>(
+          "SELECT version FROM cwos_engagements WHERE workspace_id=$1::uuid AND id=$2",
+          [owner.workspaceId, input.input.engagement.id],
+        ));
+      if (!source.rows[0]) throw new CustomerWorkOsV2Error("ENGAGEMENT_NOT_FOUND", "engagement is not available in this workspace");
+      if (source.rows[0].version !== input.input.engagement.version) {
+        throw new CustomerWorkOsV2Error("CONCURRENT_MODIFICATION", "source engagement changed; refresh before drafting");
+      }
+      const result = await runtime.command({
+        workspaceId: owner.workspaceId, actor: owner, expectedVersion: input.expectedVersion,
+        idempotencyKey: header(request, "idempotency-key"), command: "w01.quoteDraft", payload: input.input,
+      });
+      return reply.status(201).send({ draft: result.result, runtimeVersion: result.envelope.version });
+    } catch (error) { return sendKnownError(reply, error); }
+  });
+
   app.get("/api/cwos/v2/company-overview", async (request, reply) => {
     try {
       const authenticatedActor = actor(request, options.actorBinding, options.operatorStepUp);
@@ -544,7 +705,7 @@ export function registerCustomerWorkOsV2Routes(
           "command and non-negative expectedVersion are required",
         );
       }
-      if (typeof command === "string" && command.startsWith("mail.candidate.review")) {
+      if (typeof command === "string" && (command.startsWith("mail.candidate.review") || command === "w05.contractDraft")) {
         throw new CustomerWorkOsV2Error("TRUSTED_REVIEW_ROUTE_REQUIRED", "candidate reviews must use the trusted review route");
       }
       const idempotencyKey = header(request, "idempotency-key");
