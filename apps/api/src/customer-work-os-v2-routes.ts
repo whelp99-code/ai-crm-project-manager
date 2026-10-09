@@ -38,6 +38,7 @@ export interface CustomerWorkOsV2RouteOptions {
   /** Existing workspace-scoped business producer, injectable for isolated PG verification. */
   normalizedProjectionPool?: V2PgQueryable;
   readonly mailCandidateWriter?: true;
+  readonly mailCandidateReader?: true;
 }
 
 const mailCandidateRequestSchema = z.object({
@@ -313,6 +314,29 @@ export function registerCustomerWorkOsV2Routes(
       return sendKnownError(reply, error);
     }
   });
+
+  if (options.mailCandidateReader) {
+    for (const path of ["/api/cwos/v2/mail-candidates", "/api/cwos/v2/mail-candidates/count"]) {
+      app.get(path, async (request, reply) => {
+        try {
+          const authenticatedActor = actor(request, options.actorBinding);
+          const envelope = await runtime.readAuthorized(authenticatedActor);
+          const candidates = (envelope.state.inbox.mailCandidates ?? [])
+            .filter(candidate => candidate.workspaceId === authenticatedActor.workspaceId)
+            .map(candidate => ({
+              id: candidate.id, status: candidate.status, confirmed: candidate.confirmed,
+              freshness: candidate.freshness, createdAt: candidate.createdAt,
+            }));
+          return reply.status(200).send({
+            workspaceId: authenticatedActor.workspaceId, count: candidates.length,
+            ...(path === "/api/cwos/v2/mail-candidates" ? { candidates } : {}),
+          });
+        } catch (error) {
+          return sendKnownError(reply, error);
+        }
+      });
+    }
+  }
 
   if (options.mailCandidateWriter) {
     app.post("/api/cwos/v2/mail-candidates", async (request, reply) => {

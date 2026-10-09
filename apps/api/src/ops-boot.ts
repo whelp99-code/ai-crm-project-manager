@@ -26,11 +26,13 @@ export interface OperatingEnv {
   readonly CWOS_V2_MAIL_READER_ACCOUNT_MASTER_GET?: string;
   readonly CWOS_V2_MAIL_CANDIDATE_WRITER_PRINCIPAL_ID?: string;
   readonly CWOS_V2_MAIL_CANDIDATE_WRITER_KEY_FILE?: string;
+  readonly CWOS_V2_JARVIS_CANDIDATE_READER_PRINCIPAL_ID?: string;
+  readonly CWOS_V2_JARVIS_CANDIDATE_READER_KEY_FILE?: string;
   readonly [key: string]: string | undefined;
 }
 
 export interface OperatingConfig {
-  readonly mode: "human" | "mail-reader" | "mail-candidate-writer";
+  readonly mode: "human" | "mail-reader" | "mail-candidate-writer" | "jarvis-candidate-reader";
   readonly databaseUrl: string;
   readonly adminDatabaseUrl: string;
   readonly modelGatewayDatabaseUrl: string;
@@ -92,8 +94,8 @@ function rejectInheritedOperatorIdentity(env: OperatingEnv): void {
 
 export function parseOperatingConfig(env: OperatingEnv = process.env): OperatingConfig {
   const mode = required(env, "CORE5_API_MODE");
-  if (mode !== "human" && mode !== "mail-reader" && mode !== "mail-candidate-writer") {
-    throw new Error("[OPS_BOOT_MODE_INVALID] CORE5_API_MODE must be human, mail-reader or mail-candidate-writer");
+  if (mode !== "human" && mode !== "mail-reader" && mode !== "mail-candidate-writer" && mode !== "jarvis-candidate-reader") {
+    throw new Error("[OPS_BOOT_MODE_INVALID] CORE5_API_MODE must be human, mail-reader, mail-candidate-writer or jarvis-candidate-reader");
   }
   const databaseUrl = required(env, "DATABASE_URL");
   const adminDatabaseUrl = required(env, "ADMIN_DATABASE_URL");
@@ -122,7 +124,7 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
   if (new Set(roles).size !== 3) {
     throw new Error("[OPS_BOOT_DATABASE_ROLES_NOT_DISTINCT] API, admin and model gateway roles must differ");
   }
-  const portText = mode === "mail-candidate-writer" ? required(env, "CORE5_API_PORT")
+  const portText = mode === "mail-candidate-writer" || mode === "jarvis-candidate-reader" ? required(env, "CORE5_API_PORT")
     : env.CORE5_API_PORT?.trim() || "4312";
   const port = Number(portText);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -162,6 +164,20 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
   }
 
   rejectInheritedOperatorIdentity(env);
+  if (mode === "jarvis-candidate-reader") {
+    if (Object.keys(env).some(name => name.startsWith("CWOS_V2_MAIL_") && env[name]?.trim())) {
+      throw new Error("[OPS_BOOT_JARVIS_MAIL_ENV_FORBIDDEN] JARVIS must not inherit Mail credentials");
+    }
+    const principalId = required(env, "CWOS_V2_JARVIS_CANDIDATE_READER_PRINCIPAL_ID");
+    const apiKey = privateTextFile(required(env, "CWOS_V2_JARVIS_CANDIDATE_READER_KEY_FILE"), "JARVIS candidate reader key");
+    if (apiKey.length < 32 || /\s/u.test(apiKey)) {
+      throw new Error("[OPS_BOOT_JARVIS_KEY_TOO_SHORT] candidate reader key requires at least 32 non-whitespace characters");
+    }
+    return { mode, databaseUrl, adminDatabaseUrl, modelGatewayDatabaseUrl, port, workspaceId, apiKey, principalId };
+  }
+  if (Object.keys(env).some(name => name.startsWith("CWOS_V2_JARVIS_CANDIDATE_READER_") && env[name]?.trim())) {
+    throw new Error("[OPS_BOOT_MAIL_JARVIS_ENV_FORBIDDEN] Mail profiles must not inherit JARVIS credentials");
+  }
   if (mode === "mail-candidate-writer") {
     if (Object.keys(env).some(name => name.startsWith("CWOS_V2_MAIL_READER_") && env[name]?.trim())) {
       throw new Error("[OPS_BOOT_WRITER_READER_ENV_FORBIDDEN] candidate writer must not inherit the Mail reader profile");
@@ -242,10 +258,11 @@ export function createOperatingApp(
             principalId: config.principalId,
             kind: "service",
             ...(config.mode === "mail-candidate-writer" ? { mailCandidateCreateOnly: true } : { readOnly: true }),
+            ...(config.mode === "jarvis-candidate-reader" ? { mailCandidateReadOnly: true } : {}),
             ...(config.mailAccountMasterRead ? { mailAccountMasterRead: true } : {}),
           },
       });
-  if (config.mode === "mail-candidate-writer") return app;
+  if (config.mode === "mail-candidate-writer" || config.mode === "jarvis-candidate-reader") return app;
   const listPool = seams.readonlyPool ?? new Pool({
     connectionString: config.databaseUrl,
     max: 4,

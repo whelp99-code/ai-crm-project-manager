@@ -94,6 +94,36 @@ that authentication or an operating transition has completed.
 
 ## Tests
 
+### JARVIS candidate-only reader
+
+The separate `CORE5_API_MODE=jarvis-candidate-reader` profile requires
+`CWOS_V2_JARVIS_CANDIDATE_READER_PRINCIPAL_ID`,
+`CWOS_V2_JARVIS_CANDIDATE_READER_KEY_FILE`, `WORKSPACE_ID`, an explicit
+`CORE5_API_PORT` and the existing three distinct PostgreSQL role profiles.
+It rejects inherited operator or Mail credentials; Mail profiles reject
+JARVIS credentials. A private regular, non-symlink key file must contain
+at least 32 non-whitespace characters. After separately approved merge and
+deployment, the key path is
+`/home/jm/.config/core5/crm/blro-jarvis-candidate-reader.key` (0600).
+This PR does not issue a live principal or key, deploy a unit, or configure
+the JARVIS `jarvis-svc` system unit's `LoadCredential`.
+
+Only `GET /api/cwos/v2/mail-candidates` and
+`GET /api/cwos/v2/mail-candidates/count` expose data; data-free `GET /health`
+is allowed. Both data routes require the dedicated key and matching
+workspace/service-principal headers, plus active native principal/membership.
+The list returns `{workspaceId,count,candidates}`; the count route returns
+`{workspaceId,count}`. Each candidate is explicitly serialized with only
+`id`, `status`, `confirmed`, `freshness` and `createdAt`. Mailbox, source
+locator/event ID, subject, body digest and creator identity are omitted;
+new fields in stored candidates are not automatically exposed.
+Legacy snapshots without candidates return an empty
+list and count 0. No state, customer, project, quotation, detail or normalized
+projection route is admitted. POST/PATCH/DELETE/confirmation and other
+workspace claims return 403. Neither read mutates state or audit, confirms a
+candidate, or promotes its `producer_unverified` source.
+Existing Mail reader and candidate-writer authority remain unchanged.
+
 ### MR candidate-only writer
 
 The separate `CORE5_API_MODE=mail-candidate-writer` profile uses its own

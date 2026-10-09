@@ -38,6 +38,8 @@ export type CustomerWorkOsV2AppOptions = CreateAppOptions & {
     readonly mailAccountMasterRead?: true;
     /** Separate service credential: only the Mail candidate-create route is admitted. */
     readonly mailCandidateCreateOnly?: true;
+    /** Separate JARVIS credential: only candidate list/count GETs are admitted. */
+    readonly mailCandidateReadOnly?: true;
   };
   customerWorkOsV2NormalizedProjectionPool?: V2PgQueryable;
 };
@@ -95,8 +97,12 @@ export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInst
     throw new Error("[CWOS_V2_MAIL_ACCOUNT_MASTER_BINDING_INVALID] account master requires a read-only service binding");
   }
   if (machineBinding?.mailCandidateCreateOnly && (machineBinding.kind !== "service"
-    || machineBinding.readOnly || machineBinding.mailAccountMasterRead)) {
+    || machineBinding.readOnly || machineBinding.mailAccountMasterRead || machineBinding.mailCandidateReadOnly)) {
     throw new Error("[CWOS_V2_MAIL_CANDIDATE_BINDING_INVALID] candidate writer requires a separate create-only service binding");
+  }
+  if (machineBinding?.mailCandidateReadOnly && (machineBinding.kind !== "service" || !machineBinding.readOnly
+    || machineBinding.mailAccountMasterRead || machineBinding.mailCandidateCreateOnly)) {
+    throw new Error("[CWOS_V2_CANDIDATE_READER_BINDING_INVALID] candidate reader requires a separate read-only service binding");
   }
   const actorBinding = machineBinding ? {
     workspaceId: machineBinding.workspaceId.trim(),
@@ -122,6 +128,11 @@ export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInst
   if (machineBinding) {
     app.addHook("onRequest", async (request, reply) => {
       const path = request.url.split("?")[0];
+      if (machineBinding.mailCandidateReadOnly) {
+        if (request.method === "GET" && (path === "/api/cwos/v2/mail-candidates"
+          || path === "/api/cwos/v2/mail-candidates/count" || path === "/health")) return;
+        return reply.status(403).send({ error: "MAIL_CANDIDATE_READ_ONLY" });
+      }
       if (machineBinding.mailCandidateCreateOnly) {
         if ((request.method === "POST" && path === "/api/cwos/v2/mail-candidates")
           || (request.method === "GET" && path === "/health")) return;
@@ -162,6 +173,7 @@ export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInst
       ...(actorBinding ? { actorBinding } : {}),
       ...(operatorStepUp ? { operatorStepUp } : {}),
       ...(machineBinding?.mailCandidateCreateOnly ? { mailCandidateWriter: true } : {}),
+      ...(machineBinding?.mailCandidateReadOnly ? { mailCandidateReader: true } : {}),
       ...(options.customerWorkOsV2NormalizedProjectionPool
         ? { normalizedProjectionPool: options.customerWorkOsV2NormalizedProjectionPool } : {}),
     },
