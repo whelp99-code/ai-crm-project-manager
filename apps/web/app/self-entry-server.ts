@@ -9,6 +9,7 @@ export interface SelfEntryConfig {
   readonly principalId: string;
   readonly apiKey: string;
   readonly localDevelopment: boolean;
+  readonly proxySecret?: string;
 }
 export type SelfEntryConfiguration =
   | { readonly ready: true; readonly config: SelfEntryConfig }
@@ -27,8 +28,9 @@ function permittedOrigin(value: string, local: boolean): boolean {
 export function selfEntryConfiguration(
   source: Readonly<Record<string, string | undefined>> = process.env,
 ): SelfEntryConfiguration {
-  if (CONFIG_KEYS.some(key => !source[key]?.trim())) return { ready: false };
-  const apiOrigin = source.API_BASE_URL ?? "";
+  const values: Readonly<Record<string, string | undefined>> = { ...source, API_BASE_URL: source.OPERATOR_AUTH_API_BASE_URL || source.API_BASE_URL };
+  if (CONFIG_KEYS.some(key => !values[key]?.trim())) return { ready: false };
+  const apiOrigin = values.API_BASE_URL ?? "";
   const webOrigin = source.CRM_WEB_ORIGIN ?? "";
   const localDevelopment = source.NODE_ENV === "development" || source.NODE_ENV === "test";
   if (!permittedOrigin(apiOrigin, localDevelopment) || !permittedOrigin(webOrigin, localDevelopment)) {
@@ -37,7 +39,32 @@ export function selfEntryConfiguration(
   return { ready: true, config: {
     apiOrigin, webOrigin, localDevelopment, workspaceId: source.WORKSPACE_ID ?? "",
     principalId: source.OPERATOR_PRINCIPAL_ID ?? "", apiKey: source.AUTH_API_KEY ?? "",
+    ...(source.CWOS_V2_OPERATOR_PROXY_SECRET ? { proxySecret: source.CWOS_V2_OPERATOR_PROXY_SECRET } : {}),
   } };
+}
+
+/** Only a gateway-held key can attest an address; caller-supplied XFF is ignored. */
+async function trustedClientHeaders(request: Request, config: SelfEntryConfig): Promise<Record<string, string>> {
+  const candidate = request.headers.get("x-cwos-client-token");
+  const raw = request.headers.get("x-cwos-client-ip");
+  if (!config.proxySecret || config.proxySecret.length < 32 || !candidate || !raw) return {};
+  const encoder = new TextEncoder();
+  const [a, b] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(candidate)),
+    crypto.subtle.digest("SHA-256", encoder.encode(config.proxySecret)),
+  ]);
+  const left = new DataView(a), right = new DataView(b);
+  let difference = 0;
+  for (let index = 0; index < left.byteLength; index += 1) difference |= left.getUint8(index) ^ right.getUint8(index);
+  if (difference !== 0) return {};
+  let address: string;
+  if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(raw) && raw.split(".").every(part => Number(part) <= 255)) {
+    address = raw.split(".").map(Number).join(".");
+  } else {
+    try { address = new URL(`http://[${raw}]/`).hostname.slice(1, -1); }
+    catch { return {}; }
+  }
+  return { "x-cwos-client-ip": address, "x-cwos-client-token": config.proxySecret };
 }
 
 function response(status: number, body: Readonly<Record<string, unknown>>, cookie?: string): Response {
@@ -72,7 +99,12 @@ async function denial(upstream: Response): Promise<Response> {
     if (body !== null && typeof body === "object" && "error" in body
       && typeof body.error === "string" && DENIAL_CODES.has(body.error)) code = body.error;
   } catch (error) { if (!(error instanceof SyntaxError)) throw error; }
-  return response([401, 403, 429].includes(upstream.status) ? upstream.status : 502, { error: code });
+  const result = response([401, 403, 429].includes(upstream.status) ? upstream.status : 502, { error: code });
+  const retry = upstream.headers.get("retry-after");
+  if (retry && /^\d+$/.test(retry) && Number(retry) >= 1 && Number(retry) <= 30) {
+    result.headers.set("retry-after", retry);
+  }
+  return result;
 }
 
 /** Both factors are verified by the existing atomic API gate, never by the UI. */
@@ -96,7 +128,7 @@ export async function submitSelfEntry(request: Request,
   }
   try {
     const upstream = await transport(`${config.apiOrigin}/api/cwos/v2/operator-step-up`, {
-      method: "POST", headers: { ...headers(config), "content-type": "application/json" },
+      method: "POST", headers: { ...headers(config), ...await trustedClientHeaders(request, config), "content-type": "application/json" },
       body: JSON.stringify({ password: body.password, totp: body.totp }),
       redirect: "error", signal: AbortSignal.timeout(10_000), cache: "no-store",
     });
@@ -136,5 +168,28 @@ export async function verifySelfEntry(cookieHeader: string,
       return response(502, { error: "SESSION_RESPONSE_INVALID" });
     }
     return response(200, { authenticated: true });
+  } catch { return response(502, { error: "AUTHENTICATION_UNAVAILABLE" }); }
+}
+
+export async function logoutSelfEntry(request: Request,
+  configuration: SelfEntryConfiguration = selfEntryConfiguration(),
+  transport: typeof fetch = fetch,
+): Promise<Response> {
+  if (!configuration.ready) return response(503, { error: "CONFIGURATION_REQUIRED" });
+  const { config } = configuration;
+  if (request.headers.get("origin") !== config.webOrigin) return response(403, { error: "ORIGIN_DENIED" });
+  const csrf = request.headers.get("x-csrf-token");
+  const cookie = operatorCookie(request.headers.get("cookie") ?? "");
+  if (!cookie || !csrf) return response(403, { error: "OPERATOR_CSRF" });
+  try {
+    const upstream = await transport(`${config.apiOrigin}/api/cwos/v2/operator-logout`, {
+      method: "POST", headers: { ...headers(config, cookie), origin: config.apiOrigin,
+        "x-csrf-token": csrf, "content-type": "application/json" },
+      body: "{}", redirect: "error", signal: AbortSignal.timeout(10_000), cache: "no-store",
+    });
+    if (upstream.status !== 200) return denial(upstream);
+    const clear = "cwos_operator_stepup=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+      + (config.localDevelopment ? "" : "; Secure");
+    return response(200, { authenticated: false }, clear);
   } catch { return response(502, { error: "AUTHENTICATION_UNAVAILABLE" }); }
 }

@@ -3,7 +3,7 @@ import { verifySelfEntry } from "./app/self-entry-server";
 
 export async function middleware(request: NextRequest) {
   const path = request.nextUrl.pathname;
-  if (path === "/login" || path === "/api/self-entry") return NextResponse.next();
+  if (path === "/login" || path === "/api/self-entry" || path === "/api/self-entry/logout") return NextResponse.next();
   const verified = await verifySelfEntry(request.headers.get("cookie") ?? "");
   if (verified.status === 200) return NextResponse.next();
   if (path.startsWith("/api/")) return verified;

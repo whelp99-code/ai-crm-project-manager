@@ -5,7 +5,7 @@ import { InMemoryCwosV2StateStore } from "../../api/src/customer-work-os-v2-runt
 import { operatorPasswordHash } from "../../api/src/operator-auth-crypto.js";
 import type { OperatorAuthRecord } from "../../api/src/operator-auth-store.js";
 import { OperatorStepUpService } from "../../api/src/operator-step-up.js";
-import { selfEntryConfiguration, submitSelfEntry, verifySelfEntry } from "../app/self-entry-server";
+import { logoutSelfEntry, selfEntryConfiguration, submitSelfEntry, verifySelfEntry } from "../app/self-entry-server";
 import { middleware } from "../middleware";
 import { GET as sessionDetails } from "../app/api/self-entry/route";
 
@@ -15,6 +15,7 @@ const webOrigin = "https://crm.example.test";
 const key = "synthetic-api-key-at-least-32-characters";
 const workspaceId = "login-workspace";
 const principalId = "login-owner";
+const proxySecret = "synthetic-authenticated-proxy-key-at-least-32-characters";
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
@@ -31,6 +32,7 @@ async function fixture() {
     workspaceId, principalId, sessionSecret: "synthetic-web-session-secret-at-least-32-characters",
     store: { read: () => structuredClone(record), write: next => { record = structuredClone(next); } },
     now: () => now, cookieSecure: false,
+    proxySecret,
   });
   const app = createApp({
     authApiKey: key, customerWorkOsV2Profile: "production",
@@ -43,6 +45,7 @@ async function fixture() {
   const source = {
     API_BASE_URL: apiOrigin, CRM_WEB_ORIGIN: webOrigin, WORKSPACE_ID: workspaceId,
     OPERATOR_PRINCIPAL_ID: principalId, AUTH_API_KEY: key, NODE_ENV: "test",
+    CWOS_V2_OPERATOR_PROXY_SECRET: proxySecret,
   };
   for (const [name, value] of Object.entries(source)) vi.stubEnv(name, value);
   const config = selfEntryConfiguration(source);
@@ -129,14 +132,58 @@ describe("CRM-owned web authentication against the real API", () => {
     expect(result.headers.get("cache-control")).toBe("no-store");
   });
 
-  it("persists lockout across web attempts without issuing a session", async () => {
+  it("keeps a valid owner login available after hostile web attempts", async () => {
     const f = await fixture();
     for (let attempt = 0; attempt < 10; attempt += 1) {
       expect((await submitSelfEntry(f.request({ password: "incorrect", totp: "287082" }), f.config)).status).toBe(401);
     }
     const blocked = await submitSelfEntry(f.request({ password, totp: "287082" }), f.config);
-    expect(blocked.status).toBe(429);
-    expect(blocked.headers.get("set-cookie")).toBeNull();
+    expect(blocked.status).toBe(200);
+    expect(blocked.headers.get("set-cookie")).not.toBeNull();
+  });
+
+  it("accepts only authenticated gateway addresses across the Next proxy", async () => {
+    const f = await fixture();
+    for (const address of ["192.0.2.1", "192.0.2.2"]) {
+      const request = f.request({ password: "incorrect", totp: "287082" });
+      request.headers.set("x-cwos-client-ip", address);
+      request.headers.set("x-cwos-client-token", proxySecret);
+      expect((await submitSelfEntry(request, f.config)).status).toBe(401);
+    }
+    const forged = f.request({ password: "incorrect", totp: "287082" });
+    forged.headers.set("x-forwarded-for", "192.0.2.3");
+    forged.headers.set("x-cwos-client-ip", "192.0.2.3");
+    forged.headers.set("x-cwos-client-token", "forged");
+    expect((await submitSelfEntry(forged, f.config)).status).toBe(401);
+    expect(Object.keys(f.state().rate?.perIp ?? {}).sort())
+      .toEqual(["192.0.2.1", "192.0.2.2", "unknown"]);
+  });
+
+  it("denies a missing Origin and revokes logout cookies without accepting stale proof", async () => {
+    const f = await fixture();
+    const noOrigin = f.request({ password, totp: "287082" });
+    noOrigin.headers.delete("origin");
+    expect((await submitSelfEntry(noOrigin, f.config)).status).toBe(403);
+    const login = await submitSelfEntry(f.request({ password, totp: "287082" }), f.config);
+    const cookie = f.cookieOf(login);
+    const details = await sessionDetails(new Request(`${webOrigin}/api/self-entry`, { headers: { cookie } }));
+    const body: unknown = await details.json();
+    if (body === null || typeof body !== "object" || !("csrf" in body) || typeof body.csrf !== "string") {
+      throw new TypeError("session details must expose the authenticated CSRF token");
+    }
+    const generation = f.state().generation;
+    const denied = await logoutSelfEntry(new Request(`${webOrigin}/api/self-entry/logout`, {
+      method: "POST", headers: { cookie, "x-csrf-token": body.csrf },
+    }), f.config);
+    expect(denied.status).toBe(403);
+    expect(f.state().generation).toBe(generation);
+    const logout = await logoutSelfEntry(new Request(`${webOrigin}/api/self-entry/logout`, {
+      method: "POST", headers: { origin: webOrigin, cookie, "x-csrf-token": body.csrf },
+    }), f.config);
+    expect(logout.status).toBe(200);
+    expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
+    expect(f.state().generation).toBe(generation + 1);
+    expect((await verifySelfEntry(cookie, f.config)).status).toBe(401);
   });
 
   it("rejects spoofed session scope with a valid signature", async () => {

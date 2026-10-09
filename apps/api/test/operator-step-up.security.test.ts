@@ -24,7 +24,7 @@ function codeAt(now: number): string {
   return ((hmac.readUInt32BE(last & 15) & 0x7fffffff) % 1_000_000).toString().padStart(6, "0");
 }
 
-function fixture(scope = workspaceId) {
+function fixture(scope = workspaceId, proxySecret?: string) {
   let now = 59_000;
   let record: OperatorAuthRecord = {
     generation: 1, enrolled: true, totpPending: false, passwordHash,
@@ -37,6 +37,7 @@ function fixture(scope = workspaceId) {
   const auth = new OperatorStepUpService({
     workspaceId: scope, principalId, sessionSecret, store: authStore,
     now: () => now, cookieSecure: false,
+    ...(proxySecret ? { proxySecret } : {}),
   });
   const store = new InMemoryCwosV2StateStore();
   const headers = {
@@ -126,7 +127,7 @@ describe("production human password/TOTP step-up", () => {
         payload: { password, totp: codeAt(f.time()) },
       });
       expect(response.statusCode).toBe(401);
-      expect(response.json()).toEqual({ error: "OPERATOR_TOTP_REPLAY" });
+      expect(response.json()).toEqual({ error: "OPERATOR_UNAUTHENTICATED" });
       expect(response.headers["set-cookie"]).toBeUndefined();
       expect(await f.store.load(workspaceId)).toBeUndefined();
     } finally { await f.app.close(); }
@@ -252,7 +253,7 @@ describe("production human password/TOTP step-up", () => {
     } finally { await f.app.close(); }
   });
 
-  it("persists rate lockout and refuses the next valid credential attempt", async () => {
+  it("bounds failure penalties without locking valid owner factors out", async () => {
     const f = fixture();
     try {
       for (let attempt = 0; attempt < 10; attempt += 1) {
@@ -262,15 +263,89 @@ describe("production human password/TOTP step-up", () => {
         });
         expect(denied.statusCode).toBe(401);
       }
-      expect(f.authStore.read().rate).toMatchObject({ failures: 10, lockoutUntil: f.time() + 900_000 });
+      expect(f.authStore.read().rate).toMatchObject({ failures: 1, lockoutUntil: f.time() + 500 });
       const denied = await f.app.inject({
         method: "POST", url: "/api/cwos/v2/operator-step-up", headers: f.headers,
         payload: { password, totp: codeAt(f.time()) },
       });
-      expect(denied.statusCode).toBe(429);
-      expect(denied.json()).toEqual({ error: "OPERATOR_RATE_LIMITED" });
+      expect(denied.statusCode).toBe(200);
+      expect(f.authStore.read().rate?.failures).toBe(0);
       expect(await f.store.load(workspaceId)).toBeUndefined();
     } finally { await f.app.close(); }
+  });
+
+  it("separates authenticated proxy clients and ignores forged forwarding", async () => {
+    const proxySecret = "isolated-auth-proxy-secret-at-least-32-characters";
+    const f = fixture(workspaceId, proxySecret);
+    try {
+      for (const ip of ["192.0.2.1", "192.0.2.2"]) {
+        await f.app.inject({ method: "POST", url: "/api/cwos/v2/operator-step-up",
+          headers: { ...f.headers, "x-cwos-client-ip": ip, "x-cwos-client-token": proxySecret },
+          payload: { password: "wrong-password", totp: "000000" } });
+      }
+      await f.app.inject({ method: "POST", url: "/api/cwos/v2/operator-step-up",
+        headers: { ...f.headers, "x-forwarded-for": "192.0.2.3", "x-cwos-client-ip": "192.0.2.3",
+          "x-cwos-client-token": "forged" },
+        payload: { password: "wrong-password", totp: "000000" } });
+      expect(Object.keys(f.authStore.read().rate?.perIp ?? {}).sort())
+        .toEqual(["192.0.2.1", "192.0.2.2", "unknown"]);
+    } finally { await f.app.close(); }
+  });
+
+  it("expires a short client penalty using the controlled clock", async () => {
+    const f = fixture();
+    try {
+      const bad = { password: "wrong-password", totp: "000000" };
+      expect(() => f.auth.authenticate(bad, "client")).toThrow("OPERATOR_UNAUTHENTICATED");
+      const firstPenalty = f.authStore.read();
+      expect(() => f.auth.authenticate(bad, "client")).toThrow("OPERATOR_RATE_LIMITED");
+      expect(f.authStore.read()).toEqual(firstPenalty);
+      f.advance(30_001);
+      expect(() => f.auth.authenticate(bad, "client")).toThrow("OPERATOR_UNAUTHENTICATED");
+      expect(f.authStore.read().rate?.lockoutUntil).toBeLessThanOrEqual(f.time() + 30_000);
+    } finally { await f.app.close(); }
+  });
+
+  it("requires Origin and CSRF for logout and revokes the old generation immediately", async () => {
+    const f = fixture();
+    try {
+      const proof = await stepUp(f);
+      const generation = f.authStore.read().generation;
+      for (const headers of [
+        { ...proof.headers, host: "api.test" },
+        { ...f.headers, cookie: proof.headers.cookie, host: "api.test", origin: "http://api.test" },
+      ]) {
+        const rejected = await f.app.inject({ method: "POST", url: "/api/cwos/v2/operator-logout",
+          headers, payload: {} });
+        expect(rejected.statusCode).toBe(403);
+        expect(f.authStore.read().generation).toBe(generation);
+      }
+      const loggedOut = await f.app.inject({ method: "POST", url: "/api/cwos/v2/operator-logout",
+        headers: { ...proof.headers, host: "api.test", origin: "http://api.test" }, payload: {} });
+      expect(loggedOut.statusCode).toBe(200);
+      expect(f.authStore.read().generation).toBe(generation + 1);
+      const stale = await f.app.inject({ method: "GET", url: "/api/cwos/v2/operator-session",
+        headers: proof.headers });
+      expect(stale.statusCode).toBe(401);
+    } finally { await f.app.close(); }
+  });
+
+  it("does not expose which password, OTP or replay factor failed", async () => {
+    const responses: unknown[] = [];
+    for (const scenario of ["password", "otp", "replay"]) {
+      const f = fixture();
+      try {
+        if (scenario === "replay") await stepUp(f);
+        const response = await f.app.inject({ method: "POST", url: "/api/cwos/v2/operator-step-up",
+          headers: f.headers, payload: {
+            password: scenario === "password" ? "wrong-password" : password,
+            totp: scenario === "otp" ? "000000" : codeAt(f.time()),
+          } });
+        responses.push({ status: response.statusCode, body: response.json() });
+      } finally { await f.app.close(); }
+    }
+    expect(responses[1]).toEqual(responses[0]);
+    expect(responses[2]).toEqual(responses[0]);
   });
 
   it("retains consumed TOTP and proof revocation across a new service instance", () => {

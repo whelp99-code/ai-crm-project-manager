@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { operatorAuthRecordSchema } from "../src/operator-auth-store.js";
+import { enrollOperator } from "../src/operator-auth-enrollment.js";
 
 const run = promisify(execFile);
 const root = resolve(import.meta.dirname, "../../..");
@@ -14,6 +15,26 @@ const fixture = {
 };
 
 describe("owner-run private enrollment CLI", () => {
+  it("unlocks only penalty metadata without resetting consumed OTP or credentials", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "crm-unlock-cli-"));
+    try {
+      const state = join(dir, "state.json");
+      const enrollment = enrollOperator(fixture, 59_000);
+      const locked = { ...enrollment, rate: {
+        failures: 10, lockoutUntil: 1_000_000, globalHits: [59_000],
+        perIp: { unknown: [59_000] },
+      } };
+      await writeFile(state, JSON.stringify(locked), { mode: 0o600 });
+      const result = await run(process.execPath, ["--import", "tsx",
+        "apps/api/src/operator-auth-unlock.mts", "--state", state], { cwd: root });
+      expect(result.stdout).toBe("OPERATOR_UNLOCKED\n");
+      expect(result.stderr).toBe("");
+      expect(operatorAuthRecordSchema.parse(JSON.parse(await readFile(state, "utf8"))))
+        .toEqual(enrollment);
+      expect((await stat(state)).mode & 0o777).toBe(0o600);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
   it("writes private KDF state, hides inputs and refuses to overwrite enrolled state", async () => {
     const dir = await mkdtemp(join(tmpdir(), "crm-enroll-cli-"));
     try {

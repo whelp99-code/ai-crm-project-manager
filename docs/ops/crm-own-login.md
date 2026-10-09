@@ -41,10 +41,10 @@ multiple concurrent replicas are not supported by the existing store contract.
 
 | Threat | Mitigation |
 | --- | --- |
-| Brute force | Cost-12 bcrypt, password plus TOTP, persisted global/per-peer 10-attempt/15-minute limit and lockout; generic denials. |
+| Brute force | Cost-12 bcrypt, password plus TOTP, separate account/client failure windows with bounded non-renewing penalties and valid-owner recovery; generic denials. |
 | Session theft/fixation | Fresh random CSRF and incremented persistent generation on every login; signed workspace/principal-bound proof, HttpOnly, SameSite=Strict, Secure outside explicit loopback development, five-minute expiry; previous generation rejected. |
 | OTP reuse | Persisted consumed TOTP period, monotonic rejection of equal/older periods, synchronous single-owner verification and write; enrollment also consumes its period. |
-| Recovery bypass | No network recovery or default factors; owner-only offline re-enrollment plus signing-secret rotation, private state/input files, no overwrite or credential output. |
+| Recovery bypass | No network recovery or default factors; owner-only offline rate unlock preserving replay state, or re-enrollment plus signing-secret rotation, private state/input files, no overwrite or credential output. |
 
 No database migration, listener/port change, mail send, external business write
 or payment is part of this authentication change.
@@ -68,3 +68,34 @@ this change does not advertise legacy v1 API reads as a new public endpoint.
 Keep the admitted API reachable only through the existing private deployment
 boundary. No reverse proxy, machine identity or legacy business contract is
 changed here.
+
+## Failed attempts, trusted proxy addresses and offline unlock
+
+The private enrollment is the account bucket. Only authenticated gateway
+addresses create client buckets; raw X-Forwarded-For and X-Real-IP are ignored.
+Configure CWOS_V2_OPERATOR_PROXY_SECRET privately on ingress, Next and human API
+(at least 32 characters, never NEXT_PUBLIC). The ingress strips caller-supplied
+x-cwos-client-ip/x-cwos-client-token, then sets the actual IP and private token.
+Without that boundary the client is unknown, not an inferred forwarded address.
+
+Failed factors have exponential retry hints capped at 30 seconds. Rejected
+retries cannot renew a lock or keep rewriting state. Valid password plus fresh
+TOTP remains admissible despite hostile account/client failures. Wrong factors
+and replay have one client code/status; logs retain only a secret-free reason.
+
+Stop the single owning API before offline recovery:
+
+```sh
+pnpm exec tsx apps/api/src/operator-auth-unlock.mts \
+  --state "$CWOS_V2_OPERATOR_AUTH_STATE_PATH"
+```
+
+This clears only rate metadata: password hash, TOTP secret, consumed period and
+generation remain. It cannot admit a replay or issue a proof. Existing no-symlink,
+owner and mode-600 checks remain mandatory.
+
+POST /api/self-entry/logout requires configured web Origin and x-csrf-token
+from authenticated session details. The API verifies its Origin, actor and CSRF,
+then increments generation and clears the cookie. All older proofs fail at once.
+OPERATOR_AUTH_API_BASE_URL can isolate the private identity API from unavailable
+business configuration; default API_BASE_URL and all middleware guards remain.
