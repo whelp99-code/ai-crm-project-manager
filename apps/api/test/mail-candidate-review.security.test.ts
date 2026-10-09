@@ -1,4 +1,4 @@
-import { createHmac, scryptSync } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { Pool } from "pg";
 import type { V2Actor } from "@ai-crm/domain/customer-work-os-v2";
@@ -7,6 +7,7 @@ import { createStandaloneCustomerWorkOsV2App } from "../src/customer-work-os-v2-
 import { CustomerWorkOsV2RuntimeManager, InMemoryCwosV2StateStore, type V2PgQueryable } from "../src/customer-work-os-v2-runtime.js";
 import { OperatorStepUpService } from "../src/operator-step-up.js";
 import type { OperatorAuthRecord, OperatorAuthStore } from "../src/operator-auth-store.js";
+import { operatorPasswordHash } from "../src/operator-auth-crypto.js";
 
 const workspaceId = process.env.W07_REVIEW_PG_TEST_WORKSPACE ?? "b1111111-1111-4111-8111-111111111111";
 const principalId = "review-owner";
@@ -14,7 +15,7 @@ const key = "isolated-review-api-key-at-least-32-chars";
 const password = "isolated-review-password";
 const accountId = process.env.W07_REVIEW_PG_TEST_ACCOUNT ?? "account-dc84a964";
 const accountName = process.env.W07_REVIEW_PG_TEST_ACCOUNT_NAME ?? "Acme";
-const salt = Buffer.alloc(16, 7).toString("base64url");
+const passwordHash = operatorPasswordHash(password);
 const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
 
 function codeAt(now: number): string {
@@ -29,8 +30,7 @@ function codeAt(now: number): string {
 async function fixture() {
   const now = 59_000;
   let record: OperatorAuthRecord = {
-    generation: 1, enrolled: true, totpPending: false, passwordSalt: salt,
-    passwordHash: scryptSync(password, Buffer.from(salt, "base64url"), 32, { N: 16384, r: 8, p: 1 }).toString("base64url"),
+    generation: 1, enrolled: true, totpPending: false, passwordHash,
     totpSecret: secret,
   };
   const authStore: OperatorAuthStore = { read: () => structuredClone(record), write: next => { record = structuredClone(next); } };

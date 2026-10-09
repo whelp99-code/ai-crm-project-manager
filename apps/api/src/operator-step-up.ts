@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import {
-  acceptedOperatorTotpStep, equalAuthValue, operatorPasswordHash, operatorProofSignature,
+  acceptedOperatorTotpStep, equalAuthValue, verifyOperatorPassword, operatorProofSignature,
 } from "./operator-auth-crypto.js";
 import type { OperatorAuthStore } from "./operator-auth-store.js";
 
@@ -80,9 +80,9 @@ export class OperatorStepUpService {
       throw new OperatorStepUpError(code, 401);
     };
     if (!parsed.success) return fail("OPERATOR_UNAUTHENTICATED");
-    const password = operatorPasswordHash(parsed.data.password, record.passwordSalt);
+    const passwordAccepted = verifyOperatorPassword(parsed.data.password, record.passwordHash);
     const step = acceptedOperatorTotpStep(record.totpSecret, parsed.data.totp, now);
-    if (!equalAuthValue(password, Buffer.from(record.passwordHash, "base64url")) || step === undefined) {
+    if (!passwordAccepted || step === undefined) {
       return fail("OPERATOR_UNAUTHENTICATED");
     }
     if (record.lastTotpStep !== undefined && step <= record.lastTotpStep) return fail("OPERATOR_TOTP_REPLAY");

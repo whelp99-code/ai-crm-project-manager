@@ -1,15 +1,16 @@
-import { createHmac, scryptSync } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { InMemoryCwosV2StateStore } from "../src/customer-work-os-v2-runtime.js";
 import { OperatorStepUpService } from "../src/operator-step-up.js";
 import type { OperatorAuthRecord, OperatorAuthStore } from "../src/operator-auth-store.js";
+import { operatorPasswordHash } from "../src/operator-auth-crypto.js";
 
 const workspaceId = "workspace-step-up-fixture";
 const principalId = "human-step-up-fixture";
 const key = "isolated-human-api-key-at-least-32-chars";
 const password = "isolated-human-password";
-const salt = Buffer.alloc(16, 7).toString("base64url");
+const passwordHash = operatorPasswordHash(password);
 const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
 const sessionSecret = "isolated-session-signature-secret-at-least-32-chars";
 
@@ -26,8 +27,7 @@ function codeAt(now: number): string {
 function fixture(scope = workspaceId) {
   let now = 59_000;
   let record: OperatorAuthRecord = {
-    generation: 1, enrolled: true, totpPending: false, passwordSalt: salt,
-    passwordHash: scryptSync(password, Buffer.from(salt, "base64url"), 32, { N: 16384, r: 8, p: 1 }).toString("base64url"),
+    generation: 1, enrolled: true, totpPending: false, passwordHash,
     totpSecret: secret,
   };
   const authStore: OperatorAuthStore = {
@@ -78,13 +78,13 @@ function bootstrapPayload() {
 
 describe("production human password/TOTP step-up", () => {
   it.each([
-    { password: "wrong-password", totp: "287082" },
-    { password, totp: "000000" },
-  ])("refuses bad credentials without native mutation: %j", async credentials => {
+    { name: "wrong password", password: "wrong-password", totp: "287082" },
+    { name: "wrong OTP", password, totp: "000000" },
+  ])("refuses $name without native mutation", async ({ password, totp }) => {
     const f = fixture();
     try {
       const denied = await f.app.inject({
-        method: "POST", url: "/api/cwos/v2/operator-step-up", headers: f.headers, payload: credentials,
+        method: "POST", url: "/api/cwos/v2/operator-step-up", headers: f.headers, payload: { password, totp },
       });
       expect(denied.statusCode).toBe(401);
       expect(denied.json()).toEqual({ error: "OPERATOR_UNAUTHENTICATED" });
