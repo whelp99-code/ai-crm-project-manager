@@ -47,3 +47,12 @@ light-only; user scope requires1440/390 captures, not a theme redesign.
 No dev dependencies or broad audit tooling are added under the explicit
 related-check-only instruction. Review session import consumes an existing
 proof; passwords/OTP and production credentials are never collected here.
+
+## 9. Quote, PO and renewal drafting
+Use the same owner proof, panels, labels and 44px controls. Three numbered
+sections follow the user's task order: quote/PO, source-contract renewal,
+side-by-side comparison. Input money has no suggested/default values.
+Two-column field groups collapse at 680px; BOM lines are editable fieldsets,
+not a horizontally scrolling table. Saved quote and PO previews show exact
+input amounts with source/approval state. Comparison pairs keep field labels
+on both sides when stacked at 390px, and changed values use text plus a wash.

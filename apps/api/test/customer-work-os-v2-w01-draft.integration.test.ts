@@ -96,8 +96,39 @@ describe("W01 v2 authorized draft persistence", () => {
       },
     });
     expect(replay.result).toEqual(first.result);
+    expect(replay.envelope.state.quoteDrafts).toEqual([first.result]);
     expect(replay.envelope.version).toBe(first.envelope.version);
     expect(replay.envelope.idempotency.filter((item) => item.key === "w01-test-draft")).toHaveLength(1);
+  });
+
+  it("keeps a quote draft after snapshot reconstruction and a new transport key", async () => {
+    const store = new InMemoryCwosV2StateStore();
+    const runtime = new CustomerWorkOsV2RuntimeManager(store, () => "2026-10-09T00:00:00.000Z");
+    await runtime.command({
+      workspaceId, actor: owner, expectedVersion: 0, idempotencyKey: "persist-principal",
+      command: "identity.registerPrincipal",
+      payload: { id: owner.principalId, kind: "human", displayName: "Fixture Owner", active: true },
+    });
+    await runtime.command({
+      workspaceId, actor: owner, expectedVersion: 1, idempotencyKey: "persist-membership",
+      command: "identity.addMembership", payload: { id: "persist-membership", principalId: owner.principalId },
+    });
+    const first = await runtime.command({
+      workspaceId, actor: owner, expectedVersion: 2, idempotencyKey: "persist-draft",
+      command: "w01.quoteDraft", payload: w01Payload,
+    });
+    const reopened = new CustomerWorkOsV2RuntimeManager(store, () => "2026-10-09T00:00:00.000Z");
+    const replay = await reopened.command({
+      workspaceId, actor: owner, expectedVersion: first.envelope.version, idempotencyKey: "new-transport-key",
+      command: "w01.quoteDraft", payload: w01Payload,
+    });
+    expect(replay.envelope.state.quoteDrafts).toEqual([first.result]);
+    await expect(reopened.command({
+      workspaceId, actor: owner, expectedVersion: replay.envelope.version, idempotencyKey: "conflicting-cost",
+      command: "w01.quoteDraft",
+      payload: { ...w01Payload, lines: w01Payload.lines.map(line => ({ ...line, unitCostKrw: "1" })) },
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect((await reopened.read(workspaceId)).state.quoteDrafts).toEqual([first.result]);
   });
 
   it("rejects missing step-up and changed-payload idempotency replay", async () => {

@@ -66,6 +66,31 @@ const reviewRequestSchema = z.discriminatedUnion("action", [
   z.object({ expectedVersion: z.number().int().nonnegative(), candidateId: z.string().trim().min(1), action: z.literal("UNDO"), reviewId: z.string().trim().min(1) }).strict(),
 ]);
 
+const draftMoneySchema = z.string().regex(/^\d+$/).max(30);
+const quoteDraftRequestSchema = z.object({
+  action: z.literal("QUOTE"),
+  expectedVersion: z.number().int().nonnegative(),
+  input: z.object({
+    engagement: z.object({ id: z.string().trim().min(1), version: z.number().int().positive() }).strict(),
+    versionLabel: z.string().trim().min(1).max(200),
+    validUntil: z.string().date(),
+    scope: z.string().trim().min(1).max(5000),
+    lines: z.array(z.object({
+      id: z.string().trim().min(1), sourceId: z.string().trim().min(1),
+      productId: z.string().trim().min(1), description: z.string().trim().min(1).max(2000),
+      quantity: z.number().int().positive().max(1_000_000),
+      unitCostKrw: draftMoneySchema, unitPriceKrw: draftMoneySchema,
+      vendorAccountId: z.string().trim().min(1).optional(),
+    }).strict()).min(1).max(100),
+    options: z.array(z.string().trim().min(1).max(2000)).max(100),
+    templateRef: z.string().trim().min(1).max(1000),
+    vat: z.object({
+      netAmountKrw: draftMoneySchema, vatAmountKrw: draftMoneySchema, grossAmountKrw: draftMoneySchema,
+    }).strict(),
+    po: z.object({ customerPoId: z.string().trim().min(1), supplierPoId: z.string().trim().min(1) }).strict(),
+  }).strict(),
+}).strict();
+
 interface RawConnection {
   query(text: string, values?: readonly unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>;
   release(): void;
@@ -458,6 +483,55 @@ export function registerCustomerWorkOsV2Routes(
       const result = await runtime.command({ workspaceId: authenticatedActor.workspaceId, actor: authenticatedActor,
         expectedVersion: input.expectedVersion, idempotencyKey: key, command, payload });
       return reply.status(200).send({ review: result.result, runtimeVersion: result.envelope.version });
+    } catch (error) { return sendKnownError(reply, error); }
+  });
+
+  app.get("/api/cwos/v2/document-drafts", async (request, reply) => {
+    try {
+      const owner = actor(request, options.actorBinding, options.operatorStepUp);
+      if (owner.kind !== "human" || !owner.stepUpVerified || !options.operatorStepUp) {
+        throw new CustomerWorkOsV2Error("STEP_UP_REQUIRED", "fresh admitted operator proof is required");
+      }
+      const envelope = await runtime.readAuthorized(owner);
+      const pool = options.normalizedProjectionPool ?? (rawPool ? scopedPool(rawPool) : undefined);
+      if (!pool?.withWorkspaceScope) throw new CustomerWorkOsV2Error("NORMALIZED_STORAGE_REQUIRED", "workspace-scoped business data requires PostgreSQL");
+      const engagements = await pool.withWorkspaceScope(owner.workspaceId, async db =>
+        (await db.query<{ id: string; name: string; version: number }>(
+          "SELECT id,name,version FROM cwos_engagements WHERE workspace_id=$1::uuid ORDER BY name", [owner.workspaceId],
+        )).rows);
+      return reply.status(200).send({
+        workspaceId: owner.workspaceId, runtimeVersion: envelope.version, engagements,
+        quoteDrafts: envelope.state.quoteDrafts ?? [],
+      });
+    } catch (error) { return sendKnownError(reply, error); }
+  });
+
+  app.post("/api/cwos/v2/document-drafts", async (request, reply) => {
+    try {
+      const owner = actor(request, options.actorBinding, options.operatorStepUp);
+      if (owner.kind !== "human" || !owner.stepUpVerified || !options.operatorStepUp) {
+        throw new CustomerWorkOsV2Error("STEP_UP_REQUIRED", "fresh admitted operator proof is required");
+      }
+      await runtime.readAuthorized(owner);
+      const parsed = quoteDraftRequestSchema.safeParse(request.body);
+      if (!parsed.success) throw new CustomerWorkOsV2Error("INVALID_INPUT", "invalid document draft input");
+      const input = parsed.data;
+      const pool = options.normalizedProjectionPool ?? (rawPool ? scopedPool(rawPool) : undefined);
+      if (!pool?.withWorkspaceScope) throw new CustomerWorkOsV2Error("NORMALIZED_STORAGE_REQUIRED", "workspace-scoped business data requires PostgreSQL");
+      const source = await pool.withWorkspaceScope(owner.workspaceId, db =>
+        db.query<{ version: number }>(
+          "SELECT version FROM cwos_engagements WHERE workspace_id=$1::uuid AND id=$2",
+          [owner.workspaceId, input.input.engagement.id],
+        ));
+      if (!source.rows[0]) throw new CustomerWorkOsV2Error("ENGAGEMENT_NOT_FOUND", "engagement is not available in this workspace");
+      if (source.rows[0].version !== input.input.engagement.version) {
+        throw new CustomerWorkOsV2Error("CONCURRENT_MODIFICATION", "source engagement changed; refresh before drafting");
+      }
+      const result = await runtime.command({
+        workspaceId: owner.workspaceId, actor: owner, expectedVersion: input.expectedVersion,
+        idempotencyKey: header(request, "idempotency-key"), command: "w01.quoteDraft", payload: input.input,
+      });
+      return reply.status(201).send({ draft: result.result, runtimeVersion: result.envelope.version });
     } catch (error) { return sendKnownError(reply, error); }
   });
 

@@ -1,0 +1,29 @@
+.page {
+  --border: #ccd7d1;
+  --muted: #526159;
+  --focus: #f0a43a;
+  --green: #176b47;
+  display: grid;
+  gap: 24px;
+}
+.page h1 { font-size: clamp(28px, 4vw, 42px); }
+.panel { padding: 24px; background: white; border: 1px solid var(--border); border-radius: 10px; display: grid; gap: 16px; min-width: 0; }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.page label { display: grid; gap: 8px; min-width: 0; font-weight: 600; }
+.page input, .page select, .page textarea, .page button { min-height: 44px; font: inherit; border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; min-width: 0; width: 100%; }
+.page input, .page select, .page textarea { background: white; color: inherit; }
+.page textarea { min-height: 96px; resize: vertical; }
+.page button { background: white; color: var(--green); cursor: pointer; }
+.page button.primary { background: var(--green); color: white; }
+.page button:hover { filter: brightness(.95); }
+.page button:active { filter: brightness(.9); }
+.page button:disabled { opacity: .55; cursor: default; }
+.page :is(input,select,textarea,button):focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.muted { color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+.error { color: #a53b32; padding: 16px; border: 1px solid var(--border); border-radius: 6px; }
+.page fieldset { border: 1px solid var(--border); border-radius: 6px; padding: 16px; min-width: 0; }
+.page p { overflow-wrap: anywhere; }
+@media (max-width: 680px) {
+  .grid { grid-template-columns: 1fr; }
+  .panel { padding: 16px; }
+}

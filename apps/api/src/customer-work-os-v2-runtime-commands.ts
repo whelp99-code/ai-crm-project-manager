@@ -11,7 +11,6 @@ import {
   type WorkspaceMembership,
 } from "@ai-crm/domain/customer-work-os-v2";
 import {
-  buildW01QuoteDraft,
   readMountedTemplateMeasurement,
   type SourceLinkedBomLine,
   type W01QuoteDraftInput,
@@ -60,7 +59,7 @@ function w01QuoteDraftInput(payload: Record<string, unknown>, workspaceId: strin
   const engagement = record(payload.engagement);
   const vat = record(payload.vat);
   const po = record(payload.po);
-  const observation = record(payload.templateObservation);
+  const observation = payload.templateObservation === undefined ? undefined : record(payload.templateObservation);
   if (!Array.isArray(payload.lines)) {
     throw new CustomerWorkOsV2Error("INVALID_INPUT", "lines must be an array");
   }
@@ -90,14 +89,14 @@ function w01QuoteDraftInput(payload: Record<string, unknown>, workspaceId: strin
     lines,
     options: strings(payload, "options"),
     templateRef: str(payload, "templateRef"),
-    templateObservation: readMountedTemplateMeasurement({
+    ...(observation === undefined ? {} : { templateObservation: readMountedTemplateMeasurement({
       filename: str(observation, "filename"),
       bytes: num(observation, "bytes"),
       sha256: str(observation, "sha256"),
       sheetNames: strings(observation, "sheetNames"),
       mountedItemId: str(observation, "mountedItemId"),
       historicalCandidateId: str(observation, "historicalCandidateId"),
-    }),
+    }) }),
     vat: {
       netAmountKrw: str(vat, "netAmountKrw"),
       vatAmountKrw: str(vat, "vatAmountKrw"),
@@ -522,7 +521,7 @@ export function executeV2Command(
       return platform.createReleaseManifest(input as never, actor);
     case "w01.quoteDraft":
       assertStepUpHuman(actor);
-      return buildW01QuoteDraft(w01QuoteDraftInput(input, actor.workspaceId));
+      return platform.recordQuoteDraft(w01QuoteDraftInput(input, actor.workspaceId), actor);
     default:
       throw new CustomerWorkOsV2Error("UNKNOWN_COMMAND", `unknown v2 command: ${command}`);
   }
