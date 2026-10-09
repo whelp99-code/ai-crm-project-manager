@@ -310,10 +310,17 @@ export function registerCustomerWorkOsV2Routes(
       try {
         // Validate server-bound claims without granting step-up or reading/mutating native state.
         actor(request, options.actorBinding);
-        const proof = operatorStepUp.authenticate(request.body, request.ip);
+        const proof = operatorStepUp.authenticate(request.body, operatorStepUp.clientAddress(request.headers));
         reply.header("set-cookie", proof.cookie);
         return reply.status(200).send({ csrf: proof.csrf, expiresAt: proof.expiresAt });
       } catch (error) {
+        if (error instanceof OperatorStepUpError) {
+          request.log.warn({ reason: error.code }, "Operator authentication rejected");
+          if (error.retryAfterMs !== undefined) {
+            reply.header("retry-after", String(Math.ceil(error.retryAfterMs / 1000)));
+          }
+          return reply.status(401).send({ error: "OPERATOR_UNAUTHENTICATED" });
+        }
         return sendKnownError(reply, error);
       }
     });

@@ -42,6 +42,7 @@ export interface OperatingConfig {
   readonly principalId: string;
   readonly authStatePath?: string;
   readonly sessionSecret?: string;
+  readonly proxySecret?: string;
   readonly mailAccountMasterRead?: true;
 }
 
@@ -149,6 +150,10 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
     if (sessionSecret.length < 32) {
       throw new Error("[OPS_BOOT_SESSION_SECRET_TOO_SHORT] operator session secret must contain at least 32 characters");
     }
+    const proxySecret = env.CWOS_V2_OPERATOR_PROXY_SECRET?.trim();
+    if (proxySecret && proxySecret.length < 32) {
+      throw new Error("[OPS_BOOT_PROXY_SECRET_TOO_SHORT] authenticated proxy key must contain at least 32 characters");
+    }
     return {
       mode,
       databaseUrl,
@@ -159,6 +164,7 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
       apiKey,
       principalId,
       authStatePath,
+      ...(proxySecret ? { proxySecret } : {}),
       sessionSecret,
     };
   }
@@ -237,6 +243,7 @@ export function createOperatingApp(
         workspaceId: config.workspaceId,
         principalId: config.principalId,
         sessionSecret: config.sessionSecret ?? "",
+        ...(config.proxySecret ? { proxySecret: config.proxySecret } : {}),
         store: seams.store ?? new FileOperatorAuthStore(config.authStatePath ?? ""),
         ...(seams.now ? { now: seams.now } : {}),
         }),

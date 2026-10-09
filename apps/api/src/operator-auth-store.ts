@@ -9,17 +9,16 @@ const rateSchema = z.object({
   perIp: z.record(z.array(z.number().finite().nonnegative())),
 });
 
-/** Pre-enrolled Core5 owner record; missing/malformed state never bootstraps auth. */
+/** CRM-owned bcrypt record; legacy KDF files require explicit offline enrollment. */
 export const operatorAuthRecordSchema = z.object({
   generation: z.number().int().positive(),
   enrolled: z.literal(true),
   totpPending: z.literal(false),
-  passwordSalt: z.string().regex(/^[A-Za-z0-9_-]+$/).refine(value => Buffer.from(value, "base64url").length === 16),
-  passwordHash: z.string().regex(/^[A-Za-z0-9_-]+$/).refine(value => Buffer.from(value, "base64url").length === 32),
+  passwordHash: z.string().regex(/^\$2b\$12\$[./A-Za-z0-9]{53}$/),
   totpSecret: z.string().regex(/^[A-Z2-7]{32}$/),
   lastTotpStep: z.number().int().nonnegative().optional(),
   rate: rateSchema.optional(),
-});
+}).strict();
 
 export type OperatorAuthRecord = z.infer<typeof operatorAuthRecordSchema>;
 export interface OperatorAuthStore {

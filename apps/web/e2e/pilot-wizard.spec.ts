@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { loginOwner } from "./auth-fixture.js";
 
 /**
  * Contract-grade smoke: /pilot must render the S0-loop onboarding wizard
@@ -10,6 +11,7 @@ import { test, expect } from "@playwright/test";
  */
 test.describe("pilot wizard fail-closed", () => {
   test("renders onboarding step with fail-closed copy and does not fabricate a job", async ({ page }) => {
+    await loginOwner(page);
     const response = await page.goto("/pilot", { waitUntil: "domcontentloaded" });
     expect(response, "navigation should produce a response").toBeTruthy();
     expect(response!.ok() || response!.status() === 304).toBeTruthy();
@@ -25,10 +27,16 @@ test.describe("pilot wizard fail-closed", () => {
   });
 
   test("renders steps 1-4 indicator and supports next/back navigation without a live API", async ({ page }) => {
+    await loginOwner(page);
     await page.goto("/pilot", { waitUntil: "domcontentloaded" });
     // Next.js dev bundles hydrate asynchronously; wait for the client wizard's
     // onClick handlers to attach before driving purely client-side navigation.
-    await page.waitForLoadState("networkidle");
+    await page.waitForFunction(() => Array.from(document.querySelectorAll("button")).some(button =>
+      button.textContent === "다음" && Object.keys(button).some(key => {
+        const props: unknown = Reflect.get(button, key);
+        return key.startsWith("__reactProps$") && props !== null && typeof props === "object"
+          && "onClick" in props && typeof props.onClick === "function";
+      })), undefined, { timeout: 10_000 });
 
     await expect(page.getByText("1단계 · 온보딩")).toBeVisible();
     await expect(page.getByText("2단계 · 작업 제출")).toBeVisible();

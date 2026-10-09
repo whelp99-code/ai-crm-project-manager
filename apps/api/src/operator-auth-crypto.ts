@@ -1,8 +1,14 @@
-import { createHmac, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import { hashSync, compareSync } from "bcryptjs";
 
-/** Same password parameters and TOTP window as the existing Core5 owner auth. */
-export function operatorPasswordHash(password: string, salt: string): Buffer {
-  return scryptSync(password, Buffer.from(salt, "base64url"), 32, { N: 16384, r: 8, p: 1 });
+/** bcrypt's 72-byte boundary must never silently truncate distinct passwords. */
+export function operatorPasswordHash(password: string): string {
+  if (Buffer.byteLength(password, "utf8") > 72) throw new RangeError("PASSWORD_TOO_LONG");
+  return hashSync(password, 12);
+}
+
+export function verifyOperatorPassword(password: string, hash: string): boolean {
+  return Buffer.byteLength(password, "utf8") <= 72 && compareSync(password, hash);
 }
 
 export function equalAuthValue(left: string | Buffer, right: string | Buffer): boolean {
