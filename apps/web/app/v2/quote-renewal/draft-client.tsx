@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import styles from "./draft.module.css";
+import { RenewalEditor, isContractSource, isSavedRenewal, type ContractSource, type SavedRenewal } from "./renewal-editor";
 
 interface DraftQuote {
   readonly identity: string;
@@ -19,6 +20,8 @@ interface DraftList {
   readonly runtimeVersion: number;
   readonly engagements: readonly { readonly id: string; readonly name: string; readonly version: number }[];
   readonly quoteDrafts: readonly DraftQuote[];
+  readonly contracts: ContractSource[];
+  readonly renewalDrafts: SavedRenewal[];
 }
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -39,7 +42,9 @@ function draftList(value: unknown): value is DraftList {
         && typeof line.id === "string" && typeof line.description === "string"
         && typeof line.quantity === "number" && krw(line.unitCostKrw) && krw(line.unitPriceKrw))
       && object(item.vat) && krw(item.vat.netAmountKrw) && krw(item.vat.vatAmountKrw) && krw(item.vat.grossAmountKrw)
-      && object(item.po) && typeof item.po.customerPoId === "string" && typeof item.po.supplierPoId === "string");
+      && object(item.po) && typeof item.po.customerPoId === "string" && typeof item.po.supplierPoId === "string")
+    && Array.isArray(value.contracts) && value.contracts.every(isContractSource)
+    && Array.isArray(value.renewalDrafts) && value.renewalDrafts.every(isSavedRenewal);
 }
 const money = (value: string) => `${BigInt(value).toLocaleString("ko-KR")} 원`;
 
@@ -159,6 +164,7 @@ export function DocumentDraftClient() {
           <label>판매 단가 (원)<input name={`price-${id}`} inputMode="numeric" pattern="[0-9]+" required /></label>
         </div></fieldset>)}
         <button type="button" disabled={pending || lineIds.length >= 100} onClick={() => setLineIds(ids => [...ids, (ids.at(-1) ?? 0) + 1])}>품목 추가</button>
+        <button type="button" disabled={pending || lineIds.length === 1} onClick={() => setLineIds(ids => ids.slice(0, -1))}>마지막 품목 삭제</button>
         <label>옵션 (한 줄에 하나)<textarea name="options" /></label>
         <label>부가세 (원, 입력값)<input name="vat" inputMode="numeric" pattern="[0-9]+" required /></label>
         <p className={styles.muted}>양식 승인 여부는 확인하지 않은 초안입니다. 금액은 입력한 단가·수량·부가세로만 계산합니다.</p>
@@ -176,6 +182,8 @@ export function DocumentDraftClient() {
           </div>
         </article>)}
       </section>
+      <RenewalEditor contracts={data.contracts} drafts={data.renewalDrafts}
+        runtimeVersion={data.runtimeVersion} csrf={csrf} onSaved={load} />
     </>}
   </div>;
 }

@@ -15,6 +15,7 @@ import {
   type SourceLinkedBomLine,
   type W01QuoteDraftInput,
 } from "@ai-crm/domain";
+import { contractDraftCommandSchema } from "./customer-work-os-v2-document-schemas.js";
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -416,6 +417,11 @@ export function executeV2Command(
         sent: comparison.sent,
         sourceVerified: comparison.sourceVerified,
       };
+    }
+    case "w05.contractDraft": {
+      const parsed = contractDraftCommandSchema.safeParse(input);
+      if (!parsed.success) throw new CustomerWorkOsV2Error("INVALID_INPUT", "invalid structured renewal draft");
+      return platform.renewals.recordContractDraft(parsed.data, actor, now);
     }
     case "w05.renewalRevision": {
       assertStepUpHuman(actor);

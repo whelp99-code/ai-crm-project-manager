@@ -18,6 +18,21 @@ const quoteInput = {
   vat: { netAmountKrw: "100000000", vatAmountKrw: "10000000", grossAmountKrw: "110000000" },
   po: { customerPoId: "fixture-customer-po", supplierPoId: "fixture-supplier-po" },
 };
+const originalTerms = {
+  startDate: "2026-01-01", endDate: "2026-12-31", valueKrw: "100000000",
+  items: [{ id: "maintenance", description: "Fixture annual maintenance", quantity: 1, unitPriceKrw: "100000000" }],
+  conditions: ["Fixture original maintenance", JSON.stringify([{ id: "fixture-milestone", amountKrw: "100000000" }])],
+};
+const renewalTerms = {
+  ...originalTerms, startDate: "2027-01-01", endDate: "2027-12-31", valueKrw: "110000000",
+};
+const contractRow = {
+  id: "contract-fixture", version: 1, valueKrw: originalTerms.valueKrw,
+  startDate: originalTerms.startDate, endDate: originalTerms.endDate,
+  scope: originalTerms.conditions[0], exclusions: [],
+  billingMilestones: [{ id: "fixture-milestone", amountKrw: "100000000" }],
+  items: originalTerms.items.map(item => ({ ...item, productId: "fixture-product", unitCostKrw: "60000000" })),
+};
 
 async function fixture() {
   const salt = Buffer.alloc(16, 7).toString("base64url");
@@ -44,6 +59,10 @@ async function fixture() {
       if (scope !== workspaceId) throw new Error("unexpected fixture scope");
       return fn({
         async query<T>(text: string, values?: readonly unknown[]) {
+          if (text.includes("FROM cwos_contracts")) {
+            const rows = text.includes("AND c.id=$2") && values?.[1] !== contractRow.id ? [] : [structuredClone(contractRow)];
+            return { rows: rows as T[], rowCount: rows.length };
+          }
           const rows = text.includes("AND id=$2") && values?.[1] !== "engagement-fixture"
             ? [] : [{ id: "engagement-fixture", name: "Fixture Project", version: 1 }];
           return { rows: rows as T[], rowCount: rows.length };
@@ -85,6 +104,86 @@ describe("owner document drafts", () => {
       }]);
       expect(listed.json().runtimeVersion).toBe(3);
       expect((await f.runtime.read(workspaceId)).state.quoteDrafts).toHaveLength(1);
+    } finally { await f.app.close(); }
+  });
+
+  it("derives a quoted internal renewal from the scoped immutable contract, not caller claims", async () => {
+    const f = await fixture();
+    try {
+      const sourceBefore = structuredClone(contractRow);
+      const response = await f.app.inject({ method: "POST", url: "/api/cwos/v2/document-drafts",
+        headers: { ...f.headers, "idempotency-key": "renewal" },
+        payload: { action: "RENEWAL", expectedVersion: 2, renewalId: "renewal-fixture",
+          revisionId: "renewal-revision", revisionLabel: "Fixture annual renewal",
+          source: { kind: "NORMALIZED", id: contractRow.id, version: 1 }, terms: renewalTerms } });
+      expect(response.statusCode).toBe(201);
+      const listed = await f.app.inject({ method: "GET", url: "/api/cwos/v2/document-drafts", headers: f.headers });
+      const body = listed.json();
+      expect(body.contracts[0].terms).toEqual(originalTerms);
+      expect(body.renewalDrafts[0].revisions[0].contractDraft).toEqual({
+        source: { kind: "NORMALIZED", id: contractRow.id, version: 1,
+          reference: "cwos_contracts:contract-fixture@1", terms: originalTerms },
+        terms: renewalTerms,
+      });
+      expect(body.renewalDrafts[0].receipts[0]).toMatchObject({ approvalStatus: "NOT_APPROVED", status: "INTERNAL_CANDIDATE" });
+      expect(contractRow).toEqual(sourceBefore);
+      expect(body.runtimeVersion).toBe(3);
+    } finally { await f.app.close(); }
+  });
+
+  it("retains unverified owner-entered originals and their precise cited content after reload", async () => {
+    const f = await fixture();
+    try {
+      const response = await f.app.inject({ method: "POST", url: "/api/cwos/v2/document-drafts",
+        headers: { ...f.headers, "idempotency-key": "input-renewal" },
+        payload: { action: "RENEWAL", expectedVersion: 2, renewalId: "input-renewal",
+          revisionId: "input-revision", revisionLabel: "Owner input fixture",
+          source: { kind: "OWNER_INPUT", id: "input-original", reference: "Fixture document only", terms: originalTerms },
+          terms: renewalTerms } });
+      expect(response.statusCode).toBe(201);
+      const native = await f.runtime.read(workspaceId);
+      const revision = native.state.renewals?.drafts[0]?.revisions[0];
+      expect(revision?.contractDraft?.source).toMatchObject({ kind: "OWNER_INPUT", version: null, terms: originalTerms });
+      expect(revision?.unknownTerms).toContain("SOURCE_VERIFICATION_REQUIRED");
+      expect(revision?.citations[0]?.text).toBe(revision?.content);
+      const listed = await f.app.inject({ method: "GET", url: "/api/cwos/v2/document-drafts", headers: f.headers });
+      expect(listed.json().contracts).toMatchObject([
+        { kind: "NORMALIZED" }, { kind: "OWNER_INPUT", id: "input-original" },
+      ]);
+    } finally { await f.app.close(); }
+  });
+
+  it("denies stale, foreign, source-spoofed and raw renewal commands with no mutation", async () => {
+    const f = await fixture();
+    try {
+      for (const [id, source, status] of [
+        ["foreign", { kind: "NORMALIZED", id: "foreign-contract", version: 1 }, 404],
+        ["stale", { kind: "NORMALIZED", id: contractRow.id, version: 2 }, 409],
+        ["spoof", { kind: "NORMALIZED", id: contractRow.id, version: 1, terms: renewalTerms }, 400],
+      ] as const) {
+        const response = await f.app.inject({ method: "POST", url: "/api/cwos/v2/document-drafts",
+          headers: { ...f.headers, "idempotency-key": id },
+          payload: { action: "RENEWAL", expectedVersion: 2, renewalId: id, revisionId: id, revisionLabel: id, source, terms: renewalTerms } });
+        expect(response.statusCode).toBe(status);
+      }
+      const raw = await f.app.inject({ method: "POST", url: "/api/cwos/v2/commands",
+        headers: { ...f.headers, "idempotency-key": "raw" },
+        payload: { command: "w05.contractDraft", expectedVersion: 2, payload: {} } });
+      expect(raw.statusCode).toBe(400);
+      expect(raw.json().error).toBe("TRUSTED_REVIEW_ROUTE_REQUIRED");
+      for (const [id, terms] of [
+        ["negative", { ...renewalTerms, valueKrw: "-1" }],
+        ["interval", { ...renewalTerms, endDate: "2026-12-31" }],
+        ["duplicate-items", { ...renewalTerms, items: [originalTerms.items[0], originalTerms.items[0]] }],
+      ] as const) {
+        const invalid = await f.app.inject({ method: "POST", url: "/api/cwos/v2/document-drafts",
+          headers: { ...f.headers, "idempotency-key": id },
+          payload: { action: "RENEWAL", expectedVersion: 2, renewalId: id, revisionId: id,
+            revisionLabel: id, source: { kind: "NORMALIZED", id: contractRow.id, version: 1 }, terms } });
+        expect(invalid.statusCode).toBe(400);
+      }
+      expect((await f.runtime.read(workspaceId)).state.renewals?.drafts).toEqual([]);
+      expect((await f.runtime.read(workspaceId)).version).toBe(2);
     } finally { await f.app.close(); }
   });
 

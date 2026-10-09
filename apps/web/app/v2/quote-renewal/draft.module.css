@@ -7,6 +7,7 @@
   gap: 24px;
 }
 .page h1 { font-size: clamp(28px, 4vw, 42px); }
+.page :is(h1,h2,h3,h4) { overflow-wrap: anywhere; }
 .panel { padding: 24px; background: white; border: 1px solid var(--border); border-radius: 10px; display: grid; gap: 16px; min-width: 0; }
 .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .page label { display: grid; gap: 8px; min-width: 0; font-weight: 600; }
@@ -22,6 +23,8 @@
 .muted { color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
 .error { color: #a53b32; padding: 16px; border: 1px solid var(--border); border-radius: 6px; }
 .page fieldset { border: 1px solid var(--border); border-radius: 6px; padding: 16px; min-width: 0; }
+.page label.checkbox { display: flex; align-items: center; min-height: 44px; gap: 12px; }
+.page input[type="checkbox"] { width: 20px; height: 20px; min-height: 0; padding: 0; flex: none; margin: 0; }
 .page p { overflow-wrap: anywhere; }
 @media (max-width: 680px) {
   .grid { grid-template-columns: 1fr; }
