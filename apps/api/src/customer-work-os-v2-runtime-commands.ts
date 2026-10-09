@@ -336,8 +336,32 @@ export function executeV2Command(
         mailbox: str(input, "mailbox"), sourceLocator: str(input, "sourceLocator"),
         providerEventId: str(input, "providerEventId"), subject: str(input, "subject"),
         bodyDigest: str(input, "bodyDigest"),
+        ...(typeof input.senderCompany === "string" ? { senderCompany: input.senderCompany } : {}),
+        ...(typeof input.summary === "string" ? { summary: input.summary } : {}),
+        ...(typeof input.receivedAt === "string" ? { receivedAt: input.receivedAt } : {}),
+        ...(typeof input.evidenceUrl === "string" ? { evidenceUrl: input.evidenceUrl } : {}),
       }, actor, now);
     }
+    case "mail.candidate.review": {
+      assertStepUpHuman(actor);
+      const outcome = str(input, "outcome");
+      if (outcome === "UNDONE") throw new CustomerWorkOsV2Error("INVALID_INPUT", "UNDONE is only created through undo");
+      if (outcome !== "LINKED" && outcome !== "NEW_ACCOUNT_CANDIDATE" && outcome !== "DISCARDED") {
+        throw new CustomerWorkOsV2Error("INVALID_INPUT", "review outcome is invalid");
+      }
+      return platform.inbox.reviewMailCandidate({
+        id: str(input, "id"), workspaceId: actor.workspaceId, candidateId: str(input, "candidateId"), outcome,
+        ...(typeof input.accountId === "string" ? { accountId: input.accountId } : {}),
+        ...(typeof input.companyName === "string" ? { companyName: input.companyName } : {}),
+        ...(typeof input.reason === "string" ? { reason: input.reason } : {}),
+      }, actor, now);
+    }
+    case "mail.candidate.review.undo":
+      assertStepUpHuman(actor);
+      return platform.inbox.undoMailCandidateReview({
+        id: str(input, "id"), workspaceId: actor.workspaceId,
+        candidateId: str(input, "candidateId"), reviewId: str(input, "reviewId"),
+      }, actor, now);
     case "mail.inbox.receive":
       return platform.inbox.receiveMail({
         id: str(input, "id"), workspaceId: actor.workspaceId, provider: str(input, "provider"), mailbox: str(input, "mailbox"), sourceLocator: str(input, "sourceLocator"), providerEventId: str(input, "providerEventId"), receivedAt: str(input, "receivedAt"),

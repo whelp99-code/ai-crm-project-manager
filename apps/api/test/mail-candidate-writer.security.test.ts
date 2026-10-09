@@ -55,6 +55,19 @@ describe("MR candidate-only writer", () => {
     } finally { await f.app.close(); }
   });
 
+  it("stores optional source metadata without changing writer authority", async () => {
+    const f = await fixture();
+    try {
+      const response = await f.app.inject({ method: "POST", url: "/api/cwos/v2/mail-candidates", headers,
+        payload: { ...payload, senderCompany: "Acme", summary: "Proposal attached",
+          receivedAt: "2026-10-08T00:00:00.000Z", evidenceUrl: "https://example.test/source" } });
+      expect(response.statusCode).toBe(201);
+      expect(response.json().candidate).toMatchObject({ senderCompany: "Acme", summary: "Proposal attached",
+        receivedAt: "2026-10-08T00:00:00.000Z", evidenceUrl: "https://example.test/source",
+        status: "CANDIDATE", confirmed: false });
+    } finally { await f.app.close(); }
+  });
+
   it.each([
     ["PUT", "/api/cwos/v2/mail-candidates"],
     ["PATCH", "/api/cwos/v2/mail-candidates/candidate-id"],
