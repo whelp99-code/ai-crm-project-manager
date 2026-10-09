@@ -258,7 +258,7 @@ export function registerCustomerWorkOsV2Routes(
   if (profile === "production" && options.actorBinding?.kind === "human" && !options.operatorStepUp) {
     throw new Error("[CWOS_V2_OPERATOR_AUTH_REQUIRED] production human actor requires fresh authenticated proof");
   }
-  let storageMode: "memory" | "postgres" = databaseUrl && !explicitStore ? "postgres" : "memory";
+  const storageMode: "memory" | "postgres" = databaseUrl && !explicitStore ? "postgres" : "memory";
   let dbProbe: "not_configured" | "ok" | "failed" = storageMode === "postgres" ? "failed" : "not_configured";
   let schemaVersion: string | null = null;
   let recentProcessingState: "unknown" | "idle" | "database_unavailable" = storageMode === "postgres" ? "unknown" : "idle";
@@ -299,6 +299,15 @@ export function registerCustomerWorkOsV2Routes(
         const proof = operatorStepUp.authenticate(request.body, request.ip);
         reply.header("set-cookie", proof.cookie);
         return reply.status(200).send({ csrf: proof.csrf, expiresAt: proof.expiresAt });
+      } catch (error) {
+        return sendKnownError(reply, error);
+      }
+    });
+    app.get("/api/cwos/v2/operator-session", async (request, reply) => {
+      reply.header("cache-control", "no-store");
+      try {
+        actor(request, options.actorBinding, operatorStepUp);
+        return reply.status(200).send({ authenticated: true });
       } catch (error) {
         return sendKnownError(reply, error);
       }
