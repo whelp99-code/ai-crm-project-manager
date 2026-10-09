@@ -1,26 +1,42 @@
 import { expect, test } from "@playwright/test";
+import { loginOwner, ownerCookie } from "./auth-fixture";
 
 test.describe("owner document draft proxy", () => {
+  test("native login unlocks quote save without importing a session file", async ({ page }, testInfo) => {
+    await loginOwner(page);
+    await page.route("**/api/cwos/v2/document-drafts", route => route.fulfill({ json: {
+      runtimeVersion: 0, engagements: [{ id: "fixture", name: "Fixture project", version: 1 }],
+      quoteDrafts: [], renewalDrafts: [], contracts: [],
+    } }));
+    await page.goto("/v2/quote-renewal");
+    await expect(page.getByRole("heading", { name: "견적·발주와 재계약", exact: true })).toBeVisible();
+    const details = await page.request.get("/api/self-entry");
+    expect(details.status()).toBe(200);
+    await page.screenshot({ path: testInfo.outputPath("native-session-quote.png") });
+    await expect(page.getByRole("button", { name: "견적·발주 초안 만들기", exact: true })).toBeEnabled();
+  });
+
   test("refuses document data without an owner cookie", async ({ request }) => {
     const response = await request.get("/api/cwos/v2/document-drafts");
     expect(response.status()).toBe(401);
-    expect(await response.json()).toEqual({ error: "OWNER_SESSION_REQUIRED" });
+    expect(await response.json()).toEqual({ error: "STEP_UP_REQUIRED" });
   });
 
-  test("refuses cross-origin draft writes before forwarding credentials", async ({ request }) => {
+  test("refuses cross-origin draft writes before forwarding credentials", async ({ page, request }) => {
+    await loginOwner(page);
     const response = await request.post("/api/cwos/v2/document-drafts", {
-      headers: { origin: "https://other.example.test" }, data: { action: "QUOTE", expectedVersion: 0 },
+      headers: { origin: "https://other.example.test", cookie: await ownerCookie(page) },
+      data: { action: "QUOTE", expectedVersion: 0 },
     });
     expect(response.status()).toBe(403);
     expect(await response.json()).toEqual({ error: "OWNER_REVIEW_ORIGIN_REQUIRED" });
   });
 
-  test("shows owner proof guidance rather than editable drafts without proof", async ({ page }) => {
+  test("redirects anonymous draft pages to the native login", async ({ page }) => {
     await page.goto("/v2/quote-renewal");
-    await expect(page.getByRole("heading", { name: "견적·발주와 재계약", exact: true })).toBeVisible();
-    await expect(page.locator("p[role=alert]")).toContainText("owner 인증");
+    await expect(page).toHaveURL(/\/login/);
+    await expect(page.getByLabel("비밀번호", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "견적·발주 초안 만들기", exact: true })).toHaveCount(0);
-    await expect(page.getByLabel("운영 인증의 cookie·csrf JSON")).toBeVisible();
   });
 
   test("can undo an added quote or source item without submitting the draft", async ({ page }) => {
@@ -40,17 +56,12 @@ test.describe("owner document draft proxy", () => {
             conditions: ["fixture"] } }],
       } });
     });
-    await page.route("**/api/cwos/v2/review-session", route =>
-      route.fulfill({ json: { csrf: "fixture-csrf-with-at-least-24-characters" } }));
     const submits: string[] = [];
     page.on("request", request => {
       if (request.method() === "POST" && request.url().endsWith("/document-drafts")) submits.push(request.url());
     });
+    await loginOwner(page);
     await page.goto("/v2/quote-renewal");
-    await page.locator('input[type="file"]').setInputFiles({
-      name: "fixture-session.json", mimeType: "application/json",
-      buffer: Buffer.from(JSON.stringify({ cookie: "fixture", csrf: "fixture" })),
-    });
     const quote = page.locator('form:has(select[name="engagement"])');
     await quote.locator('select[name="engagement"]').selectOption("fixture");
     for (const [name, value] of Object.entries({
@@ -107,6 +118,7 @@ test.describe("owner document draft proxy", () => {
           revisions: [{ revisionId: "revision", revisionLabel: "fixture", contractDraft: { source, terms } }],
           receipts: [{ revisionId: "revision", approvalStatus: "NOT_APPROVED", status: "INTERNAL_CANDIDATE" }] }] } });
     });
+    await loginOwner(page);
     await page.goto("/v2/quote-renewal");
     const compare = page.getByRole("button", { name: "나란히 비교", exact: true });
     try {

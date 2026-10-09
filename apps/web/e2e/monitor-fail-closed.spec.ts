@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { loginOwner } from "./auth-fixture.js";
 
 /**
  * Contract-grade smoke: /monitor must render fail-closed copy when
@@ -7,6 +8,7 @@ import { test, expect } from "@playwright/test";
  */
 test.describe("monitor page fail-closed", () => {
   test("renders unavailable copy without API_BASE_URL", async ({ page }) => {
+    await loginOwner(page);
     const response = await page.goto("/monitor", { waitUntil: "domcontentloaded" });
     expect(response, "navigation should produce a response").toBeTruthy();
     expect(response!.ok() || response!.status() === 304).toBeTruthy();

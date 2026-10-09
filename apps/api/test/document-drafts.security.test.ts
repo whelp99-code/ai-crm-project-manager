@@ -1,13 +1,15 @@
-import { createHmac, scryptSync } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { CustomerWorkOsV2RuntimeManager, InMemoryCwosV2StateStore, type V2PgQueryable } from "../src/customer-work-os-v2-runtime.js";
 import { OperatorStepUpService } from "../src/operator-step-up.js";
 import type { OperatorAuthRecord } from "../src/operator-auth-store.js";
+import { operatorPasswordHash } from "../src/operator-auth-crypto.js";
 
 const workspaceId = "b1111111-1111-4111-8111-111111111111";
 const principalId = "document-fixture-owner";
 const password = "isolated-document-fixture-password";
+const passwordHash = operatorPasswordHash(password);
 const key = "isolated-document-fixture-api-key-at-least-32-chars";
 const quoteInput = {
   engagement: { id: "engagement-fixture", version: 1 }, versionLabel: "fixture-v1",
@@ -35,10 +37,8 @@ const contractRow = {
 };
 
 async function fixture() {
-  const salt = Buffer.alloc(16, 7).toString("base64url");
   let authRecord: OperatorAuthRecord = {
-    generation: 1, enrolled: true, totpPending: false, passwordSalt: salt,
-    passwordHash: scryptSync(password, Buffer.from(salt, "base64url"), 32).toString("base64url"),
+    generation: 1, enrolled: true, totpPending: false, passwordHash,
     totpSecret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
   };
   const auth = new OperatorStepUpService({

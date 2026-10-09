@@ -1,10 +1,12 @@
 import { expect, test } from "@playwright/test";
 import { isLocalReviewAllowed } from "../app/lib/local-review-guard";
+import { loginOwner, ownerCookie } from "./auth-fixture.js";
 
 test.describe("local company review proxy guard", () => {
-  test("rejects a foreign request authority at the proxy", async ({ request }) => {
+  test("rejects a foreign request authority at the proxy", async ({ page, request }) => {
+    await loginOwner(page);
     const response = await request.get("/api/local-review/company-overview", {
-      headers: { host: "review.example.test" },
+      headers: { host: "review.example.test", cookie: await ownerCookie(page) },
     });
     expect(response.status()).toBe(404);
     expect(await response.json()).toEqual({ error: "LOCAL_REVIEW_UNAVAILABLE" });

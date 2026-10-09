@@ -75,7 +75,7 @@ export function DocumentDraftClient() {
     const response = await fetch("/api/cwos/v2/document-drafts", { cache: "no-store" });
     if (!response.ok) {
       throw new Error(response.status === 401 || response.status === 403
-        ? "현재 owner 인증에서 받은 세션 JSON을 연결해 주세요. 만료되면 다시 인증해야 합니다."
+        ? "현재 로그인 세션을 확인하지 못했습니다. 다시 로그인해 주세요."
         : `초안을 불러오지 못했습니다 (${response.status}). 목록을 다시 불러오세요.`);
     }
     const parsed: unknown = await response.json();
@@ -83,7 +83,15 @@ export function DocumentDraftClient() {
     setData(parsed);
   }
   useEffect(() => {
-    void load().catch((caught: unknown) => setError(caught instanceof Error ? caught.message : "초안을 불러오지 못했습니다."));
+    const connectSession = async () => {
+      const response = await fetch("/api/self-entry", { cache: "no-store", signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) throw new Error("현재 로그인 세션을 확인하지 못했습니다. 다시 로그인해 주세요.");
+      const session: unknown = await response.json();
+      if (!object(session) || typeof session.csrf !== "string") throw new Error("로그인 세션 응답이 올바르지 않습니다.");
+      setCsrf(session.csrf);
+      await load();
+    };
+    void connectSession().catch((caught: unknown) => setError(caught instanceof Error ? caught.message : "초안을 불러오지 못했습니다."));
   }, []);
 
   async function connect(event: ChangeEvent<HTMLInputElement>) {
@@ -151,9 +159,9 @@ export function DocumentDraftClient() {
     <header><p className={styles.muted}>W01 · W05 · 계약 초안</p><h1>견적·발주와 재계약</h1>
       <p>입력과 기존 자료로 초안을 만듭니다. 발송·서명·결제는 하지 않습니다.</p></header>
     <section className={styles.panel} aria-labelledby="session-title">
-      <h2 id="session-title">현재 owner 세션</h2>
-      <label>운영 인증의 cookie·csrf JSON<input type="file" accept="application/json,.json" onChange={connect} disabled={pending} /></label>
-      <p className={styles.muted}>기존 인증을 연결합니다. 새 로그인이나 키를 만들지 않습니다.</p>
+      <h2 id="session-title">현재 로그인 세션</h2>
+      {!csrf && <label>운영 인증의 cookie·csrf JSON<input type="file" accept="application/json,.json" onChange={connect} disabled={pending} /></label>}
+      <p className={styles.muted}>CRM 비밀번호·OTP로 확인한 세션을 사용합니다.</p>
     </section>
     {error && <p role="alert" className={styles.error}>{error}</p>}
     {!data && !error && <p role="status">초안을 불러오는 중입니다.</p>}
