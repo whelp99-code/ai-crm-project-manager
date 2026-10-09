@@ -1,4 +1,4 @@
-import { CustomerWorkOsV2Error, assertHuman, assertWorkspace, copy, mapValues, required, sorted, type V2Actor } from "./shared.js";
+import { CustomerWorkOsV2Error, assertHuman, assertStepUp, assertWorkspace, copy, mapValues, required, sorted, type V2Actor } from "./shared.js";
 export type SourceKind = "GMAIL" | "OUTLOOK" | "CALENDAR" | "DRIVE" | "ONEDRIVE" | "NOTION" | "MESSAGE";
 export interface SourceEvent { id: string; workspaceId: string; source: SourceKind; providerEventId: string; occurredAt: string; subject: string; bodyDigest: string; sender: string; promptInjectionSuspected: boolean; status: "NEW" | "TRIAGED" | "QUARANTINED"; version: number; }
 export interface InboxAttachment { id: string; workspaceId: string; sourceEventId: string; contentHash: string; mediaType: string; malwareStatus: "CLEAN" | "INFECTED" | "UNKNOWN"; evidenceRef: string; version: number; }
@@ -7,10 +7,12 @@ export interface InboxDraft { id: string; workspaceId: string; sourceEventId: st
 export interface MailWorkLink { id: string; workspaceId: string; provider: string; mailbox: string; sourceLocator: string; sourceEventId: string; workItemId: string; linkedByPrincipalId: string; correctionReason: string | null; linkStatus: "ACTIVE" | "CORRECTED"; version: number; }
 export interface MailInboxReceipt { id: string; workspaceId: string; provider: string; mailbox: string; sourceLocator: string; providerEventId: string; receivedAt: string; version: number; }
 export interface MailOutboxEvent { id: string; workspaceId: string; kind: "WORK_LINKED" | "INBOX_RECEIVED" | "WORK_LINK_CORRECTED"; workItemId: string | null; sourceEventId: string | null; linkId: string | null; status: "PENDING" | "EMITTED"; createdAt: string; version: number; }
-export interface MailCandidate { readonly id: string; readonly workspaceId: string; readonly provider: "GMAIL" | "OUTLOOK"; readonly mailbox: string; readonly sourceLocator: string; readonly providerEventId: string; readonly subject: string; readonly bodyDigest: string; readonly status: "CANDIDATE"; readonly confirmed: false; readonly freshness: "producer_unverified"; readonly createdByPrincipalId: string; readonly createdAt: string; readonly version: 1; }
-export interface InboxState { schemaVersion: 1; events: SourceEvent[]; attachments: InboxAttachment[]; links: InboxLink[]; drafts: InboxDraft[]; mailWorkLinks: MailWorkLink[]; mailInboxReceipts: MailInboxReceipt[]; mailOutbox: MailOutboxEvent[]; mailCandidates?: MailCandidate[]; }
+export interface MailCandidate { readonly id: string; readonly workspaceId: string; readonly provider: "GMAIL" | "OUTLOOK"; readonly mailbox: string; readonly sourceLocator: string; readonly providerEventId: string; readonly subject: string; readonly bodyDigest: string; readonly senderCompany?: string | null; readonly summary?: string | null; readonly receivedAt?: string | null; readonly evidenceUrl?: string | null; readonly status: "CANDIDATE"; readonly confirmed: false; readonly freshness: "producer_unverified"; readonly createdByPrincipalId: string; readonly createdAt: string; readonly version: 1; }
+export type MailCandidateReviewOutcome = "LINKED" | "NEW_ACCOUNT_CANDIDATE" | "DISCARDED" | "UNDONE";
+export interface MailCandidateReview { readonly id: string; readonly workspaceId: string; readonly candidateId: string; readonly outcome: MailCandidateReviewOutcome; readonly accountId: string | null; readonly companyName: string | null; readonly reason: string | null; readonly reviewedByPrincipalId: string; readonly reviewedAt: string; readonly undoOf: string | null; readonly version: number; }
+export interface InboxState { schemaVersion: 1; events: SourceEvent[]; attachments: InboxAttachment[]; links: InboxLink[]; drafts: InboxDraft[]; mailWorkLinks: MailWorkLink[]; mailInboxReceipts: MailInboxReceipt[]; mailOutbox: MailOutboxEvent[]; mailCandidates?: MailCandidate[]; mailCandidateReviews?: MailCandidateReview[]; }
 export class UnifiedInboxService {
-  private events = new Map<string, SourceEvent>(); private attachments = new Map<string, InboxAttachment>(); private links = new Map<string, InboxLink>(); private drafts = new Map<string, InboxDraft>(); private mailWorkLinks = new Map<string, MailWorkLink>(); private mailInboxReceipts = new Map<string, MailInboxReceipt>(); private mailOutbox = new Map<string, MailOutboxEvent>(); private mailCandidates = new Map<string, MailCandidate>();
+  private events = new Map<string, SourceEvent>(); private attachments = new Map<string, InboxAttachment>(); private links = new Map<string, InboxLink>(); private drafts = new Map<string, InboxDraft>(); private mailWorkLinks = new Map<string, MailWorkLink>(); private mailInboxReceipts = new Map<string, MailInboxReceipt>(); private mailOutbox = new Map<string, MailOutboxEvent>(); private mailCandidates = new Map<string, MailCandidate>(); private mailCandidateReviews = new Map<string, MailCandidateReview>();
   ingest(input: Omit<SourceEvent, "version" | "status">): SourceEvent {
     assertWorkspace(input.workspaceId, input.workspaceId); const duplicate = [...this.events.values()].find((item) => item.workspaceId === input.workspaceId && item.source === input.source && item.providerEventId === input.providerEventId);
     if (duplicate) return copy(duplicate);
@@ -60,14 +62,20 @@ export class UnifiedInboxService {
     const receipt: MailInboxReceipt = { ...copy(input), id: required(input.id, "receipt.id"), provider: required(input.provider, "provider"), mailbox: required(input.mailbox, "mailbox"), sourceLocator: required(input.sourceLocator, "sourceLocator"), providerEventId: required(input.providerEventId, "providerEventId"), receivedAt: required(input.receivedAt, "receivedAt"), version: 1 };
     this.mailInboxReceipts.set(receipt.id, receipt); this.enqueue({ id: `outbox-inbox-${receipt.id}`, workspaceId: receipt.workspaceId, kind: "INBOX_RECEIVED", workItemId: null, sourceEventId: input.event?.id ?? null, linkId: null, status: "PENDING", createdAt, version: 1 }); return copy(receipt);
   }
-  createMailCandidate(input: { id: string; workspaceId: string; provider: "GMAIL" | "OUTLOOK"; mailbox: string; sourceLocator: string; providerEventId: string; subject: string; bodyDigest: string }, actor: V2Actor, createdAt: string): MailCandidate {
+  createMailCandidate(input: { id: string; workspaceId: string; provider: "GMAIL" | "OUTLOOK"; mailbox: string; sourceLocator: string; providerEventId: string; subject: string; bodyDigest: string; senderCompany?: string | null; summary?: string | null; receivedAt?: string | null; evidenceUrl?: string | null }, actor: V2Actor, createdAt: string): MailCandidate {
     if (actor.kind !== "service") throw new CustomerWorkOsV2Error("MAIL_CANDIDATE_WRITER_REQUIRED", "mail candidates may only be created by a service actor");
     assertWorkspace(actor.workspaceId, input.workspaceId);
     const id = required(input.id, "candidate.id");
-    const content = { id, workspaceId: input.workspaceId, provider: input.provider, mailbox: required(input.mailbox, "mailbox"), sourceLocator: required(input.sourceLocator, "sourceLocator"), providerEventId: required(input.providerEventId, "providerEventId"), subject: input.subject, bodyDigest: required(input.bodyDigest, "bodyDigest") };
+    const safeUrl = input.evidenceUrl == null || input.evidenceUrl.trim() === "" ? null : input.evidenceUrl.trim();
+    if (safeUrl) {
+      let parsed: URL;
+      try { parsed = new URL(safeUrl); } catch { throw new CustomerWorkOsV2Error("INVALID_INPUT", "evidenceUrl must be a safe HTTP(S) URL"); }
+      if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password) throw new CustomerWorkOsV2Error("INVALID_INPUT", "evidenceUrl must be a safe HTTP(S) URL");
+    }
+    const content = { id, workspaceId: input.workspaceId, provider: input.provider, mailbox: required(input.mailbox, "mailbox"), sourceLocator: required(input.sourceLocator, "sourceLocator"), providerEventId: required(input.providerEventId, "providerEventId"), subject: input.subject, bodyDigest: required(input.bodyDigest, "bodyDigest"), senderCompany: input.senderCompany?.trim() || null, summary: input.summary?.trim() || null, receivedAt: input.receivedAt?.trim() || null, evidenceUrl: safeUrl };
     const sameSource = [...this.mailCandidates.values()].find((item) => item.workspaceId === content.workspaceId && item.provider === content.provider && item.mailbox === content.mailbox && item.providerEventId === content.providerEventId);
     if (sameSource) {
-      if (sameSource.id === content.id && sameSource.sourceLocator === content.sourceLocator && sameSource.subject === content.subject && sameSource.bodyDigest === content.bodyDigest) return copy(sameSource);
+      if (sameSource.id === content.id && sameSource.sourceLocator === content.sourceLocator && sameSource.subject === content.subject && sameSource.bodyDigest === content.bodyDigest && (sameSource.senderCompany ?? null) === content.senderCompany && (sameSource.summary ?? null) === content.summary && (sameSource.receivedAt ?? null) === content.receivedAt && (sameSource.evidenceUrl ?? null) === content.evidenceUrl) return copy(sameSource);
       throw new CustomerWorkOsV2Error("CANDIDATE_CONFLICT", "mail candidate source or content conflicts with an existing candidate");
     }
     const reusedId = this.mailCandidates.get(id);
@@ -75,6 +83,36 @@ export class UnifiedInboxService {
     const item: MailCandidate = { ...content, status: "CANDIDATE", confirmed: false, freshness: "producer_unverified", createdByPrincipalId: actor.principalId, createdAt: required(createdAt, "createdAt"), version: 1 };
     this.mailCandidates.set(item.id, item);
     return copy(item);
+  }
+  reviewMailCandidate(input: { id: string; workspaceId: string; candidateId: string; outcome: Exclude<MailCandidateReviewOutcome, "UNDONE">; accountId?: string | null; companyName?: string | null; reason?: string | null }, actor: V2Actor, reviewedAt: string): MailCandidateReview {
+    assertStepUp(actor); assertWorkspace(actor.workspaceId, input.workspaceId);
+    const candidate = this.mailCandidates.get(required(input.candidateId, "candidateId"));
+    if (!candidate) throw new CustomerWorkOsV2Error("MAIL_CANDIDATE_NOT_FOUND", "mail candidate not found");
+    assertWorkspace(input.workspaceId, candidate.workspaceId);
+    const history = [...this.mailCandidateReviews.values()].filter(item => item.candidateId === candidate.id).sort((left, right) => left.version - right.version);
+    if (history.at(-1)?.outcome !== undefined && history.at(-1)?.outcome !== "UNDONE") throw new CustomerWorkOsV2Error("MAIL_CANDIDATE_ALREADY_REVIEWED", "mail candidate already has an active review");
+    if (input.outcome === "LINKED" && !input.accountId) throw new CustomerWorkOsV2Error("INVALID_INPUT", "linked review requires accountId");
+    if (input.outcome === "NEW_ACCOUNT_CANDIDATE" && !input.companyName?.trim()) throw new CustomerWorkOsV2Error("INVALID_INPUT", "new account candidate requires companyName");
+    const item: MailCandidateReview = { id: required(input.id, "review.id"), workspaceId: input.workspaceId, candidateId: candidate.id, outcome: input.outcome, accountId: input.accountId ?? null, companyName: input.companyName?.trim() || null, reason: input.reason?.trim() || null, reviewedByPrincipalId: actor.principalId, reviewedAt: required(reviewedAt, "reviewedAt"), undoOf: null, version: (history.at(-1)?.version ?? 0) + 1 };
+    if (this.mailCandidateReviews.has(item.id)) throw new CustomerWorkOsV2Error("INVALID_STATE", "review id already exists");
+    this.mailCandidateReviews.set(item.id, item); return copy(item);
+  }
+  undoMailCandidateReview(input: { id: string; workspaceId: string; candidateId: string; reviewId: string }, actor: V2Actor, reviewedAt: string): MailCandidateReview {
+    assertStepUp(actor); assertWorkspace(actor.workspaceId, input.workspaceId);
+    const candidate = this.mailCandidates.get(required(input.candidateId, "candidateId"));
+    if (!candidate) throw new CustomerWorkOsV2Error("MAIL_CANDIDATE_NOT_FOUND", "mail candidate not found");
+    assertWorkspace(input.workspaceId, candidate.workspaceId);
+    const history = [...this.mailCandidateReviews.values()].filter(item => item.candidateId === candidate.id).sort((left, right) => left.version - right.version);
+    const active = history.at(-1);
+    if (!active || active.id !== input.reviewId || active.outcome === "UNDONE") throw new CustomerWorkOsV2Error("MAIL_CANDIDATE_REVIEW_NOT_ACTIVE", "only the latest active review can be undone");
+    const item: MailCandidateReview = { id: required(input.id, "review.id"), workspaceId: input.workspaceId, candidateId: candidate.id, outcome: "UNDONE", accountId: null, companyName: null, reason: null, reviewedByPrincipalId: actor.principalId, reviewedAt: required(reviewedAt, "reviewedAt"), undoOf: active.id, version: active.version + 1 };
+    this.mailCandidateReviews.set(item.id, item); return copy(item);
+  }
+  mailCandidateReviewHistory(workspaceId: string, candidateId: string): MailCandidateReview[] {
+    const candidate = this.mailCandidates.get(required(candidateId, "candidateId"));
+    if (!candidate) throw new CustomerWorkOsV2Error("MAIL_CANDIDATE_NOT_FOUND", "mail candidate not found");
+    assertWorkspace(workspaceId, candidate.workspaceId);
+    return [...this.mailCandidateReviews.values()].filter(item => item.candidateId === candidateId).sort((left, right) => left.version - right.version).map(copy);
   }
   pendingMailOutbox(workspaceId: string): MailOutboxEvent[] {
     assertWorkspace(workspaceId, workspaceId);
@@ -90,7 +128,7 @@ export class UnifiedInboxService {
     return copy(next);
   }
   private enqueue(event: MailOutboxEvent): void { if (!this.mailOutbox.has(event.id)) this.mailOutbox.set(event.id, event); }
-  exportState(): InboxState { return { schemaVersion: 1, events: sorted(this.events.values()), attachments: sorted(this.attachments.values()), links: sorted(this.links.values()), drafts: sorted(this.drafts.values()), mailWorkLinks: sorted(this.mailWorkLinks.values()), mailInboxReceipts: sorted(this.mailInboxReceipts.values()), mailOutbox: sorted(this.mailOutbox.values()), mailCandidates: sorted(this.mailCandidates.values()) }; }
-  hydrateState(input: InboxState): void { if (input.schemaVersion !== 1) throw new CustomerWorkOsV2Error("UNSUPPORTED_STATE", "unsupported inbox state"); this.events = mapValues(input.events, "sourceEvent"); this.attachments = mapValues(input.attachments, "attachment"); this.links = mapValues(input.links, "inboxLink"); this.drafts = mapValues(input.drafts, "inboxDraft"); this.mailWorkLinks = mapValues(input.mailWorkLinks ?? [], "mailWorkLink"); this.mailInboxReceipts = mapValues(input.mailInboxReceipts ?? [], "mailInboxReceipt"); this.mailOutbox = mapValues(input.mailOutbox ?? [], "mailOutbox"); this.mailCandidates = mapValues(input.mailCandidates ?? [], "mailCandidate"); }
+  exportState(): InboxState { return { schemaVersion: 1, events: sorted(this.events.values()), attachments: sorted(this.attachments.values()), links: sorted(this.links.values()), drafts: sorted(this.drafts.values()), mailWorkLinks: sorted(this.mailWorkLinks.values()), mailInboxReceipts: sorted(this.mailInboxReceipts.values()), mailOutbox: sorted(this.mailOutbox.values()), mailCandidates: sorted(this.mailCandidates.values()), mailCandidateReviews: sorted(this.mailCandidateReviews.values()) }; }
+  hydrateState(input: InboxState): void { if (input.schemaVersion !== 1) throw new CustomerWorkOsV2Error("UNSUPPORTED_STATE", "unsupported inbox state"); this.events = mapValues(input.events, "sourceEvent"); this.attachments = mapValues(input.attachments, "attachment"); this.links = mapValues(input.links, "inboxLink"); this.drafts = mapValues(input.drafts, "inboxDraft"); this.mailWorkLinks = mapValues(input.mailWorkLinks ?? [], "mailWorkLink"); this.mailInboxReceipts = mapValues(input.mailInboxReceipts ?? [], "mailInboxReceipt"); this.mailOutbox = mapValues(input.mailOutbox ?? [], "mailOutbox"); this.mailCandidates = mapValues(input.mailCandidates ?? [], "mailCandidate"); this.mailCandidateReviews = mapValues(input.mailCandidateReviews ?? [], "mailCandidateReview"); }
   private event(workspaceId: string, id: string): SourceEvent { const item = this.events.get(id); if (!item) throw new CustomerWorkOsV2Error("SOURCE_EVENT_NOT_FOUND", "source event not found"); assertWorkspace(workspaceId, item.workspaceId); return item; }
 }

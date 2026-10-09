@@ -63,6 +63,8 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
                 <a href="/pilot" style={{ color: "#dcebe3" }}>파일럿</a>
                 {" · "}
                 <a href="/v2" style={{ color: "#dcebe3" }}>v2</a>
+                {" · "}
+                <a href="/v2/mail-candidate-review" style={{ color: "#dcebe3" }}>메일 후보</a>
               </span>
             </div>
           </header>
