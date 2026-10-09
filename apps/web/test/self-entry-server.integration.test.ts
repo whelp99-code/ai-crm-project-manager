@@ -81,6 +81,15 @@ describe("CRM-owned web authentication against the real API", () => {
     expect(api.status).toBe(401);
   });
 
+  it("redirects Next internal URLs to the admitted web origin without trusting forwarded hosts", async () => {
+    await fixture();
+    const redirected = await middleware(new NextRequest("http://localhost:44083/v2/quote-renewal", {
+      headers: { host: "127.0.0.1:44083", "x-forwarded-host": "untrusted.example.test",
+        "x-forwarded-proto": "http" },
+    }));
+    expect(redirected.headers.get("location")).toBe(`${webOrigin}/login`);
+  });
+
   it.each([
     { name: "wrong password", factors: { password: "incorrect", totp: "287082" } },
     { name: "wrong OTP", factors: { password, totp: "000000" } },
