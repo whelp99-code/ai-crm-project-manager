@@ -49,11 +49,31 @@ describe("JARVIS candidate-only reader", () => {
       const before = await f.runtime.read(workspaceId);
       const r = await f.app.inject({ method: "GET", url: listPath, headers });
       expect(r.statusCode).toBe(200);
-      expect(r.json()).toEqual({ workspaceId, count: 1, candidates: [expect.objectContaining({
-        id: `candidate-${workspaceId}`, workspaceId, confirmed: false, status: "CANDIDATE", freshness: "producer_unverified",
-      })] });
+      expect(r.json()).toEqual({ workspaceId, count: 1, candidates: [{
+        id: `candidate-${workspaceId}`, confirmed: false, status: "CANDIDATE",
+        freshness: "producer_unverified", createdAt: "2026-10-09T00:00:00.000Z",
+      }] });
       expect(r.json()).not.toHaveProperty("state");
       expect(await f.runtime.read(workspaceId)).toEqual(before);
+    } finally { await f.app.close(); }
+  });
+
+  it("omits mailbox, source identifiers and subject from candidate responses", async () => {
+    const f = await fixture();
+    try {
+      const stored = (await f.runtime.read(workspaceId)).state.inbox.mailCandidates?.[0];
+      expect(stored).toMatchObject({ mailbox: "mail@example.test", sourceLocator: `gmail://${workspaceId}`,
+        providerEventId: workspaceId, subject: `Proposal ${workspaceId}` });
+      const r = await f.app.inject({ method: "GET", url: listPath, headers });
+      expect(r.statusCode).toBe(200);
+      const candidate = r.json<{ candidates: Record<string, unknown>[] }>().candidates[0];
+      expect(candidate).toBeDefined();
+      expect(candidate).not.toHaveProperty("mailbox");
+      expect(candidate).not.toHaveProperty("sourceLocator");
+      expect(candidate).not.toHaveProperty("providerEventId");
+      expect(candidate).not.toHaveProperty("subject");
+      expect(candidate).not.toHaveProperty("bodyDigest");
+      expect(candidate).not.toHaveProperty("createdByPrincipalId");
     } finally { await f.app.close(); }
   });
 

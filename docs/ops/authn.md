@@ -113,7 +113,11 @@ Only `GET /api/cwos/v2/mail-candidates` and
 is allowed. Both data routes require the dedicated key and matching
 workspace/service-principal headers, plus active native principal/membership.
 The list returns `{workspaceId,count,candidates}`; the count route returns
-`{workspaceId,count}`. Legacy snapshots without candidates return an empty
+`{workspaceId,count}`. Each candidate is explicitly serialized with only
+`id`, `status`, `confirmed`, `freshness` and `createdAt`. Mailbox, source
+locator/event ID, subject, body digest and creator identity are omitted;
+new fields in stored candidates are not automatically exposed.
+Legacy snapshots without candidates return an empty
 list and count 0. No state, customer, project, quotation, detail or normalized
 projection route is admitted. POST/PATCH/DELETE/confirmation and other
 workspace claims return 403. Neither read mutates state or audit, confirms a

@@ -322,7 +322,11 @@ export function registerCustomerWorkOsV2Routes(
           const authenticatedActor = actor(request, options.actorBinding);
           const envelope = await runtime.readAuthorized(authenticatedActor);
           const candidates = (envelope.state.inbox.mailCandidates ?? [])
-            .filter(candidate => candidate.workspaceId === authenticatedActor.workspaceId);
+            .filter(candidate => candidate.workspaceId === authenticatedActor.workspaceId)
+            .map(candidate => ({
+              id: candidate.id, status: candidate.status, confirmed: candidate.confirmed,
+              freshness: candidate.freshness, createdAt: candidate.createdAt,
+            }));
           return reply.status(200).send({
             workspaceId: authenticatedActor.workspaceId, count: candidates.length,
             ...(path === "/api/cwos/v2/mail-candidates" ? { candidates } : {}),
