@@ -57,9 +57,11 @@ function fieldsToTerms(fields: FormData, rows: number): ContractTerms {
   };
 }
 
-export function RenewalEditor({ contracts, drafts, runtimeVersion, csrf, onSaved }: {
+export function RenewalEditor({ contracts, drafts, runtimeVersion, csrf, onSaved, onCompare, compareBusy }: {
   contracts: ContractSource[]; drafts: SavedRenewal[]; runtimeVersion: number;
   csrf: string | null; onSaved: () => Promise<void>;
+  onCompare: (renewalId: string, revisionId: string) => void;
+  compareBusy: boolean;
 }) {
   const [selected, setSelected] = useState("__manual");
   const [manualSource, setManualSource] = useState<ContractSource | null>(null);
@@ -176,6 +178,7 @@ export function RenewalEditor({ contracts, drafts, runtimeVersion, csrf, onSaved
           {contract.terms.items?.map(item => <p key={item.id}>{item.description} · 수량 {item.quantity} · 단가 {krw(item.unitPriceKrw)}</p>)}
           {contract.terms.conditions?.map((condition, index) => <p key={index}>{condition}</p>)}
           <p className={styles.muted}>해지 통지기간 미확인{contract.source.kind === "OWNER_INPUT" ? " · 원본 검증 전" : ""}</p>
+          <button type="button" disabled={compareBusy} onClick={() => onCompare(draft.id, revision.revisionId)}>나란히 비교</button>
         </article>;
       }))}
     </section>

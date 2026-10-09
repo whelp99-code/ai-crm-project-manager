@@ -18,7 +18,7 @@ export function isSameOrigin(request: NextRequest): boolean {
 
 export async function ownerReviewRequest(
   request: NextRequest,
-  options: { readonly cookie: string; readonly method: "GET" | "POST"; readonly body?: string; readonly resource?: "document-drafts" },
+  options: { readonly cookie: string; readonly method: "GET" | "POST"; readonly body?: string; readonly resource?: "document-drafts"; readonly search?: string },
 ): Promise<Response> {
   const base = process.env.API_BASE_URL;
   const workspace = process.env.WORKSPACE_ID;
@@ -37,7 +37,7 @@ export async function ownerReviewRequest(
   if (csrf) headers["x-csrf-token"] = csrf;
   if (idempotency) headers["idempotency-key"] = idempotency;
   try {
-    return await fetch(`${base.replace(/\/+$/, "")}/api/cwos/v2/${options.resource ?? "mail-candidate-review"}`, {
+    return await fetch(`${base.replace(/\/+$/, "")}/api/cwos/v2/${options.resource ?? "mail-candidate-review"}${options.search ?? ""}`, {
       method: options.method, headers, cache: "no-store", redirect: "error",
       signal: AbortSignal.timeout(10_000),
       ...(options.body === undefined ? {} : { body: options.body }),

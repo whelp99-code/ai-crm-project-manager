@@ -3,6 +3,7 @@
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import styles from "./draft.module.css";
 import { RenewalEditor, isContractSource, isSavedRenewal, type ContractSource, type SavedRenewal } from "./renewal-editor";
+import { ComparisonPanel, isComparisonData, type ComparisonData } from "./comparison-panel";
 
 interface DraftQuote {
   readonly identity: string;
@@ -54,6 +55,21 @@ export function DocumentDraftClient() {
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   const [lineIds, setLineIds] = useState([0]);
+  const [comparison, setComparison] = useState<ComparisonData | null>(null);
+  const [comparing, setComparing] = useState(false);
+
+  async function compare(renewalId: string, revisionId: string) {
+    setComparing(true); setError(""); setComparison(null);
+    try {
+      const query = new URLSearchParams({ renewalId, revisionId });
+      const response = await fetch(`/api/cwos/v2/document-drafts?${query}`, { cache: "no-store" });
+      if (!response.ok) throw new Error(`계약 비교를 불러오지 못했습니다 (${response.status}). 세션과 초안을 확인하세요.`);
+      const result: unknown = await response.json();
+      if (!isComparisonData(result)) throw new Error("비교 응답을 읽지 못했습니다.");
+      setComparison(result);
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "비교 불러오기 실패"); }
+    finally { setComparing(false); }
+  }
 
   async function load() {
     const response = await fetch("/api/cwos/v2/document-drafts", { cache: "no-store" });
@@ -183,7 +199,11 @@ export function DocumentDraftClient() {
         </article>)}
       </section>
       <RenewalEditor contracts={data.contracts} drafts={data.renewalDrafts}
-        runtimeVersion={data.runtimeVersion} csrf={csrf} onSaved={load} />
+        runtimeVersion={data.runtimeVersion} csrf={csrf} onSaved={load}
+        compareBusy={comparing}
+        onCompare={(renewalId, revisionId) => { void compare(renewalId, revisionId); }} />
+      {comparing && <p role="status">원본과 재계약 초안을 비교하는 중입니다.</p>}
+      {comparison && <ComparisonPanel data={comparison} />}
     </>}
   </div>;
 }

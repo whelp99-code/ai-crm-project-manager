@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   CustomerWorkOsV2Error,
   buildCompanyOverview,
+  compareW05ContractDraft,
   assertStepUp,
   type PrincipalKind,
   type V2Actor,
@@ -94,6 +95,10 @@ const quoteDraftRequestSchema = z.object({
 }).strict();
 
 const documentDraftRequestSchema = z.discriminatedUnion("action", [quoteDraftRequestSchema, renewalDraftRequestSchema]);
+const comparisonQuerySchema = z.object({
+  renewalId: z.string().trim().min(1).max(200),
+  revisionId: z.string().trim().min(1).max(200),
+}).strict();
 const contractRowSchema = z.object({
   id: z.string(), version: z.number().int().positive(),
   valueKrw: z.string(), startDate: z.string().nullable(), endDate: z.string().nullable(),
@@ -535,6 +540,20 @@ export function registerCustomerWorkOsV2Routes(
         throw new CustomerWorkOsV2Error("STEP_UP_REQUIRED", "fresh admitted operator proof is required");
       }
       const envelope = await runtime.readAuthorized(owner);
+      if (Object.keys(body(request.query)).length > 0) {
+        const selection = comparisonQuerySchema.safeParse(request.query);
+        if (!selection.success) throw new CustomerWorkOsV2Error("INVALID_INPUT", "comparison requires renewalId and revisionId");
+        const renewal = envelope.state.renewals?.drafts.find(draft => draft.id === selection.data.renewalId);
+        const revision = renewal?.revisions.find(item => item.revisionId === selection.data.revisionId);
+        if (!renewal || !revision?.contractDraft) throw new CustomerWorkOsV2Error("RENEWAL_NOT_FOUND", "structured renewal revision is not available");
+        return reply.status(200).send({
+          workspaceId: owner.workspaceId, runtimeVersion: envelope.version,
+          renewalId: renewal.id, revisionId: revision.revisionId,
+          source: revision.contractDraft.source, terms: revision.contractDraft.terms,
+          comparison: compareW05ContractDraft(revision.contractDraft),
+          approvalStatus: "NOT_APPROVED",
+        });
+      }
       const pool = options.normalizedProjectionPool ?? (rawPool ? scopedPool(rawPool) : undefined);
       if (!pool?.withWorkspaceScope) throw new CustomerWorkOsV2Error("NORMALIZED_STORAGE_REQUIRED", "workspace-scoped business data requires PostgreSQL");
       const engagements = await pool.withWorkspaceScope(owner.workspaceId, async db =>

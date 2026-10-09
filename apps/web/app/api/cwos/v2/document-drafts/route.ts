@@ -9,6 +9,7 @@ async function proxy(request: NextRequest, method: "GET" | "POST") {
   if (!proof) return NextResponse.json({ error: "OWNER_SESSION_REQUIRED" }, { status: 401 });
   const response = await ownerReviewRequest(request, {
     cookie: `${operatorCookie}=${proof}`, method, resource: "document-drafts",
+    ...(method === "GET" ? { search: request.nextUrl.search } : {}),
     ...(method === "POST" ? { body: await request.text() } : {}),
   });
   return new NextResponse(await response.text(), {

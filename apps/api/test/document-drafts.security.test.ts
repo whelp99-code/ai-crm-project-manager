@@ -128,6 +128,18 @@ describe("owner document drafts", () => {
       expect(body.renewalDrafts[0].receipts[0]).toMatchObject({ approvalStatus: "NOT_APPROVED", status: "INTERNAL_CANDIDATE" });
       expect(contractRow).toEqual(sourceBefore);
       expect(body.runtimeVersion).toBe(3);
+      const compared = await f.app.inject({ method: "GET",
+        url: "/api/cwos/v2/document-drafts?renewalId=renewal-fixture&revisionId=renewal-revision", headers: f.headers });
+      expect(compared.statusCode).toBe(200);
+      expect(compared.json().comparison).toEqual({
+        fields: [
+          { key: "period", status: "CHANGED" }, { key: "amount", status: "CHANGED" },
+          { key: "items", status: "UNCHANGED" }, { key: "conditions", status: "UNCHANGED" },
+        ],
+        amountDeltaKrw: "10000000",
+      });
+      expect(compared.json().approvalStatus).toBe("NOT_APPROVED");
+      expect((await f.runtime.read(workspaceId)).version).toBe(3);
     } finally { await f.app.close(); }
   });
 
@@ -184,6 +196,10 @@ describe("owner document drafts", () => {
       }
       expect((await f.runtime.read(workspaceId)).state.renewals?.drafts).toEqual([]);
       expect((await f.runtime.read(workspaceId)).version).toBe(2);
+      expect((await f.app.inject({ method: "GET",
+        url: "/api/cwos/v2/document-drafts?renewalId=foreign&revisionId=foreign", headers: f.headers })).statusCode).toBe(404);
+      expect((await f.app.inject({ method: "GET",
+        url: "/api/cwos/v2/document-drafts?renewalId=foreign", headers: f.headers })).statusCode).toBe(400);
     } finally { await f.app.close(); }
   });
 

@@ -83,4 +83,40 @@ test.describe("owner document draft proxy", () => {
     await expect(renewal.locator("fieldset")).toHaveCount(1);
     expect(submits).toEqual([]);
   });
+
+  test("holds compare actions until the selected immutable result has loaded", async ({ page }) => {
+    const terms = { startDate: "2026-01-01", endDate: "2026-12-31", valueKrw: "1",
+      items: [{ id: "item", description: "item", quantity: 1, unitPriceKrw: "1" }], conditions: ["fixture"] };
+    const source = { kind: "OWNER_INPUT", id: "original", version: null, reference: "fixture", terms };
+    let release!: () => void;
+    let started!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const requested = new Promise<void>(resolve => { started = resolve; });
+    await page.route("**/api/cwos/v2/document-drafts**", async route => {
+      if (new URL(route.request().url()).searchParams.has("renewalId")) {
+        started();
+        await pending;
+        await route.fulfill({ json: { renewalId: "fixture-renewal", revisionId: "revision",
+          source, terms, approvalStatus: "NOT_APPROVED",
+          comparison: { amountDeltaKrw: "0", fields: ["period", "amount", "items", "conditions"]
+            .map(key => ({ key, status: "UNCHANGED" })) } } });
+        return;
+      }
+      await route.fulfill({ json: { runtimeVersion: 1, engagements: [], quoteDrafts: [], contracts: [],
+        renewalDrafts: [{ id: "fixture-renewal",
+          revisions: [{ revisionId: "revision", revisionLabel: "fixture", contractDraft: { source, terms } }],
+          receipts: [{ revisionId: "revision", approvalStatus: "NOT_APPROVED", status: "INTERNAL_CANDIDATE" }] }] } });
+    });
+    await page.goto("/v2/quote-renewal");
+    const compare = page.getByRole("button", { name: "나란히 비교", exact: true });
+    try {
+      await compare.click();
+      await requested;
+      await expect(compare).toBeDisabled();
+      await expect(page.locator("[data-comparison]")).toHaveCount(0);
+    } finally { release(); }
+    await expect(page.locator('[data-comparison-renewal="fixture-renewal"]')).toBeVisible();
+    await expect(page.locator('[data-field][data-status="UNCHANGED"]')).toHaveCount(4);
+    await expect(compare).toBeEnabled();
+  });
 });
