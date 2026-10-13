@@ -23,6 +23,13 @@ childProcess.spawn = function (...args) {
 const originalWrite = fs.promises.writeFile;
 const originalCopy = fs.promises.copyFile;
 const originalRename = fs.promises.rename;
+const originalRm = fs.promises.rm;
+fs.promises.rm = async function (path, ...options) {
+  if (fixture.cleanupScratchFailure && String(path).startsWith(join(root, "state/.prepare-"))) {
+    throw Object.assign(new Error("fixture scratch removal denied"), { code: "EACCES" });
+  }
+  return originalRm.call(this, path, ...options);
+};
 const inPhase = data => fixture.atomicPhase === (String(data).includes(fixture.release) ? "forward" : "rollback");
 function receipt(point, path, next) {
   fs.writeFileSync(join(root, "atomic-receipt.json"), JSON.stringify({

@@ -463,13 +463,23 @@ try {
 } finally {
   clearTimeout(startupTimer);
   await stopChildren();
-  try {
-    if (restoreContainer) await command("restore_cleanup", "docker", ["rm", "--force", "--volumes", restoreContainer]);
-    if (scratch) await rm(scratch, { recursive: true });
-    if (createdRelease && !published && !changed) await rm(release, { recursive: true });
-  } catch {
-    process.stderr.write("CRM_CLEANUP_FAILED operator_action_required\n");
-    process.exitCode = 1;
+  for (const cleanup of [
+    async () => {
+      if (!restoreContainer) return;
+      const existing = (await command("restore_cleanup_exists", "docker",
+        ["container", "ls", "--all", "--filter", `name=^/${restoreContainer}$`, "--format", "{{.Names}}"])).toString().trim();
+      if (existing === restoreContainer) {
+        await command("restore_cleanup", "docker", ["rm", "--force", "--volumes", restoreContainer]);
+      }
+    },
+    async () => { if (scratch) await rm(scratch, { recursive: true }); },
+    async () => { if (createdRelease && !published && !changed) await rm(release, { recursive: true }); },
+  ]) {
+    try { await cleanup(); }
+    catch {
+      process.stderr.write("CRM_CLEANUP_FAILED operator_action_required\n");
+      process.exitCode ||= 1;
+    }
   }
   process.off("SIGINT", onSigint);
   process.off("SIGTERM", onSigterm);
