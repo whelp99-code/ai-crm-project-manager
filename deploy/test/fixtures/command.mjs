@@ -264,6 +264,7 @@ async function main() {
       return 0;
     }
     if (args.includes("restore-backup")) {
+      if (fixture.restoreNotCreated) return 29;
       writeFileSync(join(root, "restore-container"), args[args.indexOf("--name") + 1]);
       if (fixture.realPg) {
         const mount = args[args.indexOf("--mount") + 1];
@@ -297,7 +298,15 @@ async function main() {
       return fixture.badRestore ? 29 : 0;
     }
     if (args[0] === "rm") {
+      if (!existsSync(join(root, "restore-container")) || fixture.cleanupContainerFailure) return 1;
       writeFileSync(join(root, "restore-container-removed"), args.at(-1));
+      return 0;
+    }
+    if (args[0] === "container" && args[1] === "ls") {
+      if (fixture.cleanupListFailure) return 1;
+      if (existsSync(join(root, "restore-container"))) {
+        process.stdout.write(readFileSync(join(root, "restore-container"), "utf8") + "\n");
+      }
       return 0;
     }
     if (args.includes("pg_dump")) {

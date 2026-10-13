@@ -139,6 +139,11 @@ export async function withDeployment(options, inspect) {
       } finally { writeFileSync(join(root, "dump-release"), "continue"); }
     }
     const outcome = await primary.outcome;
+    let retry;
+    if (options.retryAfterFailure) {
+      writeFileSync(join(root, "fixture.json"), JSON.stringify({ ...fixture, restoreNotCreated: false }));
+      retry = await launch("bash", [script], env).outcome;
+    }
     const lockReleased = options.contend
       ? (await launch("flock", ["--nonblock", lock, "true"], env).outcome).code === 0 : undefined;
     const events = readdirSync(root).filter(name => name.startsWith("event-")).map(name => readJson(join(root, name)));
@@ -155,7 +160,7 @@ export async function withDeployment(options, inspect) {
       expectedHash.update(chunk.subarray(0, Math.min(remaining, chunk.length)));
     }
     await inspect({ ...outcome, root, release, dropins, units, originals, events,
-      contender, lockHeld, lockReleased, liveOwnedProcesses,
+      contender, retry, lockHeld, lockReleased, liveOwnedProcesses,
       oldAuth, newAuth, humanEnv, humanBefore, ownerBefore, oldBefore,
       childExits: readdirSync(root).filter(name => name.startsWith("exit-")).map(name => readJson(join(root, name))),
       state: readJson(join(root, "state.json")),

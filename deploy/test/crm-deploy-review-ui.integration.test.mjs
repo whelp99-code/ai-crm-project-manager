@@ -23,6 +23,34 @@ function restored(result) {
 }
 
 describe("PR65 deployment runtime regressions", () => {
+  it("cleanup permits retry after restore fails before container creation", async () => {
+    await withDeployment({ restoreNotCreated: true, retryAfterFailure: true }, result => {
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("backup_restore_exit_29");
+      expect(result.stderr).not.toContain("CRM_CLEANUP_FAILED");
+      expect(result.retry.code, result.retry.stderr).toBe(0);
+      expect(result.retry.stdout).toContain("CRM_REVIEW_UI_LIVE");
+      expect(readdirSync(join(result.root, "state")).filter(name => name.startsWith(".prepare-"))).toEqual([]);
+      expect(result.liveOwnedProcesses).toBe(0);
+    });
+  });
+
+  it.each([
+    { badRestore: true, cleanupContainerFailure: true },
+    { badRestore: true, cleanupListFailure: true },
+    { badRestore: true, cleanupScratchFailure: true },
+  ])("cleanup continues independent removals after failure: %j", async options => {
+    await withDeployment(options, result => {
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("CRM_CLEANUP_FAILED");
+      expect(exists(result.release)).toBe(false);
+      expect(readdirSync(join(result.root, "state")).filter(name => name.startsWith(".prepare-")))
+        .toHaveLength(options.cleanupScratchFailure ? 1 : 0);
+      expect(result.liveOwnedProcesses).toBe(0);
+      restored(result);
+    });
+  });
+
   for (const atomicPhase of ["forward", "rollback"]) {
     it.each(["partial-write", "before-rename", "after-rename"])(`atomic drop-in remains complete on ${atomicPhase} crash at %s`, async atomicCrash => {
       await withDeployment({ atomicCrash, atomicPhase, failReload: atomicPhase === "rollback" }, result => {
