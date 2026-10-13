@@ -10,6 +10,7 @@ on:
       - "packages/**"
       - "scripts/cwos-*"
       - "docs/customer-work-os/**"
+      - "deploy/**"
       - ".github/workflows/customer-work-os-release-gate.yml"
   workflow_dispatch:
 
@@ -37,6 +38,12 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: ${{ env.PNPM_VERSION }}
+      # Deployment scripts require Node 22. Record that binary, then restore the matrix runner on PATH.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Record Node 22 deployment test runtime
+        run: echo "CRM_DEPLOY_TEST_NODE=$(command -v node)" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}

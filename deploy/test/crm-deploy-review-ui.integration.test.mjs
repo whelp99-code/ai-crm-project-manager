@@ -42,12 +42,13 @@ describe("PR65 deployment runtime regressions", () => {
     });
   });
 
-  for (const signal of ["SIGINT", "SIGTERM"]) {
+  for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"]) {
     for (const signalAt of ["write", "restart"]) {
       it(`finishes rollback for ${signal} at ${signalAt}, including repeated interruption`, async () => {
         await withDeployment({ signal, signalAt, repeatSignal: true }, result => {
           expect(result.signal).toBeNull();
-          expect(result.code).toBe(signal === "SIGINT" ? 130 : 143);
+          expect(result.code).toBe({ SIGHUP: 129, SIGINT: 130, SIGTERM: 143 }[signal]);
+          expect(result.liveOwnedProcesses).toBe(0);
           expect(result.stderr).toContain("CRM_ROLLBACK_OK");
           expect(result.stdout).not.toContain("CRM_REVIEW_UI_LIVE");
           expect(exists(join(result.root, "rollback-signal-sent"))).toBe(true);
@@ -62,6 +63,7 @@ describe("PR65 deployment runtime regressions", () => {
   it("applies private EnvironmentFiles and verifies restarted auth without changing human env", async () => {
     await withDeployment({}, result => {
       expect(result.code, result.stderr).toBe(0);
+      expect(result.usage.nodeMajor).toBe(22);
       expect(result.state.units["core5-api"].environment.CWOS_V2_OPERATOR_AUTH_STATE_PATH).toBe(result.newAuth);
       expect(result.state.units["core5-web"].environment.CRM_WEB_ORIGIN).toBe("https://web.invalid");
       expect(result.state.units["core5-review-ui"].environment.CRM_WEB_ORIGIN).toBe("https://review.invalid");
@@ -75,6 +77,44 @@ describe("PR65 deployment runtime regressions", () => {
       expect(result.events.some(event => event.args.includes("--property=MainPID"))).toBe(true);
       expect(readText(result.humanEnv)).toBe(result.humanBefore);
       expect(readText(result.newAuth)).toBe(result.ownerBefore);
+    });
+  });
+
+  it.each([false, true])("handles missing final newlines with rollback=%s", async failReload => {
+    await withDeployment({ noFinalNewline: true, failReload }, result => {
+      if (failReload) {
+        expect(result.code).not.toBe(0);
+        expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+        restored(result);
+      } else {
+        expect(result.code, result.stderr).toBe(0);
+        expect(result.state.units["core5-api"].environment.CWOS_V2_OPERATOR_AUTH_STATE_PATH).toBe(result.newAuth);
+        expect(result.state.units["core5-web"].environment.CRM_WEB_ORIGIN).toBe("https://web.invalid");
+      }
+    });
+  });
+
+  it.each([false, true])("excludes concurrent writers through cleanup with rollback=%s", async failReload => {
+    await withDeployment({ contend: true, failReload, contenderTarget: "2".repeat(40) }, result => {
+      expect(result.lockHeld).toBe(true);
+      expect(result.contender.code).toBe(1);
+      expect(result.contender.stderr).toContain("reason=deployment_in_progress");
+      expect(result.events.filter(event => event.contender)).toHaveLength(0);
+      expect(result.lockReleased).toBe(true);
+      expect(result.liveOwnedProcesses).toBe(0);
+      if (failReload) {
+        expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+        restored(result);
+      } else expect(result.code, result.stderr).toBe(0);
+    });
+  });
+
+  it.each([{ sourceMismatch: true }, { sqlDelta: true }])("preserves source guards with modeled Git: %j", async options => {
+    await withDeployment(options, result => {
+      expect(result.code).not.toBe(0);
+      expect(result.events.some(event => event.name === "systemctl")).toBe(false);
+      expect(exists(result.release)).toBe(false);
+      restored(result);
     });
   });
 
@@ -95,6 +135,26 @@ describe("PR65 deployment runtime regressions", () => {
       expect(result.stderr).toContain("CRM_ROLLBACK_OK");
       expect(result.state.units["core5-review-ui"].environment.CRM_WEB_ORIGIN).toBe("https://old.invalid");
       restored(result);
+    });
+  });
+
+  it.each(["quoted public first", "unquoted", "secret first"])("does not copy mixed Environment secrets: %s", async shape => {
+    const secret = "fixture-only-private-value";
+    const publicValues = "API_BASE_URL=http://127.0.0.1:4999 OPERATOR_PRINCIPAL_ID=fixture";
+    const assignments = shape === "secret first"
+      ? [`AUTH_API_KEY=${secret}`, ...publicValues.split(" ")]
+      : [...publicValues.split(" "), `AUTH_API_KEY=${secret}`];
+    const webEnvironment = "Environment=" + assignments.map(value => shape === "unquoted" ? value : JSON.stringify(value)).join(" ");
+    await withDeployment({ webEnvironment }, result => {
+      expect(result.code, result.stderr).toBe(0);
+      const review = result.state.units["core5-review-ui"].environment;
+      expect(readText(result.dropins[2]).includes(secret)).toBe(false);
+      expect(Object.hasOwn(review, "AUTH_API_KEY")).toBe(false);
+      expect(review.API_BASE_URL === "http://127.0.0.1:4999").toBe(true);
+      expect(review.OPERATOR_PRINCIPAL_ID).toBe("fixture");
+      expect(statSync(result.dropins[2]).mode & 0o777).toBe(0o644);
+      expect(readText(result.humanEnv)).toBe(result.humanBefore);
+      expect(readText(result.newAuth)).toBe(result.ownerBefore);
     });
   });
 

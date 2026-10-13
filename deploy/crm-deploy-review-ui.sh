@@ -33,6 +33,14 @@ node_version=$("$NODE" -p 'process.versions.node') || {
   printf '%s\n' 'CRM_DEPLOY_REFUSED_OR_FAILED stage=prerequisites reason=node22_required' >&2
   exit 1
 }
+# Share the unit lock with crm-deploy-master.sh through rollback and cleanup.
+lock_dir=${CRM_UNIT_ROOT:-$HOME/.config/systemd/user}
+mkdir -p -- "$lock_dir"
+exec 9>"$lock_dir/.crm-deploy.lock"
+if ! flock --nonblock 9; then
+  printf '%s\n' 'CRM_DEPLOY_REFUSED_OR_FAILED stage=prerequisites reason=deployment_in_progress' >&2
+  exit 1
+fi
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 export CRM_SCRIPT_REPO_DEFAULT=$(cd -- "$script_dir/.." && pwd)
 exec "$NODE" --input-type=module - <<'NODE'
@@ -98,8 +106,10 @@ function interrupt(signal) {
 }
 const onSigint = () => interrupt("SIGINT");
 const onSigterm = () => interrupt("SIGTERM");
+const onSighup = () => interrupt("SIGHUP");
 process.on("SIGINT", onSigint);
 process.on("SIGTERM", onSigterm);
+process.on("SIGHUP", onSighup);
 
 function checkInterrupted() {
   if (interruptedSignal && !rollingBack) throw new Error(`interrupted_${interruptedSignal}`);
@@ -149,21 +159,6 @@ function httpsOrigin(value) {
     const url = new URL(value);
     return url.protocol === "https:" && url.origin === value && !url.username && !url.password;
   } catch { return false; }
-}
-
-function environmentLines(text) {
-  const lines = [];
-  for (const raw of text.split("\n")) {
-    const line = raw.trim();
-    if (!line.startsWith("Environment=")) continue;
-    let body = line.slice("Environment=".length);
-    if (body.startsWith('"') && body.endsWith('"')) body = body.slice(1, -1);
-    const eq = body.indexOf("=");
-    const key = eq === -1 ? body : body.slice(0, eq);
-    if (/KEY|SECRET|PASSWORD|TOKEN|DSN|DATABASE|HASH/i.test(key)) continue;
-    lines.push(`Environment=${JSON.stringify(body)}`);
-  }
-  return lines;
 }
 
 async function httpResult(url, args = []) {
@@ -353,12 +348,10 @@ async function main() {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
-  const webText = await readFile(webDropin, "utf8");
-  const copied = environmentLines(webText);
-  if (!webText.includes("EnvironmentFile=") || !copied.some(line => line.includes("API_BASE_URL="))
-    || !copied.some(line => line.includes("OPERATOR_PRINCIPAL_ID="))) {
-    throw new Error("review_config_missing");
-  }
+  const webEnvironment = await runtimeEnvironment("core5-web", ["API_BASE_URL"]);
+  if (!webEnvironment.API_BASE_URL) throw new Error("review_config_missing");
+  // Copy a named effective value into the private file, never a raw unit line.
+  runtimeValues[2].API_BASE_URL = webEnvironment.API_BASE_URL;
   for (const [index, unit] of services.entries()) {
     previousEnvironment.set(unit, await runtimeEnvironment(unit, Object.keys(runtimeValues[index])));
   }
@@ -439,7 +432,6 @@ async function main() {
     `EnvironmentFile=`,
     `EnvironmentFile=${JSON.stringify(appEnv)}`,
     `EnvironmentFile=${JSON.stringify(humanEnv)}`,
-    ...copied,
     `EnvironmentFile=${JSON.stringify(runtimeFiles[2])}`,
     `WorkingDirectory=${JSON.stringify(join(release, "apps/web"))}`,
     "ExecStart=",
@@ -451,6 +443,7 @@ async function main() {
     checkInterrupted();
     let text = (await readFile(file, "utf8")).replace(/^WorkingDirectory=.*$/m,
       `WorkingDirectory=${JSON.stringify(join(release, index ? "apps/web" : "apps/api"))}`);
+    if (!text.endsWith("\n")) text += "\n";
     text += `EnvironmentFile=${JSON.stringify(runtimeFiles[index])}\n`;
     await writeFile(file, text, { mode: (await lstat(file)).mode & 0o777 });
     checkInterrupted();
@@ -515,7 +508,7 @@ try {
   try { await rollback(); }
   catch { try { await markRollbackFailed(); } catch { process.stderr.write("CRM_ROLLBACK_FAILED operator_action_required\n"); } }
   process.stderr.write(`CRM_DEPLOY_REFUSED_OR_FAILED stage=${failedStage} reason=${reason}\n`);
-  process.exitCode = interruptedSignal === "SIGINT" ? 130 : interruptedSignal === "SIGTERM" ? 143 : 1;
+  process.exitCode = interruptedSignal === "SIGHUP" ? 129 : interruptedSignal === "SIGINT" ? 130 : interruptedSignal === "SIGTERM" ? 143 : 1;
 } finally {
   clearTimeout(startupTimer);
   await stopChildren();
@@ -528,5 +521,6 @@ try {
   }
   process.off("SIGINT", onSigint);
   process.off("SIGTERM", onSigterm);
+  process.off("SIGHUP", onSighup);
 }
 NODE

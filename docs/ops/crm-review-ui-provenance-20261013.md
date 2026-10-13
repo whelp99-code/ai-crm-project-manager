@@ -160,9 +160,9 @@ origin을 사전 Node 환경만으로 확인하지 않는다. `/proc/<MainPID>/e
 `CRM_ROLLBACK_OK`로 처리하거나 새 release를 지우지 않는다. SQL 변경을
 허용하지 않으므로 DB를 자동 restore하지 않는다.
 
-SIGINT/SIGTERM은 진행 중인 소유 process group을 종료하고 close를 기다린
+SIGHUP/SIGINT/SIGTERM은 진행 중인 소유 process group을 종료하고 close를 기다린
 뒤 직렬로 롤백한다. 복구 중 반복 신호는 복구를 끊지 않으며 완료 후
-exit130/143으로 끝난다. 원래 없던 review92는 중단 복구에서도 제거된다.
+exit129/130/143으로 끝난다. 원래 없던 review92는 중단 복구에서도 제거된다.
 
 backup 디렉터리에는 `api90`, `web90`, 선택적 `review92`와 각각의 `.meta`,
 DB dump가 있다. `.meta`가 `absent`이면 원래 파일이 없었고, 나머지는
@@ -225,7 +225,7 @@ legacy helper의 SHA-256도 동일했다. QA browser/profile과 임시 인증
 디렉터리를 정리했고 합성 web 포트38993은 닫혔다. 실제 운영은 여전히
 기존 정적 helper이며, 기능 반영은 PR 검수와 별도 배포 승인 이후다.
 
-## Cursor REJECT 배포 경계 수정
+## 첫 Cursor REJECT 배포 경계 수정
 
 초기 격리 QA는 다중 unit의 ANY-active 결과와 EnvironmentFile 우선순위를
 충분히 모델링하지 못했다. 커밋된 `deploy/test` fixture는 이 두 동작을
@@ -254,3 +254,49 @@ API/web/review-ui의 운영 PID·경로는 계속 `20475`/`20478`/`20477`과
 정리했다. UI·로그인·CSRF 구현은 이번 배포 경계 수정에서 바꾸지 않았으며
 운영 실행·키 생성·실제 후보 변경은 하지 않았다. CI/Bugbot 사용량 한도는
 별도 상태로 남으며 로컬 검증으로 해결됐다고 주장하지 않는다.
+
+## 두 번째 Cursor REJECT 수정
+
+`Environment=` 원문 줄을 review drop-in에 복사하지 않는다. 기준 web
+MainPID에서 이름이 지정된 `API_BASE_URL` 값만 읽어 마지막 mode600
+환경파일에 넣는다. principal/origin 등은 이미 검증된 지정 값으로
+구성한다. 여러 assignment의 인용 방식이나 순서 때문에 비밀이 mode0644
+파일로 따라오는 경로를 없앴다. 새 API 값도 재시작 후 실효값 검사에 포함된다.
+
+끝 LF가 없는 API/web drop-in에는 LF를 보충해서 새 directive를 구분한다.
+SIGHUP도 기존 복구 경로를 거치며, 롤백은 LF 유무·권한·review92 부재를
+그대로 되돌린다.
+
+#63과 같은 `CRM_UNIT_ROOT/.crm-deploy.lock`의 배타 flock을 기준 검사
+전부터 정리 완료까지 유지한다. 다른 target의 승인된 실행도
+`deployment_in_progress`로 거부하며, lock 파일을 삭제하지 않는다.
+inode나 target별 잠금으로 우회되는 구조가 아니다.
+
+```sh
+CRM_DEPLOY_TEST_NODE="$HOME/.nvm/versions/node/v22.23.2/bin/node" \
+CI=1 PATH="$HOME/.nvm/versions/node/v20.20.2/bin:$PATH" \
+  pnpm exec vitest run deploy/test/crm-deploy-review-ui.integration.test.mjs \
+  --reporter=verbose --no-color
+# Node 22 행에서는 PATH를 v22.23.2로 바꾼다.
+```
+
+Git은 sandbox 경계로 모델링하고 실제 tar/script/file I/O/OS 신호/flock을
+실행한다. 호스트 이력에 기대지 않으며 생산 source pin과 Node 22 제한은
+유지한다. CI는 별도 Node 22 경로를 저장한 뒤 기존 Node 20/22 시험기로
+복귀한다. checkout depth나 행렬을 바꾸지 않았고 deploy 경로도 게이트에 포함했다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 수정 전 | 8 실패 / 19 통과: HUP 2, LF 1, 경합 2, 혼합 Environment 3 |
+| 작업 checkout Node 20 / 22 | 각각 27/27 통과 |
+| 실제 depth 1 Node 20 / 22 | 각각 27/27 통과 |
+| shallow 조건 | 커밋 수 1, f1/1cf/e91 객체 없음; 실행 파일 7개 blob 일치 |
+| 실제 중복 실행 CLI | 이전 두 실행 exit0 → 첫 실행만 exit0, contender exit1, 실제 잠금 유지 |
+| 실제 혼합 설정 CLI | 정상 exit0을 유지하면서 공개 파일의 합성 비밀 포함 true → false |
+| #63↔#65 교차 실행 | 두 방향 모두 HUP exit129, contender 차단, 정확한 복원, 잠금 해제, 소유 자식 0개 |
+
+비밀 시험은 기본값과 다른 API endpoint를 넣고 인용/비인용/secret-first
+세 가지를 검증한다. 값은 로그에 출력하지 않는다. 256MiB dump도 네 행에서
+통과했다. shell/내장 Node 문법·shell/JS 진단과 승인/인수/생산 Node 20 거부
+검사도 통과했다. YAML LSP 미설치는 남아 있으며 PyYAML 구문·구조 검사로
+확인했다. UI·로그인·CSRF·운영 서비스는 이 작업에서 실행하거나 바꾸지 않았다.

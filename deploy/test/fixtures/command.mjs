@@ -1,10 +1,29 @@
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, watch, writeFileSync, writeSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
 
 const decode = value => value.startsWith('"') ? JSON.parse(value) : value;
+function environmentWords(value) {
+  const words = [];
+  let word = "", quote = "", escaped = false;
+  for (const character of value) {
+    if (escaped) { word += character; escaped = false; }
+    else if (character === "\\") escaped = true;
+    else if (quote) {
+      if (character === quote) quote = "";
+      else word += character;
+    } else if (character === '"' || character === "'") quote = character;
+    else if (/\s/.test(character)) { if (word) words.push(word); word = ""; }
+    else word += character;
+  }
+  if (quote || escaped) throw new Error("invalid fixture Environment quoting");
+  if (word) words.push(word);
+  return words;
+}
+
 export function configuration(root, unit) {
   const directory = join(root, "units", `${unit}.service.d`);
   const paths = [join(root, "units", `${unit}.service`),
@@ -22,9 +41,13 @@ export function configuration(root, unit) {
         else envFiles.push(decode(value));
       }
       if (line.startsWith("Environment=")) {
-        const value = decode(line.slice(12));
-        const equal = value.indexOf("=");
-        if (equal >= 0) direct[value.slice(0, equal)] = value.slice(equal + 1);
+        if (!line.slice(12).trim()) {
+          for (const key of Object.keys(direct)) delete direct[key];
+        }
+        for (const value of environmentWords(line.slice(12))) {
+          const equal = value.indexOf("=");
+          if (equal >= 0) direct[value.slice(0, equal)] = value.slice(equal + 1);
+        }
       }
     }
   }
@@ -46,12 +69,40 @@ async function main() {
   if (!root?.startsWith("/tmp/crm-deploy-test-")) throw new Error("sandbox required");
   const fixture = JSON.parse(readFileSync(join(root, "fixture.json"), "utf8"));
   const [name, ...args] = process.argv.slice(2);
+  const contender = process.env.CRM_TEST_CONTENDER === "1";
   const state = JSON.parse(readFileSync(join(root, "state.json"), "utf8"));
   writeFileSync(join(root, `child-${process.pid}`), name);
   const event = value => {
     const file = join(root, `event-${process.pid}.json`);
-    writeFileSync(file, JSON.stringify(value));
+    writeFileSync(file, JSON.stringify({ ...value, contender }));
   };
+  if (name === "git") {
+    event({ name, args });
+    if (args[0] !== "-C" || args[1] !== join(root, "source")) throw new Error("sandbox Git only");
+    const [operation, ...values] = args.slice(2);
+    const commits = [fixture.target, fixture.contenderTarget,
+      "1cf5388202c01ce6ddaf2796cbefc10c47e0e4bf", "e91bb512a2783918fd0c8b84c9e91660df348d96"];
+    if (operation === "rev-parse" && values.length === 1) {
+      const revision = values[0].replace(/\^\{commit\}$/, "");
+      if (!commits.includes(revision)) return 128;
+      process.stdout.write((fixture.sourceMismatch ? "0".repeat(40) : revision) + "\n");
+      return 0;
+    }
+    if (operation === "merge-base" && values[0] === "--is-ancestor"
+      && commits.includes(values[1]) && commits.includes(values[2])) return 0;
+    if (operation === "diff" && values[0] === "--exit-code"
+      && commits.includes(values[1]) && commits.includes(values[2])) return fixture.sqlDelta ? 1 : 0;
+    if (operation === "show" && commits.includes(values[0].split(":")[0])
+      && values[0].endsWith(":apps/web/app/page.tsx")) {
+      process.stdout.write(readFileSync(join(root, "source/apps/web/app/page.tsx")));
+      return 0;
+    }
+    if (operation === "archive" && commits.includes(values[0])) {
+      const child = spawn("tar", ["-cf", "-", "-C", join(root, "source"), "."], { stdio: ["ignore", "inherit", "inherit"] });
+      return new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+    }
+    throw new Error("unexpected fixture Git operation");
+  }
   if (name === "pnpm") return 0;
   if (name === "systemctl") {
     const selected = args.filter(arg => arg.startsWith("core5-")).map(arg => arg.replace(/\.service$/, ""));
@@ -71,8 +122,9 @@ async function main() {
     }
     if (args.includes("daemon-reload")) {
       state.reloads++;
+      if (!contender) state.primaryReloads = (state.primaryReloads ?? 0) + 1;
       saveState(root, state);
-      return fixture.failReload && state.reloads === 1 ? 23 : 0;
+      return fixture.failReload && !contender && state.primaryReloads === 1 ? 23 : 0;
     }
     if (args.includes("restart")) {
       state.generation++;
@@ -138,6 +190,15 @@ async function main() {
   }
   if (name === "docker") {
     if (args.includes("pg_dump")) {
+      if (fixture.contend && !contender) {
+        await new Promise(resolve => {
+          const release = join(root, "dump-release");
+          const subscription = watch(root, (_, file) => {
+            if (file === "dump-release" && existsSync(release)) { subscription.close(); resolve(); }
+          });
+          writeFileSync(join(root, "dump-held"), "held");
+        });
+      }
       const chunk = Buffer.alloc(64 * 1024, 0x61);
       let remaining = fixture.dumpBytes;
       while (remaining > 0) {
