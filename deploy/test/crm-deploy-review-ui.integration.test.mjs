@@ -68,6 +68,7 @@ describe("PR65 deployment runtime regressions", () => {
       expect(result.state.units["core5-web"].environment.CRM_WEB_ORIGIN).toBe("https://web.invalid");
       expect(result.state.units["core5-review-ui"].environment.CRM_WEB_ORIGIN).toBe("https://review.invalid");
       expect(result.state.units["core5-review-ui"].environment.CRM_REVIEW_UI).toBe("1");
+      expect(result.configuration("core5-review-ui").exec.includes(join(result.release, "apps/web/node_modules/next/dist/bin/next"))).toBe(true);
       expect(statSync(result.configuration("core5-review-ui").envFiles.at(-1)).mode & 0o777).toBe(0o600);
       const overlay = result.configuration("core5-api").envFiles.at(-1);
       expect(overlay).not.toBe(result.humanEnv);
@@ -168,6 +169,80 @@ describe("PR65 deployment runtime regressions", () => {
       expect(result.usage.maxRSS).toBeLessThan(192 * 1024);
     });
   }, 30_000);
+
+  it("rejects a later legacy review ExecStart despite correct cwd and environment", async () => {
+    await withDeployment({ lateExec: true }, result => {
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).not.toContain("CRM_REVIEW_UI_LIVE");
+      expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+      restored(result);
+    });
+  });
+
+  it("kills a TERM-ignoring process group before completing rollback", async () => {
+    await withDeployment({ signal: "SIGHUP", signalAt: "restart", stubborn: true, deadlineMs: 15_000 }, result => {
+      expect(result.code).toBe(129);
+      expect(result.signal).toBeNull();
+      expect(exists(join(result.root, "parent-ignored-term"))).toBe(true);
+      expect(exists(join(result.root, "descendant-ignored-term"))).toBe(true);
+      expect(result.childExits.some(exit => exit.signal === "SIGKILL")).toBe(true);
+      expect(result.liveOwnedProcesses).toBe(0);
+      expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+      restored(result);
+    });
+  }, 25_000);
+
+  it.each(["/health", "/ready"])("retains recovery artifacts when rollback %s is 503", async rollbackHttpFailure => {
+    await withDeployment({ failReload: true, rollbackHttpFailure }, result => {
+      expect(result.stderr).toContain("CRM_ROLLBACK_FAILED");
+      expect(result.stderr).not.toContain("CRM_ROLLBACK_OK");
+      expect(exists(result.release)).toBe(true);
+      expect(exists(join(result.root, "state/backups"))).toBe(true);
+      restored(result);
+    });
+  });
+
+  for (const mismatch of ["lateCwdUnit", "staleCwdUnit"]) {
+    it.each(["core5-api", "core5-web", "core5-review-ui"])(`rejects ${mismatch} for %s despite healthy environment`, async unit => {
+      await withDeployment({ [mismatch]: unit }, result => {
+        expect(result.code).not.toBe(0);
+        expect(result.stdout).not.toContain("CRM_REVIEW_UI_LIVE");
+        expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+        restored(result);
+      });
+    });
+  }
+
+  it("retains recovery artifacts if the rollback process remains in the new directory", async () => {
+    await withDeployment({ failReload: true, rollbackCwdUnit: "core5-api" }, result => {
+      expect(result.stderr).toContain("CRM_ROLLBACK_FAILED");
+      expect(result.stderr).not.toContain("CRM_ROLLBACK_OK");
+      expect(exists(result.release)).toBe(true);
+      restored(result);
+    });
+  });
+
+  it("backs up before target execution and withholds build database credentials", async () => {
+    await withDeployment({ mutateDb: true }, result => {
+      expect(result.code, result.stderr).toBe(0);
+      const target = result.events.filter(event => event.name === "pnpm");
+      expect(target.length).toBe(3);
+      expect(target.every(event => event.backupValidated)).toBe(true);
+      expect(target.filter(event => event.build).every(event => event.exposed.length === 0)).toBe(true);
+      expect(readJson(join(result.root, "dump-snapshot.json")).dbVersion).toBe(0);
+      expect(result.state.dbVersion).toBe(0);
+    });
+  });
+
+  it.each(["dotdot", "symlink", "hardlink"])("rejects %s aliases of the preserved auth state", async authAlias => {
+    await withDeployment({ authAlias }, result => {
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain("legacy_auth_state_must_be_preserved");
+      expect(result.events).toHaveLength(0);
+      expect(readText(result.oldAuth)).toBe(result.oldBefore);
+      restored(result);
+    });
+  });
 
   it.each([{ dumpBytes: 0 }, { badCatalog: true }])("refuses an unusable dump before unit changes: %j", async options => {
     await withDeployment(options, result => {

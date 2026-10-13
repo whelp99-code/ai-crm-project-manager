@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, watch, writeFileSync, writeSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, watch, writeFileSync, writeSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
@@ -76,6 +76,12 @@ async function main() {
     const file = join(root, `event-${process.pid}.json`);
     writeFileSync(file, JSON.stringify({ ...value, contender }));
   };
+  if (name === "stubborn-descendant") {
+    process.on("SIGTERM", () => writeFileSync(join(root, "descendant-ignored-term"), "ignored"));
+    watch(root, () => {});
+    process.stdout.write("READY\n");
+    return new Promise(() => {});
+  }
   if (name === "git") {
     event({ name, args });
     if (args[0] !== "-C" || args[1] !== join(root, "source")) throw new Error("sandbox Git only");
@@ -103,7 +109,18 @@ async function main() {
     }
     throw new Error("unexpected fixture Git operation");
   }
-  if (name === "pnpm") return 0;
+  if (name === "pnpm") {
+    const build = args[0] === "install" || args.includes("build");
+    const exposed = Object.keys(process.env).filter(key => /DATABASE|PGHOST|PGPASSWORD|API_KEY|SECRET|TOKEN|AUTH_STATE/.test(key));
+    event({ name, args, build, exposed, backupValidated: existsSync(join(root, "catalog.json")) });
+    if (fixture.mutateDb && build && exposed.length) {
+      state.dbVersion++;
+      saveState(root, state);
+    }
+    mkdirSync(join(process.cwd(), "apps/web/node_modules/next/dist/bin"), { recursive: true });
+    writeFileSync(join(process.cwd(), "apps/web/node_modules/next/dist/bin/next"), "// fixture Next entry\n");
+    return 0;
+  }
   if (name === "systemctl") {
     const selected = args.filter(arg => arg.startsWith("core5-")).map(arg => arg.replace(/\.service$/, ""));
     event({ name, args });
@@ -111,7 +128,10 @@ async function main() {
       const unit = selected[0];
       const config = configuration(root, unit);
       if (args.includes("--property=WorkingDirectory")) process.stdout.write(config.cwd + "\n");
-      else if (args.includes("--property=ExecStart")) process.stdout.write(config.exec + "\n");
+      else if (args.includes("--property=ExecStart")) {
+        const words = environmentWords(config.exec);
+        process.stdout.write(`{ path=${words[0]} ; argv[]=${words.join(" ")} ; ignore_errors=no ; start_time=generation-${state.generation} ; pid=${state.units[unit].pid} }\n`);
+      }
       else if (args.includes("--property=MainPID")) process.stdout.write(String(state.units[unit].pid) + "\n");
       else throw new Error("unexpected show property");
       return 0;
@@ -146,6 +166,9 @@ async function main() {
           mkdirSync(join(root, "proc", String(pid)), { recursive: true });
           writeFileSync(join(root, "proc", String(pid), "environ"),
             Object.entries(environment).map(([key, value]) => `${key}=${value}`).join("\0") + "\0");
+          const stale = deployed ? fixture.staleCwdUnit === unit : fixture.rollbackCwdUnit === unit;
+          const processCwd = stale ? (deployed ? fixture.originalCwds[unit] : join(fixture.release, "apps", unit === "core5-api" ? "api" : "web")) : config.cwd;
+          symlinkSync(processCwd, join(root, "proc", String(pid), "cwd"));
         }
       }
       saveState(root, state);
@@ -153,11 +176,21 @@ async function main() {
       if (fixture.signalAt === "restart" && deployed && !existsSync(join(root, "signal-sent"))) {
         writeFileSync(join(root, "signal-sent"), fixture.signal);
         const keepAlive = watch(root, () => {});
-        process.once("SIGTERM", () => {
-          writeFileSync(join(root, "interrupted-child-closed"), "closed");
-          keepAlive.close();
-          process.exit(0);
-        });
+        if (fixture.stubborn) {
+          process.on("SIGTERM", () => writeFileSync(join(root, "parent-ignored-term"), "ignored"));
+          const descendant = spawn(process.execPath, [fileURLToPath(import.meta.url), "stubborn-descendant"],
+            { stdio: ["ignore", "pipe", "pipe"] });
+          await new Promise((resolve, reject) => {
+            descendant.once("error", reject);
+            descendant.stdout.once("data", () => resolve());
+          });
+        } else {
+          process.once("SIGTERM", () => {
+            writeFileSync(join(root, "interrupted-child-closed"), "closed");
+            keepAlive.close();
+            process.exit(0);
+          });
+        }
         process.kill(process.ppid, fixture.signal);
         return new Promise(() => {});
       }
@@ -199,6 +232,7 @@ async function main() {
           writeFileSync(join(root, "dump-held"), "held");
         });
       }
+      writeFileSync(join(root, "dump-snapshot.json"), JSON.stringify({ dbVersion: state.dbVersion }));
       const chunk = Buffer.alloc(64 * 1024, 0x61);
       let remaining = fixture.dumpBytes;
       while (remaining > 0) {
@@ -219,6 +253,12 @@ async function main() {
   }
   if (name === "curl") {
     const url = args.at(-1);
+    const rollback = state.generation > 0 && !configuration(root, "core5-api").cwd.includes(fixture.release);
+    event({ name, args, rollback });
+    if (rollback && fixture.rollbackHttpFailure && url.endsWith(fixture.rollbackHttpFailure)) {
+      process.stdout.write('{"error":"not_ready"}\n503');
+      return 0;
+    }
     if (url.endsWith("/api/self-entry")) {
       const foreign = args.includes("Origin: https://crm-origin-rejected.invalid");
       process.stdout.write(foreign ? '{"error":"ORIGIN_DENIED"}\n403' : '{"error":"INPUT_INVALID"}\n400');

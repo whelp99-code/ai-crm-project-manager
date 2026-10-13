@@ -46,7 +46,7 @@ export CRM_SCRIPT_REPO_DEFAULT=$(cd -- "$script_dir/.." && pwd)
 exec "$NODE" --input-type=module - <<'NODE'
 import { spawn } from "node:child_process";
 import { constants, createReadStream } from "node:fs";
-import { access, chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { parseEnv } from "node:util";
@@ -66,6 +66,8 @@ const humanEnv = process.env.CRM_HUMAN_ENV || join(home, ".config/core5/crm/blro
 const procRoot = process.env.CRM_PROC_ROOT || "/proc";
 const legacyReview = process.env.CRM_LEGACY_REVIEW_ROOT || join(home, "orca/projects/shipping-harness/ci/core5");
 const release = join(root, `app-${target.slice(0, 8)}`);
+const reviewEntry = join(release, "apps/web/node_modules/next/dist/bin/next");
+const reviewCommand = [node, reviewEntry, "start", "-H", "127.0.0.1", "-p", "4174"];
 const oldRelease = join(root, "app-e91bb512");
 const apiDropin = join(units, "core5-api.service.d/90-crm-release.conf");
 const webDropin = join(units, "core5-web.service.d/90-crm-release.conf");
@@ -79,24 +81,33 @@ const snapshots = [
 ];
 const foreignOrigin = "https://crm-origin-rejected.invalid";
 let changed = false, createdRelease = false, published = false, rollbackFailed = false;
-let backupDir, scratch, startupTimer, migrateHash, stage = "prerequisites";
+let backupDir, scratch, startupTimer, migrateHash, previousReviewExecution, stage = "prerequisites";
 const watchers = [];
 const previousEnvironment = new Map();
 let interruptedSignal, rollingBack = false;
 const children = new Map();
+const terminationTimers = new Map();
 
 function startChild(executable, args, options) {
   const child = spawn(executable, args, { ...options, detached: true });
   const closed = new Promise(resolve => child.once("close", resolve));
   children.set(child, closed);
-  void closed.then(() => children.delete(child));
+  void closed.then(() => {
+    clearTimeout(terminationTimers.get(child));
+    terminationTimers.delete(child);
+    children.delete(child);
+  });
   return child;
 }
 
 function terminate(child) {
-  if (!child.pid) return;
+  if (!child.pid || terminationTimers.has(child)) return;
   try { process.kill(-child.pid, "SIGTERM"); }
   catch (error) { if (error.code !== "ESRCH") throw error; }
+  terminationTimers.set(child, setTimeout(() => {
+    try { process.kill(-child.pid, "SIGKILL"); }
+    catch (error) { if (error.code !== "ESRCH") throw error; }
+  }, 5_000));
 }
 
 function interrupt(signal) {
@@ -220,6 +231,35 @@ async function verifyEnvironment(unit, expected) {
   }
 }
 
+async function verifyWorkingDirectory(unit, expected) {
+  const configured = (await command("runtime_working_directory", "systemctl",
+    ["--user", "show", unit, "--property=WorkingDirectory", "--value"])).toString().trim();
+  const pid = (await command("runtime_pid", "systemctl",
+    ["--user", "show", unit, "--property=MainPID", "--value"])).toString().trim();
+  if (!/^[1-9]\d*$/.test(pid)) throw new Error("runtime_process_unavailable");
+  if (configured !== expected || await realpath(join(procRoot, pid, "cwd")) !== await realpath(expected)) {
+    throw new Error("runtime_working_directory_mismatch");
+  }
+}
+
+async function requireApiReady() {
+  for (const endpoint of ["http://127.0.0.1:4312/health", "http://127.0.0.1:4312/ready"]) {
+    if ((await httpResult(endpoint)).status !== "200") throw new Error("health_not_200");
+  }
+}
+
+function executionSpec(value) {
+  const match = /^\{ path=(.*?) ; argv\[\]=(.*?) ; ignore_errors=/.exec(value.trim());
+  if (!match) throw new Error("runtime_execution_mismatch");
+  return `${match[1]}\n${match[2]}`;
+}
+
+async function verifyReviewExecution(expected) {
+  const actual = (await command("runtime_review_exec", "systemctl",
+    ["--user", "show", "core5-review-ui", "--property=ExecStart", "--value"])).toString();
+  if (executionSpec(actual) !== expected) throw new Error("runtime_execution_mismatch");
+}
+
 async function rollback() {
   if (!changed) return;
   stage = "rollback";
@@ -228,6 +268,11 @@ async function rollback() {
   await command("rollback_restart", "systemctl", ["--user", "restart", "core5-api", "core5-web", "core5-review-ui"]);
   await requireActive("rollback_active");
   for (const [unit, expected] of previousEnvironment) await verifyEnvironment(unit, expected);
+  for (const [index, unit] of services.entries()) {
+    await verifyWorkingDirectory(unit, index === 2 ? legacyReview : join(oldRelease, index ? "apps/web" : "apps/api"));
+  }
+  await verifyReviewExecution(previousReviewExecution);
+  await requireApiReady();
   changed = false;
   process.stderr.write("CRM_ROLLBACK_OK release=app-e91bb512\n");
 }
@@ -294,7 +339,11 @@ async function main() {
     CWOS_V2_OPERATOR_AUTH_STATE_PATH: authPath,
   };
   const oldAuthPath = parseEnv(await privateText(humanEnv)).CWOS_V2_OPERATOR_AUTH_STATE_PATH;
-  if (authPath === oldAuthPath) throw new Error("legacy_auth_state_must_be_preserved");
+  const resolvedAuth = await realpath(authPath), resolvedOldAuth = await realpath(oldAuthPath);
+  const authStat = await lstat(resolvedAuth), oldAuthStat = await lstat(resolvedOldAuth);
+  if (resolvedAuth === resolvedOldAuth || (authStat.dev === oldAuthStat.dev && authStat.ino === oldAuthStat.ino)) {
+    throw new Error("legacy_auth_state_must_be_preserved");
+  }
   delete binding.CWOS_V2_OPERATOR_STEP_UP_VERIFIED;
   binding.OPERATOR_PRINCIPAL_ID = binding.CWOS_V2_OPERATOR_PRINCIPAL_ID;
   const runtimeValues = [
@@ -340,6 +389,7 @@ async function main() {
   const reviewExec = (await command("review_exec", "systemctl", ["--user", "show", "core5-review-ui",
     "--property=ExecStart", "--value"])).toString();
   if (reviewWd !== legacyReview || !reviewExec.includes("review-server.mjs")) throw new Error("review_baseline_changed");
+  previousReviewExecution = executionSpec(reviewExec);
   try {
     const migrate = await readFile(reviewMigrate);
     migrateHash = createHash("sha256").update(migrate).digest("hex");
@@ -367,14 +417,6 @@ async function main() {
   await mkdir(release, { mode: 0o700 });
   createdRelease = true;
   await command("extract", "tar", ["-xf", tar, "-C", release]);
-  const environment = { ...process.env, ...binding, PATH: `${dirname(node)}:${process.env.PATH}` };
-  await command("frozen_dependencies", pnpm, ["install", "--frozen-lockfile", "--prod=false"], { cwd: release, env: environment });
-  await command("target_auth_check", pnpm, ["exec", "tsx", "--eval",
-    'import {parseOperatingConfig} from "./apps/api/src/ops-boot.ts"; import {FileOperatorAuthStore} from "./apps/api/src/operator-auth-store.ts"; import {selfEntryConfiguration} from "./apps/web/app/self-entry-server.ts"; const c=parseOperatingConfig(); new FileOperatorAuthStore(c.authStatePath!).read(); if(!selfEntryConfiguration().ready) throw new Error("CONFIGURATION_REQUIRED");'],
-    { cwd: release, env: environment });
-  const buildArgs = ["--filter", "@ai-crm/web", "build"];
-  await command("web_build", slot ? "bash" : pnpm, slot ? [slot, pnpm, ...buildArgs] : buildArgs, { cwd: release, env: environment });
-
   backupDir = await mkdtemp(join(root, "backups", `pre-${target.slice(0, 8)}-`));
   await chmod(backupDir, 0o700);
   const database = new URL(binding.ADMIN_DATABASE_URL);
@@ -404,6 +446,17 @@ async function main() {
     process.stdout.write(`CRM_BACKUP_OK bytes=${size} sha256=${hash.digest("hex")}\n`);
   } finally { await input.close(); }
   process.stdout.write("CRM_MIGRATIONS_REQUIRED=0\n");
+  const buildEnvironment = { HOME: join(scratch, "build-home"), PATH: `${dirname(node)}:${process.env.PATH}`,
+    NODE_ENV: "production", CI: "1", NEXT_PUBLIC_API_BASE_URL: "" };
+  await mkdir(buildEnvironment.HOME, { mode: 0o700 });
+  await command("frozen_dependencies", pnpm, ["install", "--frozen-lockfile", "--prod=false"], { cwd: release, env: buildEnvironment });
+  // Privileged target validation runs only after the verified pre-target backup.
+  await command("target_auth_check", pnpm, ["exec", "tsx", "--eval",
+    'import {parseOperatingConfig} from "./apps/api/src/ops-boot.ts"; import {FileOperatorAuthStore} from "./apps/api/src/operator-auth-store.ts"; import {selfEntryConfiguration} from "./apps/web/app/self-entry-server.ts"; const c=parseOperatingConfig(); new FileOperatorAuthStore(c.authStatePath!).read(); if(!selfEntryConfiguration().ready) throw new Error("CONFIGURATION_REQUIRED");'],
+    { cwd: release, env: { ...process.env, ...binding, PATH: buildEnvironment.PATH } });
+  const buildArgs = ["--filter", "@ai-crm/web", "build"];
+  await command("web_build", slot ? "bash" : pnpm, slot ? [slot, pnpm, ...buildArgs] : buildArgs, { cwd: release, env: buildEnvironment });
+  await access(reviewEntry, constants.R_OK);
   for (const item of snapshots) {
     try {
       const stat = await lstat(item.path);
@@ -435,7 +488,7 @@ async function main() {
     `EnvironmentFile=${JSON.stringify(runtimeFiles[2])}`,
     `WorkingDirectory=${JSON.stringify(join(release, "apps/web"))}`,
     "ExecStart=",
-    `ExecStart=${node} ${pnpm} exec next start -H 127.0.0.1 -p 4174`,
+    `ExecStart=${reviewCommand.map(value => JSON.stringify(value)).join(" ")}`,
     "",
   ];
   await mkdir(dirname(reviewDropin), { recursive: true, mode: 0o755 });
@@ -470,9 +523,7 @@ async function main() {
       command("restart", "systemctl", ["--user", "restart", "core5-api", "core5-web", "core5-review-ui"]))]);
   clearTimeout(startupTimer);
   await stopWatchers();
-  for (const endpoint of ["http://127.0.0.1:4312/health", "http://127.0.0.1:4312/ready"]) {
-    if ((await httpResult(endpoint)).status !== "200") throw new Error("health_not_200");
-  }
+  await requireApiReady();
   for (const [port, allowed] of [[4313, origin], [4174, reviewOrigin]]) {
     if ((await httpResult(`http://127.0.0.1:${port}/login`)).status !== "200") throw new Error("health_not_200");
     const invalid = await httpResult(`http://127.0.0.1:${port}/api/self-entry`, ["-H", `Origin: ${allowed}`,
@@ -489,6 +540,10 @@ async function main() {
   if (candidate.status !== "401") throw new Error("candidate_api_not_401");
   await requireActive("active");
   for (const [index, unit] of services.entries()) await verifyEnvironment(unit, runtimeValues[index]);
+  for (const [index, unit] of services.entries()) {
+    await verifyWorkingDirectory(unit, join(release, index ? "apps/web" : "apps/api"));
+  }
+  await verifyReviewExecution(`${node}\n${reviewCommand.join(" ")}`);
   checkInterrupted();
   changed = false;
   published = true;
@@ -499,7 +554,7 @@ try {
   await main();
 } catch (error) {
   const failedStage = stage;
-  const safeReason = /^(operator_approval_required|production_https_origins_required|owner_enrollment_required|new_bcrypt_enrollment_required|legacy_auth_state_must_be_preserved|environment_value_rejected|source_pin_mismatch|target_sha_required|target_marker_missing|target_not_descendant|sql_delta_refused|baseline_changed|dropin_changed|review_baseline_changed|review_config_missing|immutable_release_exists|private_file_required|database_profile_invalid|empty_dump|startup_timeout|startup_watch_ended|health_not_200|web_origin_not_ready|origin_rejection_failed|candidate_api_not_401|runtime_process_unavailable|runtime_environment_mismatch|path_whitespace_rejected|node22_required|[a-z0-9_]+_exit_(\d+|null))$/;
+  const safeReason = /^(operator_approval_required|production_https_origins_required|owner_enrollment_required|new_bcrypt_enrollment_required|legacy_auth_state_must_be_preserved|environment_value_rejected|source_pin_mismatch|target_sha_required|target_marker_missing|target_not_descendant|sql_delta_refused|baseline_changed|dropin_changed|review_baseline_changed|review_config_missing|immutable_release_exists|private_file_required|database_profile_invalid|empty_dump|startup_timeout|startup_watch_ended|health_not_200|web_origin_not_ready|origin_rejection_failed|candidate_api_not_401|runtime_process_unavailable|runtime_environment_mismatch|runtime_working_directory_mismatch|runtime_execution_mismatch|path_whitespace_rejected|node22_required|[a-z0-9_]+_exit_(\d+|null))$/;
   const reason = interruptedSignal ? `interrupted_${interruptedSignal}`
     : typeof error?.message === "string" && safeReason.test(error.message) ? error.message : "private_input_or_io_rejected";
   rollingBack = true;

@@ -138,8 +138,9 @@ bash deploy/crm-deploy-review-ui.sh --help
 CRM_DEPLOY_APPROVAL=approved bash deploy/crm-deploy-review-ui.sh
 ```
 
-스크립트는 고정 archive 한 개, frozen install/build 한 번, private
-custom-format DB dump의 streaming hash/catalog 확인 후에 세 override의 내용·권한·존재
+스크립트는 고정 archive를 준비하고, 타깃 실행 전에 private custom-format
+DB dump의 streaming hash/catalog를 확인한다. 그 뒤 frozen install/build를
+운영 비밀 없는 환경에서 수행하고 세 override의 내용·권한·존재
 여부를 snapshot한다. 모든 snapshot이 완료된 뒤에만 롤백을 활성화하고
 전환한다. 각 서비스의 startup event를 별도로 구독하며 web의 Ready 하나를
 review-ui 기동으로 간주하지 않는다. health, 두 로그인 origin, 무인증
@@ -150,6 +151,9 @@ review-ui 기동으로 간주하지 않는다. health, 두 로그인 origin, 무
 MainPID의 실효 환경값을 비교한 뒤에만 내린다. API 인증 경로와 web/review
 origin을 사전 Node 환경만으로 확인하지 않는다. `/proc/<MainPID>/environ`의
 필요 키만 비교하며 비밀이나 환경 본문은 출력하지 않는다.
+설정된 WorkingDirectory와 실제 MainPID cwd도 새 릴리스여야 한다.
+review는 릴리스 내부 Next 실행 파일을 직접 사용하고 실효 ExecStart의
+executable/argv가 정확히 일치해야 완료된다.
 
 ### 롤백
 
@@ -159,10 +163,16 @@ origin을 사전 Node 환경만으로 확인하지 않는다. `/proc/<MainPID>/e
 전환 전의 실효 환경값도 복구됐는지 확인한다. 하나만 살아 있는 상태를
 `CRM_ROLLBACK_OK`로 처리하거나 새 release를 지우지 않는다. SQL 변경을
 허용하지 않으므로 DB를 자동 restore하지 않는다.
+복구도 예상 WorkingDirectory/MainPID cwd, 원래 review executable/argv,
+API `/health`·`/ready`를 통과해야 완료다. PID·start_time 같은 가변 필드는
+실행 명령 비교에서 제외한다. 503 또는 경로 불일치는 복구 실패이며
+새 release와 backup을 보존한다.
 
 SIGHUP/SIGINT/SIGTERM은 진행 중인 소유 process group을 종료하고 close를 기다린
 뒤 직렬로 롤백한다. 복구 중 반복 신호는 복구를 끊지 않으며 완료 후
 exit129/130/143으로 끝난다. 원래 없던 review92는 중단 복구에서도 제거된다.
+TERM 뒤 5초에도 끝나지 않는 소유 그룹에는 SIGKILL을 보내고 close를
+확인한다. 반복 요청은 이 시한을 늘리지 않는다.
 
 backup 디렉터리에는 `api90`, `web90`, 선택적 `review92`와 각각의 `.meta`,
 DB dump가 있다. `.meta`가 `absent`이면 원래 파일이 없었고, 나머지는
@@ -300,3 +310,33 @@ Git은 sandbox 경계로 모델링하고 실제 tar/script/file I/O/OS 신호/fl
 통과했다. shell/내장 Node 문법·shell/JS 진단과 승인/인수/생산 Node 20 거부
 검사도 통과했다. YAML LSP 미설치는 남아 있으며 PyYAML 구문·구조 검사로
 확인했다. UI·로그인·CSRF·운영 서비스는 이 작업에서 실행하거나 바꾸지 않았다.
+
+## 세 번째 Cursor REJECT 수정
+
+Node 20/22 시험기에서 각각 **42/42** 통과했다. 수정 전에는 16건이
+실패했다. 기존 회귀는 유지하며 다음 실제 경계를 추가했다.
+
+| 경계 | 근거 |
+| --- | --- |
+| TERM 무시 그룹 | 실제 부모/후손이 TERM 무시, 실제 SIGKILL 종료 이벤트, HUP exit129·복원·생존 자식 0 |
+| 복구 준비 상태 | health/ready 각각 503이면 OK 금지 및 복구 자료 보존 |
+| 실효 경로 | 세 서비스의 늦은 override와 stale process cwd 거부; 복구 cwd 불일치도 실패 |
+| 타깃 실행 경계 | 검증된 dump가 모든 pnpm 호출보다 앞섬; install/build의 운영 비밀 노출 0, 합성 DB 버전 보존 |
+| 인증 파일 | realpath 및 dev/inode 비교; `..`/부모 symlink/hardlink alias 모두 거부 |
+| review 실행 | 릴리스 내부 `node_modules/next/dist/bin/next` 직접 실행; 늦은 legacy ExecStart는 LIVE 거부 |
+
+privileged auth validator도 백업 이후에만 실행한다. install/build의
+환경은 격리 HOME과 PATH/NODE_ENV/CI/NEXT_PUBLIC_API_BASE_URL뿐이다.
+새 auth 파일은 문자열이 달라도 같은 실제 파일이면 사용할 수 없다.
+
+독립 CLI:
+`~/.nvm/versions/node/v22.23.2/bin/node ~/.local/state/omonyang/TASK-CRM-63-FIX3-20261013/manual-qa.mjs review`.
+7개 시나리오가 통과했고 각 실행의 생존 자식 수는 0이었다.
+
+추가 실제 표면 검증: 깨끗한 격리 소스와 운영 변수 없는 `env -i`에서
+Next build 성공(static pages 16/16, exit0). 그 산출물의 절대 Next 엔트리로
+임시 포트33625를 기동해 `/login` HTTP200을 확인하고 서버를 종료했다.
+본문은 `~/.local/state/omonyang/TASK-CRM-63-FIX3-20261013/isolated-login.html`
+에 보존했다. 이 생성 HTML의 Next inline-script 스타일 진단은 원문을
+바꾸지 않고 남겼다. 저장소 shell/JS 진단·문법은 통과했다.
+운영 전환, 실제 DB backup, 대표 인증 또는 후보 변경은 실행하지 않았다.
