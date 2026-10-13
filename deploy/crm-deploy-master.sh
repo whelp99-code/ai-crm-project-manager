@@ -177,8 +177,9 @@ async function verifyWorkingDirectory(unit, expected) {
   }
 }
 
-async function requireApiReady() {
-  for (const endpoint of ["http://127.0.0.1:4312/health", "http://127.0.0.1:4312/ready"]) {
+async function requireHttpReady() {
+  for (const endpoint of ["http://127.0.0.1:4312/health", "http://127.0.0.1:4312/ready",
+    "http://127.0.0.1:4313/login"]) {
     const output = (await command("health", "curl", ["--silent", "--show-error", "--max-time", "10",
       "--retry", "120", "--retry-connrefused", "--retry-delay", "1", "--retry-max-time", "120",
       "--write-out", "\n%{http_code}", endpoint])).toString();
@@ -187,7 +188,13 @@ async function requireApiReady() {
 }
 
 async function verifyRuntime(environments, directories) {
-  await requireApiReady();
+  await requireHttpReady();
+  const boundary = (await command("origin_probe", "curl", ["--silent", "--show-error", "--max-time", "10",
+    "--write-out", "\n%{http_code}", "-H", `Origin: ${environments[1].CRM_WEB_ORIGIN}`,
+    "-H", "Content-Type: application/json", "--data", "{}", "http://127.0.0.1:4313/api/self-entry"])).toString();
+  if (!boundary.endsWith("\n400") || JSON.parse(boundary.slice(0, -4)).error !== "INPUT_INVALID") {
+    throw new Error("web_origin_not_ready");
+  }
   await requireActive("active");
   for (const [index, unit] of services.entries()) {
     await verifyEnvironment(unit, environments[index]);
@@ -358,17 +365,6 @@ async function main() {
     command("restart", "systemctl", ["--user", "restart", "core5-api", "core5-web"]))]);
   clearTimeout(startupTimer);
   await stopWatcher();
-  for (const endpoint of ["http://127.0.0.1:4313/login"]) {
-    const output = (await command("health", "curl", ["--silent", "--show-error", "--max-time", "10",
-      "--write-out", "\n%{http_code}", endpoint])).toString();
-    if (!output.endsWith("\n200")) throw new Error("health_not_200");
-  }
-  const boundary = (await command("origin_probe", "curl", ["--silent", "--show-error", "--max-time", "10",
-    "--write-out", "\n%{http_code}", "-H", `Origin: ${origin}`, "-H", "Content-Type: application/json",
-    "--data", "{}", "http://127.0.0.1:4313/api/self-entry"])).toString();
-  if (!boundary.endsWith("\n400") || JSON.parse(boundary.slice(0, -4)).error !== "INPUT_INVALID") {
-    throw new Error("web_origin_not_ready");
-  }
   await verifyRuntime(runtimeValues,
     services.map((_, index) => join(release, index ? "apps/web" : "apps/api")));
   checkInterrupted();

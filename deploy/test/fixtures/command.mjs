@@ -261,7 +261,12 @@ async function main() {
     const url = args.at(-1);
     const rollback = state.generation > 0 && !configuration(root, "core5-api").cwd.includes(fixture.release);
     event({ name, args, rollback });
-    if (rollback && fixture.coldRollback && url.startsWith("http://127.0.0.1:4312/")
+    if (rollback && fixture.rollbackUnavailableUrl === url) {
+      process.stdout.write("\n000");
+      return 7;
+    }
+    if (rollback && (fixture.coldRollback && url.startsWith("http://127.0.0.1:4312/")
+      || fixture.coldRollbackUrls?.includes(url))
       && !url.endsWith(fixture.rollbackHttpFailure ?? "\0")) {
       const requests = [];
       const server = createServer((request, response) => {
@@ -306,8 +311,13 @@ async function main() {
         if (server.listening) await new Promise(resolve => server.close(resolve));
       }
     }
-    if (rollback && fixture.rollbackHttpFailure && url.endsWith(fixture.rollbackHttpFailure)) {
+    const httpFailure = rollback ? fixture.rollbackHttpFailure : fixture.deployHttpFailure;
+    if (httpFailure && url.endsWith(httpFailure)) {
       process.stdout.write('{"error":"not_ready"}\n503');
+      return 0;
+    }
+    if (rollback && fixture.rollbackBoundaryFailure === url) {
+      process.stdout.write("{}\n200");
       return 0;
     }
     if (url.endsWith("/api/self-entry")) {

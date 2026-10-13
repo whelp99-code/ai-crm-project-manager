@@ -13,6 +13,42 @@ function restored(result) {
 }
 
 describe("PR63 deployment runtime regressions", () => {
+  it("waits for the restored web login port before accepting rollback", async () => {
+    await withDeployment({ failReload: true, coldRollbackUrls: ["http://127.0.0.1:4313/login"] }, result => {
+      expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+      const response = result.events.find(event => event.realHttp);
+      expect(response?.realHttp.refused).toBe(true);
+      expect(response?.realHttp.output).toBe("{}\n200");
+      expect(response?.realHttp.requests).toEqual(["/login"]);
+      expect(exists(result.release)).toBe(false);
+      restored(result);
+    });
+  }, 20_000);
+
+  it.each([
+    { rollbackHttpFailure: "http://127.0.0.1:4313/login" },
+    { rollbackUnavailableUrl: "http://127.0.0.1:4313/login" },
+    { rollbackBoundaryFailure: "http://127.0.0.1:4313/api/self-entry" },
+  ])("preserves artifacts when the restored web surface fails: %j", async options => {
+    await withDeployment({ failReload: true, ...options }, result => {
+      expect(result.stderr).toContain("ROLLBACK_INCOMPLETE");
+      expect(result.stderr).not.toContain("CRM_ROLLBACK_OK");
+      expect(exists(result.release)).toBe(true);
+      restored(result);
+    });
+  });
+
+  it("rejects forward web failure and checks the restored web surface", async () => {
+    await withDeployment({ deployHttpFailure: "http://127.0.0.1:4313/login" }, result => {
+      expect(result.code).toBe(1);
+      expect(result.stdout).not.toContain("CRM_1CF5_LIVE");
+      expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+      expect(result.events.some(event => event.rollback
+        && event.args.at(-1) === "http://127.0.0.1:4313/login")).toBe(true);
+      restored(result);
+    });
+  });
+
   it.each(["core5-api", "core5-web"])("does not publish when only %s is dead", async deadUnit => {
     await withDeployment({ deadUnit, deadPhase: "deploy" }, result => {
       expect(result.code).not.toBe(0);
