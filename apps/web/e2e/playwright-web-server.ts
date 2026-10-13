@@ -12,7 +12,8 @@ async function main(): Promise<void> {
   if (!Number.isInteger(port) || port < 1 || !directory || !webOrigin) {
     throw new Error("Playwright web server fixture configuration is incomplete");
   }
-  const { app, origin } = await startNativeAuthFixture(directory);
+  const reviewUi = process.env.PLAYWRIGHT_REVIEW_UI === "1";
+  const { app, origin } = await startNativeAuthFixture(directory, { mailCandidates: reviewUi });
   let next: ChildProcess | undefined;
   let stopping = false;
   const shutdown = async () => {
@@ -41,7 +42,8 @@ async function main(): Promise<void> {
       stdio: "inherit",
       env: {
         ...process.env,
-        API_BASE_URL: "",
+        API_BASE_URL: reviewUi ? origin : "",
+        CRM_REVIEW_UI: reviewUi ? "1" : "",
         NEXT_PUBLIC_API_BASE_URL: "",
         NEXT_PUBLIC_WORKSPACE_ID: "",
         OPERATOR_AUTH_API_BASE_URL: origin,

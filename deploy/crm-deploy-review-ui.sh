@@ -1,0 +1,435 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+if [[ ${1:-} == --help ]]; then
+  printf '%s\n' 'Preparation artifact; no activation without separate operator approval.' \
+    'Required: CRM_DEPLOY_APPROVAL=approved CRM_TARGET_SHA=<full40>' \
+    'CRM_WEB_ORIGIN=https://<approved-origin> CRM_REVIEW_WEB_ORIGIN=https://<approved-review-origin>' \
+    'OPERATOR_AUTH_API_BASE_URL=https://<approved-private-identity-origin>' \
+    'CWOS_V2_OPERATOR_AUTH_STATE_PATH=<new owner-enrolled bcrypt state>' \
+    'Optional: CRM_REPO_ROOT CRM_STATE_ROOT CRM_UNIT_ROOT CRM_APP_ENV CRM_HUMAN_ENV' \
+    'CRM_NODE_BIN CRM_PNPM_BIN CRM_BUILD_SLOT CRM_PG_IMAGE CRM_LEGACY_REVIEW_ROOT'
+  exit 0
+fi
+[[ $# == 0 ]] || { printf '%s\n' 'CRM_ARGUMENTS_REJECTED' >&2; exit 64; }
+if [[ ${CRM_DEPLOY_APPROVAL:-} != approved ]]; then
+  printf '%s\n' 'CRM_DEPLOY_REFUSED_OR_FAILED stage=prerequisites reason=operator_approval_required' >&2
+  exit 1
+fi
+if [[ ! ${CRM_TARGET_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then
+  printf '%s\n' 'CRM_DEPLOY_REFUSED_OR_FAILED stage=prerequisites reason=target_sha_required' >&2
+  exit 1
+fi
+NODE=${CRM_NODE_BIN:-$HOME/.nvm/versions/node/v22.23.2/bin/node}
+if [[ ! -x $NODE ]]; then
+  printf '%s\n' 'CRM_DEPLOY_REFUSED_OR_FAILED stage=prerequisites reason=node22_required' >&2
+  exit 1
+fi
+node_version=$("$NODE" -p 'process.versions.node') || {
+  printf '%s\n' 'CRM_DEPLOY_REFUSED_OR_FAILED stage=prerequisites reason=node22_required' >&2
+  exit 1
+}
+[[ $node_version == 22.* ]] || {
+  printf '%s\n' 'CRM_DEPLOY_REFUSED_OR_FAILED stage=prerequisites reason=node22_required' >&2
+  exit 1
+}
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+export CRM_SCRIPT_REPO_DEFAULT=$(cd -- "$script_dir/.." && pwd)
+exec "$NODE" --input-type=module - <<'NODE'
+import { spawn } from "node:child_process";
+import { constants } from "node:fs";
+import { access, chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { join, dirname } from "node:path";
+import { parseEnv } from "node:util";
+
+const target = process.env.CRM_TARGET_SHA;
+const baseline = "e91bb512a2783918fd0c8b84c9e91660df348d96";
+const masterPin = "1cf5388202c01ce6ddaf2796cbefc10c47e0e4bf";
+const home = process.env.HOME;
+const root = process.env.CRM_STATE_ROOT || join(home, ".local/share/core5");
+const repo = process.env.CRM_REPO_ROOT || process.env.CRM_SCRIPT_REPO_DEFAULT;
+const units = process.env.CRM_UNIT_ROOT || join(home, ".config/systemd/user");
+const node = process.env.CRM_NODE_BIN || join(home, ".nvm/versions/node/v22.23.2/bin/node");
+const pnpm = process.env.CRM_PNPM_BIN || join(dirname(node), "pnpm");
+const slot = process.env.CRM_BUILD_SLOT || "";
+const appEnv = process.env.CRM_APP_ENV || join(home, ".config/core5/app.env");
+const humanEnv = process.env.CRM_HUMAN_ENV || join(home, ".config/core5/crm/blro-human.env");
+const legacyReview = process.env.CRM_LEGACY_REVIEW_ROOT || join(home, "orca/projects/shipping-harness/ci/core5");
+const release = join(root, `app-${target.slice(0, 8)}`);
+const oldRelease = join(root, "app-e91bb512");
+const apiDropin = join(units, "core5-api.service.d/90-crm-release.conf");
+const webDropin = join(units, "core5-web.service.d/90-crm-release.conf");
+const reviewDropin = join(units, "core5-review-ui.service.d/92-crm-release.conf");
+const reviewMigrate = join(units, "core5-review-ui.service.d/91-migrate.conf");
+const snapshots = [
+  { name: "api90", path: apiDropin, required: true },
+  { name: "web90", path: webDropin, required: true },
+  { name: "review92", path: reviewDropin, required: false },
+];
+const foreignOrigin = "https://crm-origin-rejected.invalid";
+let changed = false, createdRelease = false, published = false, rollbackFailed = false;
+let backupDir, scratch, startupTimer, migrateHash, stage = "prerequisites";
+const watchers = [];
+
+async function command(label, executable, args, options = {}) {
+  stage = label;
+  const child = spawn(executable, args, {
+    cwd: options.cwd, env: options.env || process.env,
+    stdio: [options.input ? "pipe" : "ignore", options.outputFd ?? "pipe", "pipe"],
+  });
+  const output = [];
+  child.stdout?.on("data", chunk => output.push(chunk));
+  child.stderr.on("data", () => {});
+  if (options.input) child.stdin.end(options.input);
+  const code = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  if (code !== 0) throw new Error(`${label}_exit_${code}`);
+  return Buffer.concat(output);
+}
+
+async function privateText(path) {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || (stat.mode & 0o077) || stat.uid !== process.getuid()) {
+      throw new Error("private_file_required");
+    }
+    return await handle.readFile("utf8");
+  } finally { await handle.close(); }
+}
+
+function httpsOrigin(value) {
+  if (typeof value !== "string" || value.length === 0 || /[\r\n\0]/.test(value)) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.origin === value && !url.username && !url.password;
+  } catch { return false; }
+}
+
+function environmentLines(text) {
+  const lines = [];
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line.startsWith("Environment=")) continue;
+    let body = line.slice("Environment=".length);
+    if (body.startsWith('"') && body.endsWith('"')) body = body.slice(1, -1);
+    const eq = body.indexOf("=");
+    const key = eq === -1 ? body : body.slice(0, eq);
+    if (/KEY|SECRET|PASSWORD|TOKEN|DSN|DATABASE|HASH/i.test(key)) continue;
+    lines.push(`Environment=${JSON.stringify(body)}`);
+  }
+  return lines;
+}
+
+async function httpResult(url, args = []) {
+  const output = (await command("health", "curl", ["--silent", "--show-error", "--max-time", "10",
+    "--write-out", "\n%{http_code}", ...args, url])).toString();
+  const nl = output.lastIndexOf("\n");
+  return { body: output.slice(0, nl), status: output.slice(nl + 1) };
+}
+
+function errorCode(body, status, expectedStatus, expectedError, reason) {
+  if (status !== expectedStatus) throw new Error(reason);
+  let parsed;
+  try { parsed = JSON.parse(body); } catch { throw new Error(reason); }
+  if (parsed.error !== expectedError) throw new Error(reason);
+}
+
+async function stopWatchers() {
+  await Promise.all(watchers.map(async watcher => {
+    if (watcher.exitCode !== null || watcher.signalCode !== null) return;
+    const closed = new Promise(resolve => watcher.once("close", resolve));
+    watcher.kill("SIGTERM");
+    await closed;
+  }));
+}
+
+async function restoreSnapshot(item) {
+  const meta = await readFile(join(backupDir, `${item.name}.meta`), "utf8");
+  if (meta.startsWith("absent")) {
+    await rm(item.path, { force: true });
+    return;
+  }
+  const mode = Number.parseInt(meta, 8);
+  await copyFile(join(backupDir, item.name), item.path);
+  await chmod(item.path, mode);
+}
+
+async function rollback() {
+  if (!changed) return;
+  stage = "rollback";
+  for (const item of snapshots) await restoreSnapshot(item);
+  await command("rollback_reload", "systemctl", ["--user", "daemon-reload"]);
+  await command("rollback_restart", "systemctl", ["--user", "restart", "core5-api", "core5-web", "core5-review-ui"]);
+  await command("rollback_active", "systemctl", ["--user", "is-active", "--quiet", "core5-api", "core5-web", "core5-review-ui"]);
+  changed = false;
+  process.stderr.write("CRM_ROLLBACK_OK release=app-e91bb512\n");
+}
+
+async function markRollbackFailed() {
+  rollbackFailed = true;
+  process.stderr.write("CRM_ROLLBACK_FAILED operator_action_required\n");
+  const marker = join(root, "CRM_ROLLBACK_FAILED");
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  await writeFile(marker, "CRM_ROLLBACK_FAILED operator_action_required\n", { mode: 0o600 });
+}
+
+function watchUnit(unit, pattern) {
+  let pending = "";
+  let matched = false;
+  const child = spawn("journalctl", ["--user", "-u", unit, "--since", `@${Math.floor(Date.now() / 1000)}`,
+    "-f", "-o", "json"], { stdio: ["ignore", "pipe", "pipe"] });
+  child.stderr.on("data", () => {});
+  watchers.push(child);
+  const spawned = new Promise((resolve, reject) => {
+    child.once("spawn", resolve);
+    child.once("error", reject);
+  });
+  const ready = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", () => { if (!matched) reject(new Error("startup_watch_ended")); });
+    child.stdout.on("data", chunk => {
+      pending = (pending + chunk.toString("utf8")).slice(-16384);
+      const lines = pending.split("\n");
+      pending = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line) continue;
+        let record;
+        try { record = JSON.parse(line); } catch { continue; }
+        const owner = record._SYSTEMD_USER_UNIT;
+        if (owner && owner !== `${unit}.service`) continue;
+        const message = typeof record.MESSAGE === "string" ? record.MESSAGE : "";
+        if (pattern.test(message)) { matched = true; resolve(); }
+      }
+    });
+  });
+  return { spawned, ready };
+}
+
+async function main() {
+  if (!process.versions.node.startsWith("22.")) throw new Error("node22_required");
+  if (process.env.CRM_DEPLOY_APPROVAL !== "approved") throw new Error("operator_approval_required");
+  if (!/^[0-9a-f]{40}$/.test(target ?? "")) throw new Error("target_sha_required");
+  const origin = process.env.CRM_WEB_ORIGIN;
+  const reviewOrigin = process.env.CRM_REVIEW_WEB_ORIGIN;
+  const identityOrigin = process.env.OPERATOR_AUTH_API_BASE_URL;
+  if (!httpsOrigin(origin) || !httpsOrigin(reviewOrigin) || !httpsOrigin(identityOrigin)) {
+    throw new Error("production_https_origins_required");
+  }
+  const authPath = process.env.CWOS_V2_OPERATOR_AUTH_STATE_PATH;
+  if (!authPath || /[\r\n\0]/.test(authPath)) throw new Error("owner_enrollment_required");
+  const owner = JSON.parse(await privateText(authPath));
+  if (!owner.enrolled || owner.totpPending !== false || !/^\$2b\$12\$[./A-Za-z0-9]{53}$/.test(owner.passwordHash)) {
+    throw new Error("new_bcrypt_enrollment_required");
+  }
+  const binding = {
+    ...parseEnv(await privateText(appEnv)), ...parseEnv(await privateText(humanEnv)),
+    NODE_ENV: "production", CRM_WEB_ORIGIN: origin, OPERATOR_AUTH_API_BASE_URL: identityOrigin,
+    CWOS_V2_OPERATOR_AUTH_STATE_PATH: authPath,
+  };
+  const oldAuthPath = parseEnv(await privateText(humanEnv)).CWOS_V2_OPERATOR_AUTH_STATE_PATH;
+  if (authPath === oldAuthPath) throw new Error("legacy_auth_state_must_be_preserved");
+  delete binding.CWOS_V2_OPERATOR_STEP_UP_VERIFIED;
+  binding.OPERATOR_PRINCIPAL_ID = binding.CWOS_V2_OPERATOR_PRINCIPAL_ID;
+  if (/\s/.test(node) || /\s/.test(pnpm)) throw new Error("path_whitespace_rejected");
+  for (const executable of [node, pnpm, ...(slot ? [slot] : [])]) await access(executable);
+  let revision;
+  try {
+    revision = (await command("source_pin", "git", ["-C", repo, "rev-parse", `${target}^{commit}`])).toString().trim();
+  } catch { throw new Error("source_pin_mismatch"); }
+  if (revision !== target) throw new Error("source_pin_mismatch");
+  try {
+    await command("target_ancestor", "git", ["-C", repo, "merge-base", "--is-ancestor", masterPin, target]);
+    await command("baseline_ancestor", "git", ["-C", repo, "merge-base", "--is-ancestor", baseline, target]);
+  } catch { throw new Error("target_not_descendant"); }
+  let page;
+  try {
+    page = (await command("target_marker", "git", ["-C", repo, "show", `${target}:apps/web/app/page.tsx`])).toString();
+  } catch { throw new Error("target_marker_missing"); }
+  if (!page.includes("CRM_REVIEW_UI")) throw new Error("target_marker_missing");
+  try {
+    await command("sql_delta", "git", ["-C", repo, "diff", "--exit-code", baseline, target, "--",
+      "packages/persistence/migrations", "apps/api/migrations", "scripts/migrations"]);
+  } catch (error) {
+    if (String(error?.message).startsWith("sql_delta_exit_")) throw new Error("sql_delta_refused");
+    throw error;
+  }
+  for (const [index, unit] of ["core5-api", "core5-web"].entries()) {
+    const current = (await command("baseline_unit", "systemctl", ["--user", "show", unit,
+      "--property=WorkingDirectory", "--value"])).toString().trim();
+    if (current !== join(oldRelease, index ? "apps/web" : "apps/api")) throw new Error("baseline_changed");
+    const text = await readFile(index ? webDropin : apiDropin, "utf8");
+    if (!/^WorkingDirectory=.*app-e91bb512\/apps\/(api|web)$/m.test(text)) throw new Error("dropin_changed");
+  }
+  const reviewWd = (await command("review_baseline", "systemctl", ["--user", "show", "core5-review-ui",
+    "--property=WorkingDirectory", "--value"])).toString().trim();
+  const reviewExec = (await command("review_exec", "systemctl", ["--user", "show", "core5-review-ui",
+    "--property=ExecStart", "--value"])).toString();
+  if (reviewWd !== legacyReview || !reviewExec.includes("review-server.mjs")) throw new Error("review_baseline_changed");
+  try {
+    const migrate = await readFile(reviewMigrate);
+    migrateHash = createHash("sha256").update(migrate).digest("hex");
+    const text = migrate.toString("utf8");
+    if (!/^ExecStart=$/m.test(text) || !text.includes("review-server.mjs")) throw new Error("review_baseline_changed");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const webText = await readFile(webDropin, "utf8");
+  const copied = environmentLines(webText);
+  if (!webText.includes("EnvironmentFile=") || !copied.some(line => line.includes("API_BASE_URL="))
+    || !copied.some(line => line.includes("OPERATOR_PRINCIPAL_ID="))) {
+    throw new Error("review_config_missing");
+  }
+  try { await lstat(release); throw new Error("immutable_release_exists"); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  await mkdir(join(root, "backups"), { recursive: true, mode: 0o700 });
+  scratch = await mkdtemp(join(root, `.prepare-${target.slice(0, 8)}-`));
+  await chmod(scratch, 0o700);
+  const archive = await command("archive", "git", ["-C", repo, "archive", target]);
+  const tar = join(scratch, "source.tar");
+  await writeFile(tar, archive, { flag: "wx", mode: 0o600 });
+  await mkdir(release, { mode: 0o700 });
+  createdRelease = true;
+  await command("extract", "tar", ["-xf", tar, "-C", release]);
+  const environment = { ...process.env, ...binding, PATH: `${dirname(node)}:${process.env.PATH}` };
+  await command("frozen_dependencies", pnpm, ["install", "--frozen-lockfile", "--prod=false"], { cwd: release, env: environment });
+  await command("target_auth_check", pnpm, ["exec", "tsx", "--eval",
+    'import {parseOperatingConfig} from "./apps/api/src/ops-boot.ts"; import {FileOperatorAuthStore} from "./apps/api/src/operator-auth-store.ts"; import {selfEntryConfiguration} from "./apps/web/app/self-entry-server.ts"; const c=parseOperatingConfig(); new FileOperatorAuthStore(c.authStatePath!).read(); if(!selfEntryConfiguration().ready) throw new Error("CONFIGURATION_REQUIRED");'],
+    { cwd: release, env: environment });
+  const buildArgs = ["--filter", "@ai-crm/web", "build"];
+  await command("web_build", slot ? "bash" : pnpm, slot ? [slot, pnpm, ...buildArgs] : buildArgs, { cwd: release, env: environment });
+
+  backupDir = await mkdtemp(join(root, "backups", `pre-${target.slice(0, 8)}-`));
+  await chmod(backupDir, 0o700);
+  const database = new URL(binding.ADMIN_DATABASE_URL);
+  if (!["postgres:", "postgresql:"].includes(database.protocol)) throw new Error("database_profile_invalid");
+  const pgEnv = { ...process.env, PGHOST: database.hostname, PGPORT: database.port || "5432",
+    PGDATABASE: decodeURIComponent(database.pathname.slice(1)), PGUSER: decodeURIComponent(database.username),
+    PGPASSWORD: decodeURIComponent(database.password), PGSSLMODE: database.searchParams.get("sslmode") || "prefer" };
+  const image = process.env.CRM_PG_IMAGE || "postgres:16";
+  const dumpPath = join(backupDir, `crm-before-${target.slice(0, 8)}.dump`);
+  const dump = await open(dumpPath, "wx", 0o600);
+  try {
+    await command("pg_dump", "docker", ["run", "--rm", "--network=host",
+      ...["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGSSLMODE"].flatMap(key => ["--env", key]),
+      image, "pg_dump", "--format=custom", "--no-owner"], { env: pgEnv, outputFd: dump.fd });
+  } finally { await dump.close(); }
+  const dumpBytes = await readFile(dumpPath);
+  if (!dumpBytes.length) throw new Error("empty_dump");
+  await command("dump_catalog", "docker", ["run", "--rm", "-i", image, "pg_restore", "--list"], { input: dumpBytes });
+  process.stdout.write(`CRM_BACKUP_OK bytes=${dumpBytes.length} sha256=${createHash("sha256").update(dumpBytes).digest("hex")}\n`);
+  process.stdout.write("CRM_MIGRATIONS_REQUIRED=0\n");
+  for (const item of snapshots) {
+    try {
+      const stat = await lstat(item.path);
+      if (!stat.isFile()) throw new Error(item.required ? "dropin_changed" : "review_baseline_changed");
+      await copyFile(item.path, join(backupDir, item.name));
+      const mode = stat.mode & 0o777;
+      await chmod(join(backupDir, item.name), mode);
+      await writeFile(join(backupDir, `${item.name}.meta`), `${mode.toString(8)}\n`, { mode: 0o600 });
+    } catch (error) {
+      if (error?.code === "ENOENT" && !item.required) {
+        await writeFile(join(backupDir, `${item.name}.meta`), "absent\n", { mode: 0o600 });
+        continue;
+      }
+      throw error;
+    }
+  }
+  changed = true;
+  const reviewLines = [
+    "[Service]",
+    `EnvironmentFile=`,
+    `EnvironmentFile=${JSON.stringify(appEnv)}`,
+    `EnvironmentFile=${JSON.stringify(humanEnv)}`,
+    ...copied,
+    `Environment=${JSON.stringify(`OPERATOR_AUTH_API_BASE_URL=${identityOrigin}`)}`,
+    `Environment=${JSON.stringify(`CRM_WEB_ORIGIN=${reviewOrigin}`)}`,
+    `Environment=${JSON.stringify("CRM_REVIEW_UI=1")}`,
+    `Environment=${JSON.stringify(`PATH=${dirname(node)}:/usr/bin:/bin`)}`,
+    `WorkingDirectory=${JSON.stringify(join(release, "apps/web"))}`,
+    "ExecStart=",
+    `ExecStart=${node} ${pnpm} exec next start -H 127.0.0.1 -p 4174`,
+    "",
+  ];
+  await mkdir(dirname(reviewDropin), { recursive: true, mode: 0o755 });
+  for (const [index, file] of [apiDropin, webDropin].entries()) {
+    let text = (await readFile(file, "utf8")).replace(/^WorkingDirectory=.*$/m,
+      `WorkingDirectory=${JSON.stringify(join(release, index ? "apps/web" : "apps/api"))}`);
+    const additions = index ? { CRM_WEB_ORIGIN: origin, OPERATOR_AUTH_API_BASE_URL: identityOrigin,
+      OPERATOR_PRINCIPAL_ID: binding.OPERATOR_PRINCIPAL_ID } : { CWOS_V2_OPERATOR_AUTH_STATE_PATH: authPath };
+    for (const [key, value] of Object.entries(additions)) text += `Environment=${JSON.stringify(`${key}=${value}`)}\n`;
+    await writeFile(file, text, { mode: (await lstat(file)).mode & 0o777 });
+  }
+  await writeFile(reviewDropin, reviewLines.join("\n"), { mode: 0o644 });
+  await chmod(reviewDropin, 0o644);
+  if (migrateHash) {
+    const again = createHash("sha256").update(await readFile(reviewMigrate)).digest("hex");
+    if (again !== migrateHash) throw new Error("review_baseline_changed");
+  }
+  await command("reload", "systemctl", ["--user", "daemon-reload"]);
+  const plans = [
+    watchUnit("core5-api", /core5 api listening/),
+    watchUnit("core5-web", /Ready in/),
+    watchUnit("core5-review-ui", /Ready in/),
+  ];
+  const timeout = new Promise((_, reject) => {
+    startupTimer = setTimeout(() => reject(new Error("startup_timeout")), 120_000);
+  });
+  const readyAll = Promise.all(plans.map(plan => plan.ready));
+  await Promise.all([Promise.race([readyAll, timeout]),
+    Promise.all(plans.map(plan => plan.spawned)).then(() =>
+      command("restart", "systemctl", ["--user", "restart", "core5-api", "core5-web", "core5-review-ui"]))]);
+  clearTimeout(startupTimer);
+  await stopWatchers();
+  for (const endpoint of ["http://127.0.0.1:4312/health", "http://127.0.0.1:4312/ready"]) {
+    if ((await httpResult(endpoint)).status !== "200") throw new Error("health_not_200");
+  }
+  for (const [port, allowed] of [[4313, origin], [4174, reviewOrigin]]) {
+    if ((await httpResult(`http://127.0.0.1:${port}/login`)).status !== "200") throw new Error("health_not_200");
+    const invalid = await httpResult(`http://127.0.0.1:${port}/api/self-entry`, ["-H", `Origin: ${allowed}`,
+      "-H", "Content-Type: application/json", "--data", "{}"]);
+    errorCode(invalid.body, invalid.status, "400", "INPUT_INVALID", "web_origin_not_ready");
+    const denied = await httpResult(`http://127.0.0.1:${port}/api/self-entry`, ["-H", `Origin: ${foreignOrigin}`,
+      "-H", "Content-Type: application/json", "--data", "{}"]);
+    errorCode(denied.body, denied.status, "403", "ORIGIN_DENIED", "origin_rejection_failed");
+    const reviewUnauth = await httpResult(`http://127.0.0.1:${port}/api/cwos/v2/mail-candidate-review`,
+      ["-H", `Origin: ${allowed}`]);
+    errorCode(reviewUnauth.body, reviewUnauth.status, "401", "STEP_UP_REQUIRED", "candidate_api_not_401");
+  }
+  const candidate = await httpResult("http://127.0.0.1:4312/api/cwos/v2/mail-candidate-review");
+  if (candidate.status !== "401") throw new Error("candidate_api_not_401");
+  await command("active", "systemctl", ["--user", "is-active", "--quiet", "core5-api", "core5-web", "core5-review-ui"]);
+  changed = false;
+  published = true;
+  process.stdout.write(`CRM_REVIEW_UI_LIVE release=app-${target.slice(0, 8)} rollback=app-e91bb512 review=127.0.0.1:4174 backup=${dumpPath}\n`);
+}
+
+try {
+  await main();
+} catch (error) {
+  const failedStage = stage;
+  const safeReason = /^(operator_approval_required|production_https_origins_required|owner_enrollment_required|new_bcrypt_enrollment_required|legacy_auth_state_must_be_preserved|environment_value_rejected|source_pin_mismatch|target_sha_required|target_marker_missing|target_not_descendant|sql_delta_refused|baseline_changed|dropin_changed|review_baseline_changed|review_config_missing|immutable_release_exists|private_file_required|database_profile_invalid|empty_dump|startup_timeout|startup_watch_ended|health_not_200|web_origin_not_ready|origin_rejection_failed|candidate_api_not_401|path_whitespace_rejected|node22_required|[a-z0-9_]+_exit_(\d+|null))$/;
+  const reason = typeof error?.message === "string" && safeReason.test(error.message)
+    ? error.message : "private_input_or_io_rejected";
+  clearTimeout(startupTimer);
+  await stopWatchers();
+  try { await rollback(); }
+  catch { try { await markRollbackFailed(); } catch { process.stderr.write("CRM_ROLLBACK_FAILED operator_action_required\n"); } }
+  process.stderr.write(`CRM_DEPLOY_REFUSED_OR_FAILED stage=${failedStage} reason=${reason}\n`);
+  process.exitCode = 1;
+} finally {
+  clearTimeout(startupTimer);
+  await stopWatchers();
+  try {
+    if (scratch) await rm(scratch, { recursive: true });
+    if (createdRelease && !published && !changed && !rollbackFailed) await rm(release, { recursive: true });
+  } catch {
+    process.stderr.write("CRM_CLEANUP_FAILED operator_action_required\n");
+    process.exitCode = 1;
+  }
+}
+NODE

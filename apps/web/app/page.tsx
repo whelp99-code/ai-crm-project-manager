@@ -1,4 +1,7 @@
+import { redirect } from "next/navigation";
 import { S1CreateWorkClient } from "./s1-create-work-client";
+
+export const dynamic = "force-dynamic";
 
 interface Overview {
   sectionOrder: string[];
@@ -44,6 +47,7 @@ function Empty({ children }: Readonly<{ children: string }>) {
 }
 
 export default async function CustomerOverviewPage() {
+  if (process.env.CRM_REVIEW_UI === "1") redirect("/v2/mail-candidate-review");
   const result = await loadOverview();
   if (!result.ok) {
     return (

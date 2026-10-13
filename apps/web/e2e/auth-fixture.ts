@@ -40,7 +40,10 @@ async function fixtureControl(): Promise<FixtureControl> {
   return parseFixtureControl(value);
 }
 
-export async function loginOwner(page: Page): Promise<void> {
+export async function loginOwner(
+  page: Page,
+  options: { readonly navigate?: boolean } = {},
+): Promise<void> {
   const initial = await fixtureControl();
   const reset = await fetch(`${initial.origin}/__playwright/auth/reset`, {
     method: "POST",
@@ -48,7 +51,7 @@ export async function loginOwner(page: Page): Promise<void> {
   });
   expect(reset.status).toBe(200);
   const { password, totp } = await fixtureControl();
-  await page.goto("/login");
+  if (options.navigate !== false) await page.goto("/login");
   await page.getByLabel("비밀번호", { exact: true }).fill(password);
   await page.getByRole("button", { name: "다음: OTP 입력" }).click();
   await page.getByLabel("일회용 인증 코드 (OTP)", { exact: true }).fill(totp);
