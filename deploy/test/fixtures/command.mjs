@@ -332,19 +332,32 @@ async function main() {
   if (name === "curl") {
     const url = args.at(-1);
     const rollback = state.generation > 0 && !configuration(root, "core5-api").cwd.includes(fixture.release);
+    const logical = new URL(url);
+    const legacySurface = rollback && ["4313", "4174"].includes(logical.port);
+    const legacyReply = path => {
+      if (logical.port === "4174") return fixture.legacyBadReview
+        ? { status: 200, headers: { "Content-Type": "text/html" }, body: "<h1>Unprotected</h1>" }
+        : { status: 401, headers: { "WWW-Authenticate": 'Basic realm="Core5 review"', "Content-Type": "text/plain; charset=utf-8" },
+          body: "Core5 review access key required." };
+      return path === "/" && !fixture.legacyBadWeb
+        ? { status: 200, headers: { "Content-Type": "text/html" }, body: "<!doctype html><title>e91 fixture</title>" }
+        : { status: 404, headers: { "Content-Type": "text/plain" }, body: "Not Found" };
+    };
     event({ name, args, rollback });
     if (rollback && fixture.rollbackUnavailableUrl === url) {
       process.stdout.write("\n000");
       return 7;
     }
-    if (rollback && (fixture.coldRollback && url.startsWith("http://127.0.0.1:4312/")
-      || fixture.coldRollbackUrls?.includes(url))
+    if (rollback && (fixture.coldRollback && ["http://127.0.0.1:4312/health", "http://127.0.0.1:4312/ready"].includes(url)
+      || fixture.coldRollbackUrls?.includes(url) || fixture.legacyHttp && legacySurface)
       && !url.endsWith(fixture.rollbackHttpFailure ?? "\0")) {
       const requests = [];
       const server = createServer((request, response) => {
         requests.push(request.url);
-        response.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
-        response.end("{}");
+        const reply = legacySurface ? legacyReply(request.url)
+          : { status: 200, headers: { "Content-Type": "application/json" }, body: "{}" };
+        response.writeHead(reply.status, { ...reply.headers, Connection: "close" });
+        response.end(reply.body);
       });
       const listen = () => new Promise((resolve, reject) => {
         server.once("error", reject);
@@ -352,9 +365,17 @@ async function main() {
       });
       let port = 0, refused = false, listening, output = "", diagnostics = "";
       const headersPath = join(root, `http-${process.pid}.headers`);
+      const missingRoutes = [];
       try {
         await listen();
         port = server.address().port;
+        if (fixture.legacyHttp && legacySurface) {
+          for (const path of ["/login", "/api/self-entry"]) {
+            const response = await fetch(`http://127.0.0.1:${port}${path}`);
+            missingRoutes.push({ path, status: response.status, body: await response.text() });
+          }
+          requests.length = 0;
+        }
         await new Promise(resolve => server.close(resolve));
         // Do not simulate curl retries. Bind only after native curl actually
         // observes the Type=simple connection-refused window.
@@ -374,7 +395,7 @@ async function main() {
           curl.once("close", resolve);
         });
         await listening;
-        event({ name, args, rollback, realHttp: { port, refused, requests, code,
+        event({ name, args, rollback, realHttp: { port, refused, requests, code, missingRoutes,
           headers: readFileSync(headersPath, "utf8"), output } });
         process.stdout.write(output);
         return code;
@@ -388,12 +409,24 @@ async function main() {
       process.stdout.write('{"error":"not_ready"}\n503');
       return 0;
     }
-    if (rollback && fixture.rollbackBoundaryFailure === url) {
+    if (legacySurface) {
+      const reply = legacyReply(logical.pathname);
+      const headers = args.includes("--include")
+        ? `HTTP/1.1 ${reply.status} Fixture\r\n${Object.entries(reply.headers).map(([name, value]) => `${name}: ${value}`).join("\r\n")}\r\n\r\n`
+        : "";
+      process.stdout.write(`${headers}${reply.body}\n${reply.status}`);
+      return 0;
+    }
+    if ((rollback ? fixture.rollbackBoundaryFailure : fixture.deployBoundaryFailure) === url) {
       process.stdout.write("{}\n200");
       return 0;
     }
     if (url.endsWith("/api/self-entry")) {
       const foreign = args.includes("Origin: https://crm-origin-rejected.invalid");
+      if (foreign && (rollback ? fixture.rollbackForeignOriginUrl : fixture.deployForeignOriginUrl) === url) {
+        process.stdout.write("{}\n400");
+        return 0;
+      }
       process.stdout.write(foreign ? '{"error":"ORIGIN_DENIED"}\n403' : '{"error":"INPUT_INVALID"}\n400');
     } else if (url.endsWith("/api/cwos/v2/mail-candidate-review")) {
       process.stdout.write('{"error":"STEP_UP_REQUIRED"}\n401');

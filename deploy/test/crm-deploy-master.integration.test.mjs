@@ -13,6 +13,40 @@ function restored(result) {
 }
 
 describe("PR63 deployment runtime regressions", () => {
+  it("recovers through historical HTTP without new login endpoints", async () => {
+    await withDeployment({ failReload: true, legacyHttp: true }, result => {
+      expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+      const http = result.events.filter(event => event.realHttp);
+      expect(http).toHaveLength(1);
+      expect(http[0].args.at(-1)).toBe("http://127.0.0.1:4313/");
+      expect(http[0].realHttp.missingRoutes.map(route => route.status)).toEqual([404, 404]);
+      expect(http[0].realHttp.output).toBe("<!doctype html><title>e91 fixture</title>\n200");
+      expect(result.events.filter(event => event.rollback && event.name === "curl")
+        .every(event => !event.args.at(-1).endsWith("/login") && !event.args.at(-1).includes("/api/self-entry"))).toBe(true);
+      expect(result.liveOwnedProcesses).toBe(0);
+      expect(exists(result.release)).toBe(false);
+      restored(result);
+    });
+  }, 20_000);
+
+  it("retains artifacts when the historical HTTP root fails", async () => {
+    await withDeployment({ failReload: true, legacyHttp: true, legacyBadWeb: true }, result => {
+      expect(result.stderr).toContain("ROLLBACK_INCOMPLETE");
+      expect(result.stderr).not.toContain("CRM_ROLLBACK_OK");
+      expect(exists(result.release)).toBe(true);
+      expect(result.events.some(event => event.realHttp)).toBe(true);
+      restored(result);
+    });
+  }, 20_000);
+
+  it("requires target self-entry validation before publishing", async () => {
+    await withDeployment({ deployBoundaryFailure: "http://127.0.0.1:4313/api/self-entry" }, result => {
+      expect(result.code).toBe(1);
+      expect(result.stdout).not.toContain("CRM_1CF5_LIVE");
+      expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+      restored(result);
+    });
+  });
   for (const atomicPhase of ["forward", "rollback"]) {
     it.each(["partial-write", "before-rename", "after-rename"])(`atomic drop-in remains complete on ${atomicPhase} crash at %s`, async atomicCrash => {
       await withDeployment({ atomicCrash, atomicPhase, failReload: atomicPhase === "rollback" }, result => {
@@ -113,22 +147,21 @@ describe("PR63 deployment runtime regressions", () => {
     });
   });
 
-  it("waits for the restored web login port before accepting rollback", async () => {
-    await withDeployment({ failReload: true, coldRollbackUrls: ["http://127.0.0.1:4313/login"] }, result => {
+  it("waits for the restored web root before accepting rollback", async () => {
+    await withDeployment({ failReload: true, coldRollbackUrls: ["http://127.0.0.1:4313/"] }, result => {
       expect(result.stderr).toContain("CRM_ROLLBACK_OK");
       const response = result.events.find(event => event.realHttp);
       expect(response?.realHttp.refused).toBe(true);
-      expect(response?.realHttp.output).toBe("{}\n200");
-      expect(response?.realHttp.requests).toEqual(["/login"]);
+      expect(response?.realHttp.output).toBe("<!doctype html><title>e91 fixture</title>\n200");
+      expect(response?.realHttp.requests).toEqual(["/"]);
       expect(exists(result.release)).toBe(false);
       restored(result);
     });
   }, 20_000);
 
   it.each([
-    { rollbackHttpFailure: "http://127.0.0.1:4313/login" },
-    { rollbackUnavailableUrl: "http://127.0.0.1:4313/login" },
-    { rollbackBoundaryFailure: "http://127.0.0.1:4313/api/self-entry" },
+    { rollbackHttpFailure: "http://127.0.0.1:4313/" },
+    { rollbackUnavailableUrl: "http://127.0.0.1:4313/" },
   ])("preserves artifacts when the restored web surface fails: %j", async options => {
     await withDeployment({ failReload: true, ...options }, result => {
       expect(result.stderr).toContain("ROLLBACK_INCOMPLETE");
@@ -144,7 +177,7 @@ describe("PR63 deployment runtime regressions", () => {
       expect(result.stdout).not.toContain("CRM_1CF5_LIVE");
       expect(result.stderr).toContain("CRM_ROLLBACK_OK");
       expect(result.events.some(event => event.rollback
-        && event.args.at(-1) === "http://127.0.0.1:4313/login")).toBe(true);
+        && event.args.at(-1) === "http://127.0.0.1:4313/")).toBe(true);
       restored(result);
     });
   });

@@ -55,6 +55,10 @@ const release = join(root, `app-${target.slice(0, 8)}`);
 const oldRelease = join(root, "app-e91bb512");
 const services = ["core5-api", "core5-web"];
 const files = services.map(unit => join(units, `${unit}.service.d/90-crm-release.conf`));
+const releaseContracts = {
+  target: { pages: ["http://127.0.0.1:4313/login"], nativeAuth: true },
+  baseline: { pages: ["http://127.0.0.1:4313/"], nativeAuth: false },
+};
 let changed = false, createdRelease = false, published = false;
 let backupDir, scratch, watcher, startupTimer, restoreContainer, stage = "prerequisites";
 let interruptedSignal, rollingBack = false;
@@ -193,9 +197,9 @@ async function verifyWorkingDirectory(unit, expected) {
   }
 }
 
-async function requireHttpReady() {
+async function requireHttpReady(contract) {
   for (const endpoint of ["http://127.0.0.1:4312/health", "http://127.0.0.1:4312/ready",
-    "http://127.0.0.1:4313/login"]) {
+    ...contract.pages]) {
     const output = (await command("health", "curl", ["--silent", "--show-error", "--max-time", "10",
       "--retry", "120", "--retry-connrefused", "--retry-delay", "1", "--retry-max-time", "120",
       "--write-out", "\n%{http_code}", endpoint])).toString();
@@ -203,13 +207,15 @@ async function requireHttpReady() {
   }
 }
 
-async function verifyRuntime(environments, directories) {
-  await requireHttpReady();
-  const boundary = (await command("origin_probe", "curl", ["--silent", "--show-error", "--max-time", "10",
-    "--write-out", "\n%{http_code}", "-H", `Origin: ${environments[1].CRM_WEB_ORIGIN}`,
-    "-H", "Content-Type: application/json", "--data", "{}", "http://127.0.0.1:4313/api/self-entry"])).toString();
-  if (!boundary.endsWith("\n400") || JSON.parse(boundary.slice(0, -4)).error !== "INPUT_INVALID") {
-    throw new Error("web_origin_not_ready");
+async function verifyRuntime(environments, directories, contract) {
+  await requireHttpReady(contract);
+  if (contract.nativeAuth) {
+    const boundary = (await command("origin_probe", "curl", ["--silent", "--show-error", "--max-time", "10",
+      "--write-out", "\n%{http_code}", "-H", `Origin: ${environments[1].CRM_WEB_ORIGIN}`,
+      "-H", "Content-Type: application/json", "--data", "{}", "http://127.0.0.1:4313/api/self-entry"])).toString();
+    if (!boundary.endsWith("\n400") || JSON.parse(boundary.slice(0, -4)).error !== "INPUT_INVALID") {
+      throw new Error("web_origin_not_ready");
+    }
   }
   await requireActive("active");
   for (const [index, unit] of services.entries()) {
@@ -242,7 +248,7 @@ async function rollback() {
   await command("rollback_reload", "systemctl", ["--user", "daemon-reload"]);
   await command("rollback_restart", "systemctl", ["--user", "restart", "core5-api", "core5-web"]);
   await verifyRuntime([...previousEnvironment.values()],
-    services.map((_, index) => join(oldRelease, index ? "apps/web" : "apps/api")));
+    services.map((_, index) => join(oldRelease, index ? "apps/web" : "apps/api")), releaseContracts.baseline);
   changed = false;
   process.stderr.write("CRM_ROLLBACK_OK release=app-e91bb512\n");
 }
@@ -433,7 +439,7 @@ gosu postgres pg_restore -h "$directory" -U "$1" -d postgres --exit-on-error --s
   clearTimeout(startupTimer);
   await stopWatcher();
   await verifyRuntime(runtimeValues,
-    services.map((_, index) => join(release, index ? "apps/web" : "apps/api")));
+    services.map((_, index) => join(release, index ? "apps/web" : "apps/api")), releaseContracts.target);
   checkInterrupted();
   changed = false;
   published = true;
