@@ -1,10 +1,17 @@
 import fs from "node:fs";
+import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 
 const root = process.env.CRM_TEST_ROOT;
 if (!root?.startsWith("/tmp/crm-deploy-test-")) throw new Error("sandbox required");
 const fixture = JSON.parse(fs.readFileSync(join(root, "fixture.json"), "utf8"));
+const originalSpawn = childProcess.spawn;
+childProcess.spawn = function (...args) {
+  const child = originalSpawn.apply(this, args);
+  child.once("exit", (code, signal) => fs.writeFileSync(join(root, `exit-${child.pid}.json`), JSON.stringify({ code, signal })));
+  return child;
+};
 const originalWrite = fs.promises.writeFile;
 fs.promises.writeFile = async function (path, data, ...options) {
   const result = await originalWrite.call(this, path, data, ...options);
