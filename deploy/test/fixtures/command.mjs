@@ -29,7 +29,7 @@ function environmentWords(value) {
 export function configuration(root, unit) {
   const directory = join(root, "units", `${unit}.service.d`);
   const paths = [join(root, "units", `${unit}.service`),
-    ...readdirSync(directory).sort().map(name => join(directory, name))];
+    ...readdirSync(directory).filter(name => name.endsWith(".conf")).sort().map(name => join(directory, name))];
   let cwd = "", exec = "";
   let envFiles = [];
   const direct = {};

@@ -46,7 +46,7 @@ export CRM_SCRIPT_REPO_DEFAULT=$(cd -- "$script_dir/.." && pwd)
 exec "$NODE" --input-type=module - <<'NODE'
 import { spawn } from "node:child_process";
 import { constants, createReadStream } from "node:fs";
-import { access, chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join, dirname } from "node:path";
 import { parseEnv } from "node:util";
@@ -206,15 +206,31 @@ async function stopWatchers() {
   }));
 }
 
+async function writeDropin(path, data, mode) {
+  const temporary = join(dirname(path), `.crm-dropin-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, data, { flag: "wx", mode: 0o600 });
+    const file = await open(temporary, "r+");
+    try { await file.chmod(mode); await file.sync(); }
+    finally { await file.close(); }
+    await rename(temporary, path);
+    const directory = await open(dirname(path), "r");
+    try { await directory.sync(); }
+    finally { await directory.close(); }
+  } finally { await rm(temporary, { force: true }); }
+}
+
 async function restoreSnapshot(item) {
   const meta = await readFile(join(backupDir, `${item.name}.meta`), "utf8");
   if (meta.startsWith("absent")) {
     await rm(item.path, { force: true });
+    const directory = await open(dirname(item.path), "r");
+    try { await directory.sync(); }
+    finally { await directory.close(); }
     return;
   }
   const mode = Number.parseInt(meta, 8);
-  await copyFile(join(backupDir, item.name), item.path);
-  await chmod(item.path, mode);
+  await writeDropin(item.path, await readFile(join(backupDir, item.name)), mode);
 }
 
 async function requireActive(label) {
@@ -567,11 +583,10 @@ gosu postgres pg_restore -h "$directory" -U "$1" -d postgres --exit-on-error --s
       `WorkingDirectory=${JSON.stringify(join(release, index ? "apps/web" : "apps/api"))}`);
     if (!text.endsWith("\n")) text += "\n";
     text += `EnvironmentFile=${JSON.stringify(runtimeFiles[index])}\n`;
-    await writeFile(file, text, { mode: (await lstat(file)).mode & 0o777 });
+    await writeDropin(file, text, (await lstat(file)).mode & 0o777);
     checkInterrupted();
   }
-  await writeFile(reviewDropin, reviewLines.join("\n"), { mode: 0o644 });
-  await chmod(reviewDropin, 0o644);
+  await writeDropin(reviewDropin, reviewLines.join("\n"), 0o644);
   checkInterrupted();
   if (migrateHash) {
     const again = createHash("sha256").update(await readFile(reviewMigrate)).digest("hex");
