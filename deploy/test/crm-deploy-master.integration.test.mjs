@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { withDeployment, readJson, readText, exists } from "./fixtures/deployment.mjs";
 
@@ -13,6 +13,25 @@ function restored(result) {
 }
 
 describe("PR63 deployment runtime regressions", () => {
+  it.each(["SIGHUP", "SIGTERM"])("kills detached-stdio descendants after their leader exits on %s", async signal => {
+    await withDeployment({ signal, signalAt: "restart", leaderExitsFirst: true, deadlineMs: 15_000 }, result => {
+      expect(result.code).toBe(signal === "SIGHUP" ? 129 : 143);
+      expect(result.signal).toBeNull();
+      expect(exists(join(result.root, "leader-exited-first"))).toBe(true);
+      expect(exists(join(result.root, "descendant-ignored-term"))).toBe(true);
+      expect(result.liveOwnedProcesses).toBe(0);
+      const leader = Number(readText(join(result.root, "leader-exited-first")));
+      const signals = readdirSync(result.root).filter(name => name.startsWith("kill-"))
+        .map(name => readJson(join(result.root, name))).filter(event => event.pid === -leader);
+      expect(signals.some(event => event.signal === "SIGKILL")).toBe(true);
+      const term = signals.find(event => event.signal === "SIGTERM");
+      const kill = signals.find(event => event.signal === "SIGKILL");
+      expect(kill.at - term.at).toBeGreaterThanOrEqual(4_900);
+      expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+      restored(result);
+    });
+  }, 25_000);
+
   it.each(["/", "/work", "/pilot", "/approvals", "/monitor", "/v2"])("refuses a build with frozen runtime route %s", async staticRoute => {
     await withDeployment({ staticRoute }, result => {
       expect(result.code).toBe(1);
