@@ -180,8 +180,18 @@ async function verifyWorkingDirectory(unit, expected) {
 async function requireApiReady() {
   for (const endpoint of ["http://127.0.0.1:4312/health", "http://127.0.0.1:4312/ready"]) {
     const output = (await command("health", "curl", ["--silent", "--show-error", "--max-time", "10",
+      "--retry", "120", "--retry-connrefused", "--retry-delay", "1", "--retry-max-time", "120",
       "--write-out", "\n%{http_code}", endpoint])).toString();
     if (!output.endsWith("\n200")) throw new Error("health_not_200");
+  }
+}
+
+async function verifyRuntime(environments, directories) {
+  await requireApiReady();
+  await requireActive("active");
+  for (const [index, unit] of services.entries()) {
+    await verifyEnvironment(unit, environments[index]);
+    await verifyWorkingDirectory(unit, directories[index]);
   }
 }
 
@@ -194,12 +204,8 @@ async function rollback() {
   }
   await command("rollback_reload", "systemctl", ["--user", "daemon-reload"]);
   await command("rollback_restart", "systemctl", ["--user", "restart", "core5-api", "core5-web"]);
-  await requireActive("rollback_active");
-  for (const [unit, expected] of previousEnvironment) await verifyEnvironment(unit, expected);
-  for (const [index, unit] of services.entries()) {
-    await verifyWorkingDirectory(unit, join(oldRelease, index ? "apps/web" : "apps/api"));
-  }
-  await requireApiReady();
+  await verifyRuntime([...previousEnvironment.values()],
+    services.map((_, index) => join(oldRelease, index ? "apps/web" : "apps/api")));
   changed = false;
   process.stderr.write("CRM_ROLLBACK_OK release=app-e91bb512\n");
 }
@@ -352,7 +358,6 @@ async function main() {
     command("restart", "systemctl", ["--user", "restart", "core5-api", "core5-web"]))]);
   clearTimeout(startupTimer);
   await stopWatcher();
-  await requireApiReady();
   for (const endpoint of ["http://127.0.0.1:4313/login"]) {
     const output = (await command("health", "curl", ["--silent", "--show-error", "--max-time", "10",
       "--write-out", "\n%{http_code}", endpoint])).toString();
@@ -364,11 +369,8 @@ async function main() {
   if (!boundary.endsWith("\n400") || JSON.parse(boundary.slice(0, -4)).error !== "INPUT_INVALID") {
     throw new Error("web_origin_not_ready");
   }
-  await requireActive("active");
-  for (const [index, unit] of services.entries()) await verifyEnvironment(unit, runtimeValues[index]);
-  for (const [index, unit] of services.entries()) {
-    await verifyWorkingDirectory(unit, join(release, index ? "apps/web" : "apps/api"));
-  }
+  await verifyRuntime(runtimeValues,
+    services.map((_, index) => join(release, index ? "apps/web" : "apps/api")));
   checkInterrupted();
   changed = false;
   published = true;
@@ -386,7 +388,7 @@ try {
   clearTimeout(startupTimer);
   await stopChildren();
   try { await rollback(); }
-  catch { process.stderr.write("CRM_ROLLBACK_FAILED operator_action_required\n"); }
+  catch { process.stderr.write("ROLLBACK_INCOMPLETE operator_action_required\nCRM_ROLLBACK_FAILED operator_action_required\n"); }
   process.stderr.write(`CRM_DEPLOY_REFUSED_OR_FAILED stage=${failedStage} reason=${reason}\n`);
   process.exitCode = interruptedSignal === "SIGHUP" ? 129 : interruptedSignal === "SIGINT" ? 130 : interruptedSignal === "SIGTERM" ? 143 : 1;
 } finally {

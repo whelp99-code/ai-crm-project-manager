@@ -26,6 +26,7 @@ describe("PR63 deployment runtime regressions", () => {
     await withDeployment({ deadUnit, deadPhase: "rollback", failReload: true }, result => {
       expect(result.code).not.toBe(0);
       expect(result.stderr).toContain("CRM_ROLLBACK_FAILED");
+      expect(result.stderr).toContain("ROLLBACK_INCOMPLETE");
       expect(result.stderr).not.toContain("CRM_ROLLBACK_OK");
       expect(exists(result.release)).toBe(true);
       restored(result);
@@ -139,9 +140,38 @@ describe("PR63 deployment runtime regressions", () => {
     });
   }, 25_000);
 
+  it("waits through real connection refusal before accepting cold rollback", async () => {
+    await withDeployment({ failReload: true, coldRollback: true }, result => {
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+      expect(result.stderr).not.toContain("ROLLBACK_INCOMPLETE");
+      const http = result.events.filter(event => event.realHttp).map(event => event.realHttp);
+      expect(http).toHaveLength(2);
+      expect(http.every(event => event.refused && event.code === 0 && event.output === "{}\n200")).toBe(true);
+      expect(http.flatMap(event => event.requests).sort()).toEqual(["/health", "/ready"]);
+      expect(exists(result.release)).toBe(false);
+      expect(result.liveOwnedProcesses).toBe(0);
+      restored(result);
+    });
+  }, 20_000);
+
+  it.each(["core5-api", "core5-web"])("rejects restored %s environment despite cold HTTP recovery", async rollbackEnvironmentUnit => {
+    await withDeployment({ failReload: true, coldRollback: true, rollbackEnvironmentUnit }, result => {
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("ROLLBACK_INCOMPLETE");
+      expect(result.stderr).not.toContain("CRM_ROLLBACK_OK");
+      expect(result.events.filter(event => event.realHttp)).toHaveLength(2);
+      expect(exists(result.release)).toBe(true);
+      expect(exists(join(result.root, "state/backups"))).toBe(true);
+      expect(result.liveOwnedProcesses).toBe(0);
+      restored(result);
+    });
+  }, 20_000);
+
   it.each(["/health", "/ready"])("retains recovery artifacts when rollback %s is 503", async rollbackHttpFailure => {
     await withDeployment({ failReload: true, rollbackHttpFailure }, result => {
       expect(result.stderr).toContain("CRM_ROLLBACK_FAILED");
+      expect(result.stderr).toContain("ROLLBACK_INCOMPLETE");
       expect(result.stderr).not.toContain("CRM_ROLLBACK_OK");
       expect(exists(result.release)).toBe(true);
       expect(exists(join(result.root, "state/backups"))).toBe(true);
@@ -163,6 +193,7 @@ describe("PR63 deployment runtime regressions", () => {
   it("retains recovery artifacts if the rollback process remains in the new directory", async () => {
     await withDeployment({ failReload: true, rollbackCwdUnit: "core5-api" }, result => {
       expect(result.stderr).toContain("CRM_ROLLBACK_FAILED");
+      expect(result.stderr).toContain("ROLLBACK_INCOMPLETE");
       expect(result.stderr).not.toContain("CRM_ROLLBACK_OK");
       expect(exists(result.release)).toBe(true);
       restored(result);
