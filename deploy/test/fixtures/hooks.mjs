@@ -17,5 +17,6 @@ fs.promises.writeFile = async function (path, data, ...options) {
 };
 syncBuiltinESMExports();
 process.once("exit", () => {
-  fs.writeFileSync(join(root, `usage-${process.pid}.json`), JSON.stringify({ maxRSS: process.resourceUsage().maxRSS }));
+  fs.writeFileSync(join(root, `usage-${process.pid}.json`),
+    JSON.stringify({ maxRSS: process.resourceUsage().maxRSS, nodeMajor: Number(process.versions.node.split(".")[0]) }));
 });

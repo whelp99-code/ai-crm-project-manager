@@ -32,12 +32,13 @@ describe("PR63 deployment runtime regressions", () => {
     });
   });
 
-  for (const signal of ["SIGINT", "SIGTERM"]) {
+  for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"]) {
     for (const signalAt of ["write", "restart"]) {
       it(`finishes rollback for ${signal} at ${signalAt}, including repeated interruption`, async () => {
         await withDeployment({ signal, signalAt, repeatSignal: true }, result => {
           expect(result.signal).toBeNull();
-          expect(result.code).toBe(signal === "SIGINT" ? 130 : 143);
+          expect(result.code).toBe({ SIGHUP: 129, SIGINT: 130, SIGTERM: 143 }[signal]);
+          expect(result.liveOwnedProcesses).toBe(0);
           expect(result.stderr).toContain("CRM_ROLLBACK_OK");
           expect(result.stdout).not.toContain("CRM_1CF5_LIVE");
           expect(exists(join(result.root, "rollback-signal-sent"))).toBe(true);
@@ -52,6 +53,7 @@ describe("PR63 deployment runtime regressions", () => {
   it("applies private EnvironmentFiles and verifies restarted auth without changing human env", async () => {
     await withDeployment({}, result => {
       expect(result.code, result.stderr).toBe(0);
+      expect(result.usage.nodeMajor).toBe(22);
       expect(result.state.units["core5-api"].environment.CWOS_V2_OPERATOR_AUTH_STATE_PATH).toBe(result.newAuth);
       expect(result.state.units["core5-web"].environment.CRM_WEB_ORIGIN).toBe("https://web.invalid");
       const overlay = result.configuration("core5-api").envFiles.at(-1);
@@ -62,6 +64,44 @@ describe("PR63 deployment runtime regressions", () => {
       expect(result.events.some(event => event.args.includes("--property=MainPID"))).toBe(true);
       expect(readText(result.humanEnv)).toBe(result.humanBefore);
       expect(readText(result.newAuth)).toBe(result.ownerBefore);
+    });
+  });
+
+  it.each([false, true])("handles missing final newlines with rollback=%s", async failReload => {
+    await withDeployment({ noFinalNewline: true, failReload }, result => {
+      if (failReload) {
+        expect(result.code).not.toBe(0);
+        expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+        restored(result);
+      } else {
+        expect(result.code, result.stderr).toBe(0);
+        expect(result.state.units["core5-api"].environment.CWOS_V2_OPERATOR_AUTH_STATE_PATH).toBe(result.newAuth);
+        expect(result.state.units["core5-web"].environment.CRM_WEB_ORIGIN).toBe("https://web.invalid");
+      }
+    });
+  });
+
+  it.each([false, true])("excludes concurrent writers through cleanup with rollback=%s", async failReload => {
+    await withDeployment({ contend: true, failReload }, result => {
+      expect(result.lockHeld).toBe(true);
+      expect(result.contender.code).toBe(1);
+      expect(result.contender.stderr).toContain("reason=deployment_in_progress");
+      expect(result.events.filter(event => event.contender)).toHaveLength(0);
+      expect(result.lockReleased).toBe(true);
+      expect(result.liveOwnedProcesses).toBe(0);
+      if (failReload) {
+        expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+        restored(result);
+      } else expect(result.code, result.stderr).toBe(0);
+    });
+  });
+
+  it.each([{ sourceMismatch: true }, { sqlDelta: true }])("preserves source guards with modeled Git: %j", async options => {
+    await withDeployment(options, result => {
+      expect(result.code).not.toBe(0);
+      expect(result.events.some(event => event.name === "systemctl")).toBe(false);
+      expect(exists(result.release)).toBe(false);
+      restored(result);
     });
   });
 

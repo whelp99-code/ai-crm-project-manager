@@ -18,6 +18,14 @@ fi
 }
 export CRM_REPO_ROOT=${CRM_REPO_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}
 NODE=${CRM_NODE_BIN:-$HOME/.nvm/versions/node/v22.23.2/bin/node}
+# Both deployment entrypoints serialize the shared units through cleanup.
+lock_dir=${CRM_UNIT_ROOT:-$HOME/.config/systemd/user}
+mkdir -p -- "$lock_dir"
+exec 9>"$lock_dir/.crm-deploy.lock"
+if ! flock --nonblock 9; then
+  printf '%s\n' 'CRM_DEPLOY_REFUSED_OR_FAILED stage=prerequisites reason=deployment_in_progress' >&2
+  exit 1
+fi
 exec "$NODE" --input-type=module - <<'NODE'
 import { spawn } from "node:child_process";
 import { constants, createReadStream } from "node:fs";
@@ -69,8 +77,10 @@ function interrupt(signal) {
 }
 const onSigint = () => interrupt("SIGINT");
 const onSigterm = () => interrupt("SIGTERM");
+const onSighup = () => interrupt("SIGHUP");
 process.on("SIGINT", onSigint);
 process.on("SIGTERM", onSigterm);
+process.on("SIGHUP", onSighup);
 
 function checkInterrupted() {
   if (interruptedSignal && !rollingBack) throw new Error(`interrupted_${interruptedSignal}`);
@@ -276,6 +286,7 @@ async function main() {
     let text = (await readFile(file, "utf8")).replace(/^WorkingDirectory=.*$/m,
       `WorkingDirectory=${JSON.stringify(join(release, index ? "apps/web" : "apps/api"))}`);
     // EnvironmentFile values override Environment=; the final file must win.
+    if (!text.endsWith("\n")) text += "\n";
     text += `EnvironmentFile=${JSON.stringify(runtimeFiles[index])}\n`;
     await writeFile(file, text, { mode: (await lstat(file)).mode & 0o777 });
     checkInterrupted();
@@ -336,7 +347,7 @@ try {
   try { await rollback(); }
   catch { process.stderr.write("CRM_ROLLBACK_FAILED operator_action_required\n"); }
   process.stderr.write(`CRM_DEPLOY_REFUSED_OR_FAILED stage=${failedStage} reason=${reason}\n`);
-  process.exitCode = interruptedSignal === "SIGINT" ? 130 : interruptedSignal === "SIGTERM" ? 143 : 1;
+  process.exitCode = interruptedSignal === "SIGHUP" ? 129 : interruptedSignal === "SIGINT" ? 130 : interruptedSignal === "SIGTERM" ? 143 : 1;
 } finally {
   clearTimeout(startupTimer);
   await stopChildren();
@@ -349,5 +360,6 @@ try {
   }
   process.off("SIGINT", onSigint);
   process.off("SIGTERM", onSigterm);
+  process.off("SIGHUP", onSighup);
 }
 NODE
