@@ -176,8 +176,10 @@ executable/argv가 정확히 일치해야 완료된다.
 허용하지 않으므로 운영 DB를 자동 restore하지 않는다. 복원 검증용 임시
 DB/container는 종료·중단 시 제거한다.
 복구도 예상 WorkingDirectory/MainPID cwd, 원래 review executable/argv,
-API `/health`·`/ready`, web4313와 review4174의 `/login`200,
-양쪽 Origin 경계 및 무인증 후보 API를 모두 통과해야 완료다.
+API `/health`·`/ready`, e91 web4313의 `/`200,
+옛 review4174의 `/` Basic401 challenge를 통과해야 완료다.
+Basic realm과 공개 응답 본문도 원본과 비교하며 운영 키를 읽거나 보내지 않는다.
+새 `/login`·self-entry·후보 인증 계약은 새 릴리스 검사에만 적용한다.
 PID·start_time 같은 가변 필드는
 실행 명령 비교에서 제외한다. 503 또는 경로 불일치는 복구 실패이며
 새 release와 backup을 보존한다.
@@ -426,3 +428,47 @@ readiness 경로에만 적용해 새 인증 probe 응답을 잘못 200으로 만
 `review-real-restore.log`, `review-native-curl.log`, `review-web-e2e.log`,
 `review-external-retry.log`, `review-external-refusals.log`.
 운영 서비스·DB·인증 상태·실제 후보는 수정하지 않았다.
+
+## 여섯 번째 Cursor REJECT 수정
+
+FIX5의 같은 HTTP 목록 적용은 건강한 옛 릴리스까지 거부했다. 현재는
+`releaseContracts`의 target/baseline을 명시해 `verifyRuntime`에 전달한다.
+공통 active, API health/ready, 실효 환경, 설정/실제 cwd, review 실행 명령은
+양쪽에서 그대로 확인한다.
+
+| 계약 | 실제 검사 |
+| --- | --- |
+| target | 4313/4174 login200, self-entry INPUT_INVALID400·외부 Origin403, 후보 인증401 |
+| baseline web | e91의 실제 `/`200; 없는 login/self-entry를 요구하지 않음 |
+| baseline review | 정적 helper `/`401, `Basic realm="Core5 review"`, 공개 body 일치 |
+
+근거는 e91 `apps/web/app/page.tsx`와 앞에서 출처를 확정한 shipping-harness
+helper 원본이다. helper는 URL을 구분하지 않는 Basic catch-all이며 공개
+health 예외가 없다. 무인증 `/`200은 정상 계약이 아니므로 거부한다.
+운영 Basic 키를 새로 수집해 인증시키는 방식은 쓰지 않는다.
+
+프로세스 종료는 리더의 close가 아닌 그룹 생존 여부로 판단한다.
+리더가 TERM에 종료해도 손자가 남으면 원래 5초 SIGKILL 기한을 유지하고,
+watcher/child 정리가 그 종료 수명을 기다린다.
+
+전환과 복원의 drop-in은 같은 디렉터리의 배타적 private temp에 전체
+내용을 쓴 뒤 권한 적용, file sync, rename, directory sync를 거친다.
+temp는 `.conf`가 아니므로 systemd가 읽지 않는다. 원래 없던 review92는
+unlink 후 directory sync한다. 개별 파일 교체의 원자성이며 여러 파일의
+자동 전원 장애 복구 프로토콜을 새로 구현한 것은 아니다.
+
+회귀는 실제 리더 선종료·TERM 무시 손자, 전환/복구 각각의 partial-write·
+rename 직전·직후 SIGKILL, 옛 계약만 제공하는 HTTP 서버를 사용한다.
+원자성은 7건 red 후 수정됐고, 기존 event.args 계약 누락도 전체 시험이
+잡아내 수정했다. 새 계약의 Origin/후보 인증 검사는 target 실패 시험으로
+유지했다. 이전 e2e·UI·실제 DB 복원 구현은 변경하지 않았다.
+
+독립 재현:
+`node ~/.local/state/omonyang/TASK-CRM-63-FIX6-20261013/group-proof.mjs review`,
+`atomic-proof.mjs review`, `legacy-proof.mjs review` (Node 22).
+근거와 인수 결과는 같은 FIX6 디렉터리 및
+`/tmp/ulw-20261013-214248.rrdKKV.md`에 보존한다.
+최종 Node 20/22 시험기에서 각각 **85/85**, 독립 CLI **12/12**
+(그룹 2, 원자성 7, 옛 HTTP 계약 3)가 통과했다. 디렉터리 단위 JS와
+shell 진단, 내장 Node 문법도 통과했다.
+운영 전환·재시작·DB/인증/실제 후보 변경은 실행하지 않는다.

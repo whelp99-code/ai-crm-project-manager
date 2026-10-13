@@ -79,6 +79,10 @@ const snapshots = [
   { name: "web90", path: webDropin, required: true },
   { name: "review92", path: reviewDropin, required: false },
 ];
+const releaseContracts = {
+  target: { pages: ["http://127.0.0.1:4313/login", "http://127.0.0.1:4174/login"], nativeAuth: true },
+  baseline: { pages: ["http://127.0.0.1:4313/"], nativeAuth: false },
+};
 const foreignOrigin = "https://crm-origin-rejected.invalid";
 let changed = false, createdRelease = false, published = false, rollbackFailed = false;
 let backupDir, scratch, startupTimer, migrateHash, previousReviewExecution, restoreContainer, stage = "prerequisites";
@@ -269,9 +273,9 @@ async function verifyWorkingDirectory(unit, expected) {
   }
 }
 
-async function requireHttpReady() {
+async function requireHttpReady(contract) {
   for (const endpoint of ["http://127.0.0.1:4312/health", "http://127.0.0.1:4312/ready",
-    "http://127.0.0.1:4313/login", "http://127.0.0.1:4174/login"]) {
+    ...contract.pages]) {
     if ((await httpResult(endpoint, ["--retry", "120", "--retry-connrefused",
       "--retry-delay", "1", "--retry-max-time", "120"])).status !== "200") throw new Error("health_not_200");
   }
@@ -289,23 +293,36 @@ async function verifyReviewExecution(expected) {
   if (executionSpec(actual) !== expected) throw new Error("runtime_execution_mismatch");
 }
 
-async function verifyRuntime(environments, directories, execution) {
-  await requireHttpReady();
-  for (const [port, index] of [[4313, 1], [4174, 2]]) {
-    const allowed = environments[index].CRM_WEB_ORIGIN;
-    const invalid = await httpResult(`http://127.0.0.1:${port}/api/self-entry`, ["-H", `Origin: ${allowed}`,
-      "-H", "Content-Type: application/json", "--data", "{}"]);
-    errorCode(invalid.body, invalid.status, "400", "INPUT_INVALID", "web_origin_not_ready");
-    const denied = await httpResult(`http://127.0.0.1:${port}/api/self-entry`, ["-H", `Origin: ${foreignOrigin}`,
-      "-H", "Content-Type: application/json", "--data", "{}"]);
-    errorCode(denied.body, denied.status, "403", "ORIGIN_DENIED", "origin_rejection_failed");
-    const reviewUnauth = await httpResult(`http://127.0.0.1:${port}/api/cwos/v2/mail-candidate-review`,
-      ["-H", `Origin: ${allowed}`]);
-    errorCode(reviewUnauth.body, reviewUnauth.status, "401", "STEP_UP_REQUIRED", "candidate_api_not_401");
-  }
-  const candidate = await httpResult("http://127.0.0.1:4312/api/cwos/v2/mail-candidate-review");
-  if (candidate.status !== "401") throw new Error("candidate_api_not_401");
+async function verifyRuntime(environments, directories, execution, contract) {
+  await requireHttpReady(contract);
+  if (contract.nativeAuth) {
+    for (const [port, index] of [[4313, 1], [4174, 2]]) {
+      const allowed = environments[index].CRM_WEB_ORIGIN;
+      const invalid = await httpResult(`http://127.0.0.1:${port}/api/self-entry`, ["-H", `Origin: ${allowed}`,
+        "-H", "Content-Type: application/json", "--data", "{}"]);
+      errorCode(invalid.body, invalid.status, "400", "INPUT_INVALID", "web_origin_not_ready");
+      const denied = await httpResult(`http://127.0.0.1:${port}/api/self-entry`, ["-H", `Origin: ${foreignOrigin}`,
+        "-H", "Content-Type: application/json", "--data", "{}"]);
+      errorCode(denied.body, denied.status, "403", "ORIGIN_DENIED", "origin_rejection_failed");
+      const reviewUnauth = await httpResult(`http://127.0.0.1:${port}/api/cwos/v2/mail-candidate-review`,
+        ["-H", `Origin: ${allowed}`]);
+      errorCode(reviewUnauth.body, reviewUnauth.status, "401", "STEP_UP_REQUIRED", "candidate_api_not_401");
+    }
+    const candidate = await httpResult("http://127.0.0.1:4312/api/cwos/v2/mail-candidate-review");
+    if (candidate.status !== "401") throw new Error("candidate_api_not_401");
 
+  } else {
+    // The pinned legacy helper has no public health bypass; never read its Basic key.
+    const legacy = await httpResult("http://127.0.0.1:4174/", ["--include", "--retry", "120",
+      "--retry-connrefused", "--retry-delay", "1", "--retry-max-time", "120"]);
+    const separator = legacy.body.indexOf("\r\n\r\n");
+    const headers = legacy.body.slice(0, separator).split("\r\n");
+    const challenge = headers.find(line => line.toLowerCase().startsWith("www-authenticate:"))?.slice(17).trim();
+    if (legacy.status !== "401" || separator < 0 || challenge !== 'Basic realm="Core5 review"'
+      || legacy.body.slice(separator + 4) !== "Core5 review access key required.") {
+      throw new Error("legacy_review_not_ready");
+    }
+  }
   await requireActive("active");
   for (const [index, unit] of services.entries()) {
     await verifyEnvironment(unit, environments[index]);
@@ -322,7 +339,7 @@ async function rollback() {
   await command("rollback_restart", "systemctl", ["--user", "restart", "core5-api", "core5-web", "core5-review-ui"]);
   await verifyRuntime([...previousEnvironment.values()],
     services.map((_, index) => index === 2 ? legacyReview : join(oldRelease, index ? "apps/web" : "apps/api")),
-    previousReviewExecution);
+    previousReviewExecution, releaseContracts.baseline);
   changed = false;
   process.stderr.write("CRM_ROLLBACK_OK release=app-e91bb512\n");
 }
@@ -609,7 +626,7 @@ gosu postgres pg_restore -h "$directory" -U "$1" -d postgres --exit-on-error --s
   await stopWatchers();
   await verifyRuntime(runtimeValues,
     services.map((_, index) => join(release, index ? "apps/web" : "apps/api")),
-    `${node}\n${reviewCommand.join(" ")}`);
+    `${node}\n${reviewCommand.join(" ")}`, releaseContracts.target);
   checkInterrupted();
   changed = false;
   published = true;
@@ -620,7 +637,7 @@ try {
   await main();
 } catch (error) {
   const failedStage = stage;
-  const safeReason = /^(operator_approval_required|production_https_origins_required|owner_enrollment_required|new_bcrypt_enrollment_required|legacy_auth_state_must_be_preserved|environment_value_rejected|source_pin_mismatch|target_sha_required|target_marker_missing|target_not_descendant|sql_delta_refused|baseline_changed|dropin_changed|review_baseline_changed|review_config_missing|immutable_release_exists|private_file_required|database_profile_invalid|empty_dump|startup_timeout|startup_watch_ended|health_not_200|web_origin_not_ready|origin_rejection_failed|candidate_api_not_401|runtime_process_unavailable|runtime_environment_mismatch|runtime_working_directory_mismatch|runtime_execution_mismatch|runtime_manifest_invalid|runtime_page_prerendered|path_whitespace_rejected|node22_required|[a-z0-9_]+_exit_(\d+|null))$/;
+  const safeReason = /^(operator_approval_required|production_https_origins_required|owner_enrollment_required|new_bcrypt_enrollment_required|legacy_auth_state_must_be_preserved|environment_value_rejected|source_pin_mismatch|target_sha_required|target_marker_missing|target_not_descendant|sql_delta_refused|baseline_changed|dropin_changed|review_baseline_changed|review_config_missing|immutable_release_exists|private_file_required|database_profile_invalid|empty_dump|startup_timeout|startup_watch_ended|health_not_200|web_origin_not_ready|origin_rejection_failed|candidate_api_not_401|legacy_review_not_ready|runtime_process_unavailable|runtime_environment_mismatch|runtime_working_directory_mismatch|runtime_execution_mismatch|runtime_manifest_invalid|runtime_page_prerendered|path_whitespace_rejected|node22_required|[a-z0-9_]+_exit_(\d+|null))$/;
   const reason = interruptedSignal ? `interrupted_${interruptedSignal}`
     : typeof error?.message === "string" && safeReason.test(error.message) ? error.message : "private_input_or_io_rejected";
   rollingBack = true;
