@@ -47,7 +47,7 @@ exec "$NODE" --input-type=module - <<'NODE'
 import { spawn } from "node:child_process";
 import { constants, createReadStream } from "node:fs";
 import { access, chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join, dirname } from "node:path";
 import { parseEnv } from "node:util";
 
@@ -81,7 +81,7 @@ const snapshots = [
 ];
 const foreignOrigin = "https://crm-origin-rejected.invalid";
 let changed = false, createdRelease = false, published = false, rollbackFailed = false;
-let backupDir, scratch, startupTimer, migrateHash, previousReviewExecution, stage = "prerequisites";
+let backupDir, scratch, startupTimer, migrateHash, previousReviewExecution, restoreContainer, stage = "prerequisites";
 const watchers = [];
 const previousEnvironment = new Map();
 let interruptedSignal, rollingBack = false;
@@ -242,8 +242,9 @@ async function verifyWorkingDirectory(unit, expected) {
   }
 }
 
-async function requireApiReady() {
-  for (const endpoint of ["http://127.0.0.1:4312/health", "http://127.0.0.1:4312/ready"]) {
+async function requireHttpReady() {
+  for (const endpoint of ["http://127.0.0.1:4312/health", "http://127.0.0.1:4312/ready",
+    "http://127.0.0.1:4313/login", "http://127.0.0.1:4174/login"]) {
     if ((await httpResult(endpoint, ["--retry", "120", "--retry-connrefused",
       "--retry-delay", "1", "--retry-max-time", "120"])).status !== "200") throw new Error("health_not_200");
   }
@@ -262,7 +263,22 @@ async function verifyReviewExecution(expected) {
 }
 
 async function verifyRuntime(environments, directories, execution) {
-  await requireApiReady();
+  await requireHttpReady();
+  for (const [port, index] of [[4313, 1], [4174, 2]]) {
+    const allowed = environments[index].CRM_WEB_ORIGIN;
+    const invalid = await httpResult(`http://127.0.0.1:${port}/api/self-entry`, ["-H", `Origin: ${allowed}`,
+      "-H", "Content-Type: application/json", "--data", "{}"]);
+    errorCode(invalid.body, invalid.status, "400", "INPUT_INVALID", "web_origin_not_ready");
+    const denied = await httpResult(`http://127.0.0.1:${port}/api/self-entry`, ["-H", `Origin: ${foreignOrigin}`,
+      "-H", "Content-Type: application/json", "--data", "{}"]);
+    errorCode(denied.body, denied.status, "403", "ORIGIN_DENIED", "origin_rejection_failed");
+    const reviewUnauth = await httpResult(`http://127.0.0.1:${port}/api/cwos/v2/mail-candidate-review`,
+      ["-H", `Origin: ${allowed}`]);
+    errorCode(reviewUnauth.body, reviewUnauth.status, "401", "STEP_UP_REQUIRED", "candidate_api_not_401");
+  }
+  const candidate = await httpResult("http://127.0.0.1:4312/api/cwos/v2/mail-candidate-review");
+  if (candidate.status !== "401") throw new Error("candidate_api_not_401");
+
   await requireActive("active");
   for (const [index, unit] of services.entries()) {
     await verifyEnvironment(unit, environments[index]);
@@ -450,11 +466,39 @@ async function main() {
     }
     await command("dump_catalog", "docker", ["run", "--rm", "-i", image, "pg_restore", "--list"],
       { inputFd: input.fd, outputFd: "ignore" });
+    const rolesPath = join(backupDir, "restore-roles.sql");
+    const roles = await open(rolesPath, "wx", 0o600);
+    try {
+      await command("backup_roles", "docker", ["run", "--rm", "--network=host",
+        ...["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGSSLMODE"].flatMap(key => ["--env", key]),
+        image, "pg_dumpall", "--roles-only", "--no-role-passwords"], { env: pgEnv, outputFd: roles.fd });
+    } finally { await roles.close(); }
+    const restoreId = randomUUID().replaceAll("-", "");
+    restoreContainer = `crm-restore-${restoreId}`;
+    const restoreInput = await open(dumpPath, "r");
+    try {
+      await command("backup_restore", "docker", ["run", "--name", restoreContainer, "--network=none", "-i",
+        "--mount", `type=bind,src=${rolesPath},dst=/restore-roles.sql,readonly`, image, "bash", "-ec", `
+directory=$(mktemp -d)
+chown postgres:postgres "$directory"
+trap 'gosu postgres pg_ctl -D "$directory/data" -m immediate -w stop; rm -rf "$directory"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+gosu postgres initdb -D "$directory/data" -U "$1" -A trust --no-locale --encoding=UTF8
+gosu postgres pg_ctl -D "$directory/data" -l "$directory/server.log" -o "-c listen_addresses='' -k $directory" -w start
+gosu postgres psql -h "$directory" -U "$1" -d postgres -v ON_ERROR_STOP=1 < /restore-roles.sql
+gosu postgres pg_restore -h "$directory" -U "$1" -d postgres --exit-on-error --single-transaction --no-owner
+`, "restore-backup", `crm_restore_${restoreId}`], { inputFd: restoreInput.fd, outputFd: "ignore" });
+    } finally { await restoreInput.close(); }
     process.stdout.write(`CRM_BACKUP_OK bytes=${size} sha256=${hash.digest("hex")}\n`);
   } finally { await input.close(); }
   process.stdout.write("CRM_MIGRATIONS_REQUIRED=0\n");
+  const publicBuildKeys = ["NEXT_PUBLIC_API_BASE_URL", "NEXT_PUBLIC_WORKSPACE_ID",
+    "NEXT_PUBLIC_OPERATOR_PRINCIPAL_ID", "NEXT_PUBLIC_APPROVER_PRINCIPAL_ID"];
   const buildEnvironment = { HOME: join(scratch, "build-home"), PATH: `${dirname(node)}:${process.env.PATH}`,
-    NODE_ENV: "production", CI: "1", NEXT_PUBLIC_API_BASE_URL: "" };
+    NODE_ENV: "production", CI: "1", ...Object.fromEntries(Object.entries({ ...process.env, ...binding })
+      .filter(([key]) => publicBuildKeys.includes(key))) };
   await mkdir(buildEnvironment.HOME, { mode: 0o700 });
   await command("frozen_dependencies", pnpm, ["install", "--frozen-lockfile", "--prod=false"], { cwd: release, env: buildEnvironment });
   // Privileged target validation runs only after the verified pre-target backup.
@@ -463,6 +507,13 @@ async function main() {
     { cwd: release, env: { ...process.env, ...binding, PATH: buildEnvironment.PATH } });
   const buildArgs = ["--filter", "@ai-crm/web", "build"];
   await command("web_build", slot ? "bash" : pnpm, slot ? [slot, pnpm, ...buildArgs] : buildArgs, { cwd: release, env: buildEnvironment });
+  const prerender = JSON.parse(await readFile(join(release, "apps/web/.next/prerender-manifest.json"), "utf8"));
+  if (prerender.version !== 4 || !prerender.routes || typeof prerender.routes !== "object" || Array.isArray(prerender.routes)) {
+    throw new Error("runtime_manifest_invalid");
+  }
+  if (["/", "/work", "/pilot", "/approvals", "/monitor", "/v2"].some(route => Object.hasOwn(prerender.routes, route))) {
+    throw new Error("runtime_page_prerendered");
+  }
   await access(reviewEntry, constants.R_OK);
   for (const item of snapshots) {
     try {
@@ -530,20 +581,6 @@ async function main() {
       command("restart", "systemctl", ["--user", "restart", "core5-api", "core5-web", "core5-review-ui"]))]);
   clearTimeout(startupTimer);
   await stopWatchers();
-  for (const [port, allowed] of [[4313, origin], [4174, reviewOrigin]]) {
-    if ((await httpResult(`http://127.0.0.1:${port}/login`)).status !== "200") throw new Error("health_not_200");
-    const invalid = await httpResult(`http://127.0.0.1:${port}/api/self-entry`, ["-H", `Origin: ${allowed}`,
-      "-H", "Content-Type: application/json", "--data", "{}"]);
-    errorCode(invalid.body, invalid.status, "400", "INPUT_INVALID", "web_origin_not_ready");
-    const denied = await httpResult(`http://127.0.0.1:${port}/api/self-entry`, ["-H", `Origin: ${foreignOrigin}`,
-      "-H", "Content-Type: application/json", "--data", "{}"]);
-    errorCode(denied.body, denied.status, "403", "ORIGIN_DENIED", "origin_rejection_failed");
-    const reviewUnauth = await httpResult(`http://127.0.0.1:${port}/api/cwos/v2/mail-candidate-review`,
-      ["-H", `Origin: ${allowed}`]);
-    errorCode(reviewUnauth.body, reviewUnauth.status, "401", "STEP_UP_REQUIRED", "candidate_api_not_401");
-  }
-  const candidate = await httpResult("http://127.0.0.1:4312/api/cwos/v2/mail-candidate-review");
-  if (candidate.status !== "401") throw new Error("candidate_api_not_401");
   await verifyRuntime(runtimeValues,
     services.map((_, index) => join(release, index ? "apps/web" : "apps/api")),
     `${node}\n${reviewCommand.join(" ")}`);
@@ -557,7 +594,7 @@ try {
   await main();
 } catch (error) {
   const failedStage = stage;
-  const safeReason = /^(operator_approval_required|production_https_origins_required|owner_enrollment_required|new_bcrypt_enrollment_required|legacy_auth_state_must_be_preserved|environment_value_rejected|source_pin_mismatch|target_sha_required|target_marker_missing|target_not_descendant|sql_delta_refused|baseline_changed|dropin_changed|review_baseline_changed|review_config_missing|immutable_release_exists|private_file_required|database_profile_invalid|empty_dump|startup_timeout|startup_watch_ended|health_not_200|web_origin_not_ready|origin_rejection_failed|candidate_api_not_401|runtime_process_unavailable|runtime_environment_mismatch|runtime_working_directory_mismatch|runtime_execution_mismatch|path_whitespace_rejected|node22_required|[a-z0-9_]+_exit_(\d+|null))$/;
+  const safeReason = /^(operator_approval_required|production_https_origins_required|owner_enrollment_required|new_bcrypt_enrollment_required|legacy_auth_state_must_be_preserved|environment_value_rejected|source_pin_mismatch|target_sha_required|target_marker_missing|target_not_descendant|sql_delta_refused|baseline_changed|dropin_changed|review_baseline_changed|review_config_missing|immutable_release_exists|private_file_required|database_profile_invalid|empty_dump|startup_timeout|startup_watch_ended|health_not_200|web_origin_not_ready|origin_rejection_failed|candidate_api_not_401|runtime_process_unavailable|runtime_environment_mismatch|runtime_working_directory_mismatch|runtime_execution_mismatch|runtime_manifest_invalid|runtime_page_prerendered|path_whitespace_rejected|node22_required|[a-z0-9_]+_exit_(\d+|null))$/;
   const reason = interruptedSignal ? `interrupted_${interruptedSignal}`
     : typeof error?.message === "string" && safeReason.test(error.message) ? error.message : "private_input_or_io_rejected";
   rollingBack = true;
@@ -571,6 +608,7 @@ try {
   clearTimeout(startupTimer);
   await stopChildren();
   try {
+    if (restoreContainer) await command("restore_cleanup", "docker", ["rm", "--force", "--volumes", restoreContainer]);
     if (scratch) await rm(scratch, { recursive: true });
     if (createdRelease && !published && !changed && !rollbackFailed) await rm(release, { recursive: true });
   } catch {

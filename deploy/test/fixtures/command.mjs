@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, watch, writeFileSync, writeSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, watch, writeFileSync, writeSync } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
@@ -96,7 +97,7 @@ async function main() {
       return 0;
     }
     if (operation === "merge-base" && values[0] === "--is-ancestor"
-      && commits.includes(values[1]) && commits.includes(values[2])) return 0;
+      && commits.includes(values[1]) && commits.includes(values[2])) return fixture.sourceUnrelated ? 1 : 0;
     if (operation === "diff" && values[0] === "--exit-code"
       && commits.includes(values[1]) && commits.includes(values[2])) return fixture.sqlDelta ? 1 : 0;
     if (operation === "show" && commits.includes(values[0].split(":")[0])
@@ -113,13 +114,20 @@ async function main() {
   if (name === "pnpm") {
     const build = args[0] === "install" || args.includes("build");
     const exposed = Object.keys(process.env).filter(key => /DATABASE|PGHOST|PGPASSWORD|API_KEY|SECRET|TOKEN|AUTH_STATE/.test(key));
-    event({ name, args, build, exposed, backupValidated: existsSync(join(root, "catalog.json")) });
+    event({ name, args, build, exposed, backupValidated: existsSync(join(root, "restore.json")),
+      publicApiBase: process.env.NEXT_PUBLIC_API_BASE_URL ?? null });
     if (fixture.mutateDb && build && exposed.length) {
       state.dbVersion++;
       saveState(root, state);
     }
     mkdirSync(join(process.cwd(), "apps/web/node_modules/next/dist/bin"), { recursive: true });
     writeFileSync(join(process.cwd(), "apps/web/node_modules/next/dist/bin/next"), "// fixture Next entry\n");
+    if (args.includes("build")) {
+      mkdirSync(join(process.cwd(), "apps/web/.next"), { recursive: true });
+      writeFileSync(join(process.cwd(), "apps/web/.next/prerender-manifest.json"), JSON.stringify({
+        version: 4, routes: fixture.staticRoute ? { [fixture.staticRoute]: {} } : {},
+      }));
+    }
     return 0;
   }
   if (name === "systemctl") {
@@ -228,6 +236,60 @@ async function main() {
     return new Promise(() => {});
   }
   if (name === "docker") {
+    event({ name, args });
+    if (fixture.realPg && (args.includes("pg_dump") || args.includes("pg_dumpall"))) {
+      if (args.includes("pg_dump")) writeFileSync(join(root, "dump-snapshot.json"), JSON.stringify({ dbVersion: state.dbVersion }));
+      await pipeline(createReadStream(args.includes("pg_dump") ? fixture.realPg.dumpPath : fixture.realPg.rolesPath), process.stdout);
+      return 0;
+    }
+    if (fixture.realPg && args.includes("pg_restore")) {
+      const child = spawn(join(fixture.realPg.bin, "pg_restore"), args.slice(args.indexOf("pg_restore") + 1),
+        { stdio: "inherit" });
+      const code = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+      writeFileSync(join(root, "catalog.json"), JSON.stringify({ native: true, code }));
+      return code;
+    }
+    if (args.includes("pg_dumpall")) {
+      process.stdout.write("CREATE ROLE fixture_source;\n");
+      return 0;
+    }
+    if (args.includes("restore-backup")) {
+      writeFileSync(join(root, "restore-container"), args[args.indexOf("--name") + 1]);
+      if (fixture.realPg) {
+        const mount = args[args.indexOf("--mount") + 1];
+        const rolePath = mount.slice("type=bind,src=".length, mount.indexOf(",dst="));
+        // Adapt only Docker's uid/mount transport; run the shipped restore
+        // commands against the real, task-owned PostgreSQL major version.
+        const script = args[args.indexOf("-ec") + 1]
+          .replaceAll("gosu postgres ", "")
+          .replace('chown postgres:postgres "$directory"', ":")
+          .replaceAll("/restore-roles.sql", rolePath)
+          + `\npsql -h "$directory" -U "$1" -d postgres -Atc 'SELECT count(*)::text || chr(58) || sum(id)::text FROM restore_probe' > ${JSON.stringify(join(root, "restore-proof"))}`;
+        const child = spawn("bash", ["-ec", script, "restore-backup", args.at(-1)], {
+          stdio: "inherit",
+          env: { ...process.env, PATH: `${fixture.realPg.bin}:/usr/bin:/bin`, TMPDIR: root },
+        });
+        const code = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+        writeFileSync(join(root, "restore.json"), JSON.stringify({ native: true, code,
+          proof: existsSync(join(root, "restore-proof")) ? readFileSync(join(root, "restore-proof"), "utf8").trim() : null }));
+        return code;
+      }
+      if (fixture.signalAt === "restore") {
+        const subscription = watch(root, () => {});
+        process.once("SIGTERM", () => { subscription.close(); process.exit(0); });
+        process.kill(process.ppid, fixture.signal);
+        return new Promise(() => {});
+      }
+      const hash = createHash("sha256");
+      let bytes = 0;
+      for await (const chunk of process.stdin) { bytes += chunk.length; hash.update(chunk); }
+      writeFileSync(join(root, "restore.json"), JSON.stringify({ bytes, sha256: hash.digest("hex") }));
+      return fixture.badRestore ? 29 : 0;
+    }
+    if (args[0] === "rm") {
+      writeFileSync(join(root, "restore-container-removed"), args.at(-1));
+      return 0;
+    }
     if (args.includes("pg_dump")) {
       if (fixture.contend && !contender) {
         await new Promise(resolve => {
@@ -261,7 +323,12 @@ async function main() {
     const url = args.at(-1);
     const rollback = state.generation > 0 && !configuration(root, "core5-api").cwd.includes(fixture.release);
     event({ name, args, rollback });
-    if (rollback && fixture.coldRollback && url.startsWith("http://127.0.0.1:4312/")
+    if (rollback && fixture.rollbackUnavailableUrl === url) {
+      process.stdout.write("\n000");
+      return 7;
+    }
+    if (rollback && (fixture.coldRollback && ["http://127.0.0.1:4312/health", "http://127.0.0.1:4312/ready"].includes(url)
+      || fixture.coldRollbackUrls?.includes(url))
       && !url.endsWith(fixture.rollbackHttpFailure ?? "\0")) {
       const requests = [];
       const server = createServer((request, response) => {
@@ -306,12 +373,21 @@ async function main() {
         if (server.listening) await new Promise(resolve => server.close(resolve));
       }
     }
-    if (rollback && fixture.rollbackHttpFailure && url.endsWith(fixture.rollbackHttpFailure)) {
+    const httpFailure = rollback ? fixture.rollbackHttpFailure : fixture.deployHttpFailure;
+    if (httpFailure && url.endsWith(httpFailure)) {
       process.stdout.write('{"error":"not_ready"}\n503');
+      return 0;
+    }
+    if (rollback && fixture.rollbackBoundaryFailure === url) {
+      process.stdout.write("{}\n200");
       return 0;
     }
     if (url.endsWith("/api/self-entry")) {
       const foreign = args.includes("Origin: https://crm-origin-rejected.invalid");
+      if (rollback && foreign && fixture.rollbackForeignOriginUrl === url) {
+        process.stdout.write("{}\n400");
+        return 0;
+      }
       process.stdout.write(foreign ? '{"error":"ORIGIN_DENIED"}\n403' : '{"error":"INPUT_INVALID"}\n400');
     } else if (url.endsWith("/api/cwos/v2/mail-candidate-review")) {
       process.stdout.write('{"error":"STEP_UP_REQUIRED"}\n401');

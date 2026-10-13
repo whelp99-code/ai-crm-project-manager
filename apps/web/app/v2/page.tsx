@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 interface Readiness {
   workspaceId: string;
   runtimeVersion: number;

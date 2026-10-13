@@ -23,6 +23,150 @@ function restored(result) {
 }
 
 describe("PR65 deployment runtime regressions", () => {
+  it.each([4312, 4313, 4174])("rejects restored candidate authentication failure on %s", async port => {
+    await withDeployment({ failReload: true, rollbackBoundaryFailure: `http://127.0.0.1:${port}/api/cwos/v2/mail-candidate-review` }, result => {
+      expect(result.stderr).toContain("ROLLBACK_INCOMPLETE");
+      expect(result.stderr).not.toContain("CRM_ROLLBACK_OK");
+      expect(exists(result.release)).toBe(true);
+      restored(result);
+    });
+  });
+
+  it.each([4313, 4174])("rejects restored foreign Origin boundary failure on %s", async port => {
+    await withDeployment({ failReload: true, rollbackForeignOriginUrl: `http://127.0.0.1:${port}/api/self-entry` }, result => {
+      expect(result.stderr).toContain("ROLLBACK_INCOMPLETE");
+      expect(result.stderr).not.toContain("CRM_ROLLBACK_OK");
+      expect(exists(result.release)).toBe(true);
+      restored(result);
+    });
+  });
+
+  it.each(["/", "/work", "/pilot", "/approvals", "/monitor", "/v2"])("refuses a build with frozen runtime route %s", async staticRoute => {
+    await withDeployment({ staticRoute }, result => {
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("runtime_page_prerendered");
+      expect(result.events.some(event => event.args.includes("daemon-reload"))).toBe(false);
+      expect(exists(result.release)).toBe(false);
+      restored(result);
+    });
+  });
+
+  it("preserves explicit public build settings without exposing operational secrets", async () => {
+    await withDeployment({ publicApiBase: "https://build-api.invalid" }, result => {
+      expect(result.code, result.stderr).toBe(0);
+      const build = result.events.filter(event => event.build);
+      expect(build.every(event => event.publicApiBase === "https://build-api.invalid")).toBe(true);
+      expect(build.every(event => event.exposed.length === 0)).toBe(true);
+    });
+  });
+
+  it("uses the approved corrected source target", async () => {
+    await withDeployment({ target: "2".repeat(40) }, result => {
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stdout).toContain("release=app-22222222");
+      expect(result.configuration("core5-api").cwd).toBe(join(result.release, "apps/api"));
+    });
+  });
+
+  it("rejects catalog-readable data that fails restoration before target execution", async () => {
+    await withDeployment({ badRestore: true }, result => {
+      expect(exists(join(result.root, "catalog.json"))).toBe(true);
+      expect(result.code).toBe(1);
+      expect(result.stdout).not.toContain("CRM_BACKUP_OK");
+      expect(result.events.some(event => event.name === "pnpm")).toBe(false);
+      expect(result.events.some(event => event.args.includes("daemon-reload"))).toBe(false);
+      expect(exists(join(result.root, "restore-container-removed"))).toBe(true);
+      expect(exists(result.release)).toBe(false);
+      restored(result);
+    });
+  });
+
+  it("removes the temporary restore container after interruption", async () => {
+    await withDeployment({ signal: "SIGHUP", signalAt: "restore" }, result => {
+      expect(result.code).toBe(129);
+      expect(result.stdout).not.toContain("CRM_BACKUP_OK");
+      expect(result.events.some(event => event.name === "pnpm")).toBe(false);
+      expect(readText(join(result.root, "restore-container-removed")))
+        .toBe(readText(join(result.root, "restore-container")));
+      expect(result.liveOwnedProcesses).toBe(0);
+      expect(exists(result.release)).toBe(false);
+      restored(result);
+    });
+  });
+
+  it("waits for restored 4313 login port before accepting rollback", async () => {
+    await withDeployment({ failReload: true, coldRollbackUrls: ["http://127.0.0.1:4313/login"] }, result => {
+      expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+      const response = result.events.find(event => event.realHttp);
+      expect(response?.realHttp.refused).toBe(true);
+      expect(response?.realHttp.output).toBe("{}\n200");
+      expect(response?.realHttp.requests).toEqual(["/login"]);
+      expect(exists(result.release)).toBe(false);
+      restored(result);
+    });
+  }, 20_000);
+
+  it.each([
+    { rollbackHttpFailure: "http://127.0.0.1:4313/login" },
+    { rollbackUnavailableUrl: "http://127.0.0.1:4313/login" },
+    { rollbackBoundaryFailure: "http://127.0.0.1:4313/api/self-entry" },
+  ])("preserves artifacts when the restored web surface fails: %j", async options => {
+    await withDeployment({ failReload: true, ...options }, result => {
+      expect(result.stderr).toContain("ROLLBACK_INCOMPLETE");
+      expect(result.stderr).not.toContain("CRM_ROLLBACK_OK");
+      expect(exists(result.release)).toBe(true);
+      restored(result);
+    });
+  });
+
+  it("rejects forward 4313 failure and checks the restored web surface", async () => {
+    await withDeployment({ deployHttpFailure: "http://127.0.0.1:4313/login" }, result => {
+      expect(result.code).toBe(1);
+      expect(result.stdout).not.toContain("CRM_REVIEW_UI_LIVE");
+      expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+      expect(result.events.some(event => event.rollback
+        && event.args.at(-1) === "http://127.0.0.1:4313/login")).toBe(true);
+      restored(result);
+    });
+  });
+
+  it("waits for restored 4174 login port before accepting rollback", async () => {
+    await withDeployment({ failReload: true, coldRollbackUrls: ["http://127.0.0.1:4174/login"] }, result => {
+      expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+      const response = result.events.find(event => event.realHttp);
+      expect(response?.realHttp.refused).toBe(true);
+      expect(response?.realHttp.output).toBe("{}\n200");
+      expect(response?.realHttp.requests).toEqual(["/login"]);
+      expect(exists(result.release)).toBe(false);
+      restored(result);
+    });
+  }, 20_000);
+
+  it.each([
+    { rollbackHttpFailure: "http://127.0.0.1:4174/login" },
+    { rollbackUnavailableUrl: "http://127.0.0.1:4174/login" },
+    { rollbackBoundaryFailure: "http://127.0.0.1:4174/api/self-entry" },
+  ])("preserves artifacts when the restored web surface fails: %j", async options => {
+    await withDeployment({ failReload: true, ...options }, result => {
+      expect(result.stderr).toContain("ROLLBACK_INCOMPLETE");
+      expect(result.stderr).not.toContain("CRM_ROLLBACK_OK");
+      expect(exists(result.release)).toBe(true);
+      restored(result);
+    });
+  });
+
+  it("rejects forward 4174 failure and checks the restored web surface", async () => {
+    await withDeployment({ deployHttpFailure: "http://127.0.0.1:4174/login" }, result => {
+      expect(result.code).toBe(1);
+      expect(result.stdout).not.toContain("CRM_REVIEW_UI_LIVE");
+      expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+      expect(result.events.some(event => event.rollback
+        && event.args.at(-1) === "http://127.0.0.1:4174/login")).toBe(true);
+      restored(result);
+    });
+  });
+
+
   it.each(["core5-api", "core5-web", "core5-review-ui"])("does not publish when only %s is dead", async deadUnit => {
     await withDeployment({ deadUnit, deadPhase: "deploy" }, result => {
       expect(result.code).not.toBe(0);
@@ -111,7 +255,7 @@ describe("PR65 deployment runtime regressions", () => {
     });
   });
 
-  it.each([{ sourceMismatch: true }, { sqlDelta: true }])("preserves source guards with modeled Git: %j", async options => {
+  it.each([{ sourceMismatch: true }, { sqlDelta: true }, { sourceUnrelated: true }])("preserves source guards with modeled Git: %j", async options => {
     await withDeployment(options, result => {
       expect(result.code).not.toBe(0);
       expect(result.events.some(event => event.name === "systemctl")).toBe(false);
