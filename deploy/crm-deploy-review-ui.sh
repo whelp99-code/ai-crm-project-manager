@@ -91,12 +91,19 @@ const terminationTimers = new Map();
 function startChild(executable, args, options) {
   const child = spawn(executable, args, { ...options, detached: true });
   const closed = new Promise(resolve => child.once("close", resolve));
-  children.set(child, closed);
-  void closed.then(() => {
-    clearTimeout(terminationTimers.get(child));
-    terminationTimers.delete(child);
+  const stopped = closed.then(async () => {
+    const termination = terminationTimers.get(child);
+    if (termination) {
+      let groupExists = true;
+      try { process.kill(-child.pid, 0); }
+      catch (error) { if (error.code !== "ESRCH") throw error; groupExists = false; }
+      if (groupExists) await termination.done;
+      else clearTimeout(termination.timer);
+      terminationTimers.delete(child);
+    }
     children.delete(child);
   });
+  children.set(child, stopped);
   return child;
 }
 
@@ -104,10 +111,14 @@ function terminate(child) {
   if (!child.pid || terminationTimers.has(child)) return;
   try { process.kill(-child.pid, "SIGTERM"); }
   catch (error) { if (error.code !== "ESRCH") throw error; }
-  terminationTimers.set(child, setTimeout(() => {
+  let complete;
+  const done = new Promise(resolve => { complete = resolve; });
+  const timer = setTimeout(() => {
     try { process.kill(-child.pid, "SIGKILL"); }
     catch (error) { if (error.code !== "ESRCH") throw error; }
-  }, 5_000));
+    complete();
+  }, 5_000);
+  terminationTimers.set(child, { timer, done });
 }
 
 function interrupt(signal) {
@@ -188,10 +199,10 @@ function errorCode(body, status, expectedStatus, expectedError, reason) {
 
 async function stopWatchers() {
   await Promise.all(watchers.map(async watcher => {
-    if (watcher.exitCode !== null || watcher.signalCode !== null) return;
-    const closed = new Promise(resolve => watcher.once("close", resolve));
+    const stopped = children.get(watcher);
+    if (!stopped) return;
     terminate(watcher);
-    await closed;
+    await stopped;
   }));
 }
 

@@ -81,7 +81,8 @@ async function main() {
   if (name === "stubborn-descendant") {
     process.on("SIGTERM", () => writeFileSync(join(root, "descendant-ignored-term"), "ignored"));
     watch(root, () => {});
-    process.stdout.write("READY\n");
+    if (process.send) process.send("READY");
+    else process.stdout.write("READY\n");
     return new Promise(() => {});
   }
   if (name === "git") {
@@ -190,14 +191,23 @@ async function main() {
       if (fixture.signalAt === "restart" && deployed && !existsSync(join(root, "signal-sent"))) {
         writeFileSync(join(root, "signal-sent"), fixture.signal);
         const keepAlive = watch(root, () => {});
-        if (fixture.stubborn) {
-          process.on("SIGTERM", () => writeFileSync(join(root, "parent-ignored-term"), "ignored"));
+        if (fixture.stubborn || fixture.leaderExitsFirst) {
+          if (fixture.stubborn) {
+            process.on("SIGTERM", () => writeFileSync(join(root, "parent-ignored-term"), "ignored"));
+          } else {
+            process.once("SIGTERM", () => {
+              writeFileSync(join(root, "leader-exited-first"), String(process.pid));
+              process.exit(0);
+            });
+          }
           const descendant = spawn(process.execPath, [fileURLToPath(import.meta.url), "stubborn-descendant"],
-            { stdio: ["ignore", "pipe", "pipe"] });
+            { stdio: fixture.leaderExitsFirst ? ["ignore", "ignore", "ignore", "ipc"] : ["ignore", "pipe", "pipe"] });
           await new Promise((resolve, reject) => {
             descendant.once("error", reject);
-            descendant.stdout.once("data", () => resolve());
+            if (fixture.leaderExitsFirst) descendant.once("message", resolve);
+            else descendant.stdout.once("data", () => resolve());
           });
+          if (fixture.leaderExitsFirst) descendant.disconnect();
         } else {
           process.once("SIGTERM", () => {
             writeFileSync(join(root, "interrupted-child-closed"), "closed");

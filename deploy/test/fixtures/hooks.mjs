@@ -6,6 +6,14 @@ import { join } from "node:path";
 const root = process.env.CRM_TEST_ROOT;
 if (!root?.startsWith("/tmp/crm-deploy-test-")) throw new Error("sandbox required");
 const fixture = JSON.parse(fs.readFileSync(join(root, "fixture.json"), "utf8"));
+const originalKill = process.kill;
+process.kill = function (pid, signal) {
+  if (pid < 0 && (signal === "SIGTERM" || signal === "SIGKILL")) {
+    fs.writeFileSync(join(root, `kill-${process.pid}-${-pid}-${signal}.json`),
+      JSON.stringify({ pid, signal, at: performance.now() }));
+  }
+  return originalKill.call(this, pid, signal);
+};
 const originalSpawn = childProcess.spawn;
 childProcess.spawn = function (...args) {
   const child = originalSpawn.apply(this, args);
