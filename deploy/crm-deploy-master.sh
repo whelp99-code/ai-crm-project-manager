@@ -5,7 +5,7 @@ set -euo pipefail
 umask 077
 if [[ ${1:-} == --help ]]; then
   printf '%s\n' 'Preparation artifact; no activation without separate operator approval.' \
-    'Required: CRM_DEPLOY_APPROVAL=approved CRM_WEB_ORIGIN=https://<approved-origin>' \
+    'Required: CRM_DEPLOY_APPROVAL=approved CRM_TARGET_SHA=<full40> CRM_WEB_ORIGIN=https://<approved-origin>' \
     'OPERATOR_AUTH_API_BASE_URL=https://<approved-private-identity-origin>' \
     'CWOS_V2_OPERATOR_AUTH_STATE_PATH=<new owner-enrolled bcrypt state>' \
     'Optional: CRM_REPO_ROOT CRM_STATE_ROOT CRM_UNIT_ROOT CRM_NODE_BIN CRM_PNPM_BIN CRM_BUILD_SLOT CRM_PG_IMAGE CRM_PROC_ROOT'
@@ -14,6 +14,10 @@ fi
 [[ $# == 0 ]] || { printf '%s\n' 'CRM_ARGUMENTS_REJECTED' >&2; exit 64; }
 [[ ${CRM_DEPLOY_APPROVAL:-} == approved ]] || {
   printf '%s\n' 'CRM_DEPLOY_REFUSED_OR_FAILED stage=prerequisites reason=operator_approval_required' >&2
+  exit 1
+}
+[[ ${CRM_TARGET_SHA:-} =~ ^[0-9a-f]{40}$ ]] || {
+  printf '%s\n' 'CRM_DEPLOY_REFUSED_OR_FAILED stage=prerequisites reason=target_sha_required' >&2
   exit 1
 }
 export CRM_REPO_ROOT=${CRM_REPO_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}
@@ -34,7 +38,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { join, dirname } from "node:path";
 import { parseEnv } from "node:util";
 
-const target = "1cf5388202c01ce6ddaf2796cbefc10c47e0e4bf";
+const target = process.env.CRM_TARGET_SHA;
+const masterPin = "1cf5388202c01ce6ddaf2796cbefc10c47e0e4bf";
 const baseline = "e91bb512a2783918fd0c8b84c9e91660df348d96";
 const home = process.env.HOME;
 const root = process.env.CRM_STATE_ROOT || join(home, ".local/share/core5");
@@ -46,7 +51,7 @@ const slot = process.env.CRM_BUILD_SLOT;
 const appEnv = process.env.CRM_APP_ENV || join(home, ".config/core5/app.env");
 const humanEnv = process.env.CRM_HUMAN_ENV || join(home, ".config/core5/crm/blro-human.env");
 const procRoot = process.env.CRM_PROC_ROOT || "/proc";
-const release = join(root, "app-1cf53882");
+const release = join(root, `app-${target.slice(0, 8)}`);
 const oldRelease = join(root, "app-e91bb512");
 const services = ["core5-api", "core5-web"];
 const files = services.map(unit => join(units, `${unit}.service.d/90-crm-release.conf`));
@@ -258,6 +263,8 @@ async function main() {
   for (const executable of [node, pnpm, ...(slot ? [slot] : [])]) await access(executable);
   const revision = (await command("source_pin", "git", ["-C", repo, "rev-parse", `${target}^{commit}`])).toString().trim();
   if (revision !== target) throw new Error("source_pin_mismatch");
+  await command("target_ancestor", "git", ["-C", repo, "merge-base", "--is-ancestor", masterPin, target]);
+  await command("baseline_ancestor", "git", ["-C", repo, "merge-base", "--is-ancestor", baseline, target]);
   await command("sql_delta", "git", ["-C", repo, "diff", "--exit-code", baseline, target, "--",
     "packages/persistence/migrations", "apps/api/migrations", "scripts/migrations"]);
   for (const [index, unit] of ["core5-api", "core5-web"].entries()) {
@@ -270,7 +277,7 @@ async function main() {
   }
   try { await lstat(release); throw new Error("immutable_release_exists"); }
   catch (error) { if (error.code !== "ENOENT") throw error; }
-  scratch = await mkdtemp(join(root, ".prepare-1cf5-"));
+  scratch = await mkdtemp(join(root, `.prepare-${target.slice(0, 8)}-`));
   await chmod(scratch, 0o700);
   const archive = await command("archive", "git", ["-C", repo, "archive", target]);
   const tar = join(scratch, "source.tar");
@@ -279,7 +286,7 @@ async function main() {
   createdRelease = true;
   await command("extract", "tar", ["-xf", tar, "-C", release]);
   await mkdir(join(root, "backups"), { recursive: true, mode: 0o700 });
-  backupDir = await mkdtemp(join(root, "backups/pre-1cf5-"));
+  backupDir = await mkdtemp(join(root, "backups", `pre-${target.slice(0, 8)}-`));
   await chmod(backupDir, 0o700);
   const database = new URL(binding.ADMIN_DATABASE_URL);
   if (!["postgres:", "postgresql:"].includes(database.protocol)) throw new Error("database_profile_invalid");
@@ -287,7 +294,7 @@ async function main() {
     PGDATABASE: decodeURIComponent(database.pathname.slice(1)), PGUSER: decodeURIComponent(database.username),
     PGPASSWORD: decodeURIComponent(database.password), PGSSLMODE: database.searchParams.get("sslmode") || "prefer" };
   const image = process.env.CRM_PG_IMAGE || "postgres:16";
-  const dumpPath = join(backupDir, "crm-before-1cf53882.dump");
+  const dumpPath = join(backupDir, `crm-before-${target.slice(0, 8)}.dump`);
   const dump = await open(dumpPath, "wx", 0o600);
   try {
     await command("pg_dump", "docker", ["run", "--rm", "--network=host",
@@ -332,10 +339,13 @@ gosu postgres pg_restore -h "$directory" -U "$1" -d postgres --exit-on-error --s
     } finally { await restoreInput.close(); }
     process.stdout.write(`CRM_BACKUP_OK bytes=${size} sha256=${hash.digest("hex")}\n`);
   } finally { await input.close(); }
-  // The pinned e91..1cf5 SQL delta was checked above. Auth enrollment is a file, not SQL.
+  // The approved baseline..target SQL delta was checked above.
   process.stdout.write("CRM_MIGRATIONS_REQUIRED=0\n");
+  const publicBuildKeys = ["NEXT_PUBLIC_API_BASE_URL", "NEXT_PUBLIC_WORKSPACE_ID",
+    "NEXT_PUBLIC_OPERATOR_PRINCIPAL_ID", "NEXT_PUBLIC_APPROVER_PRINCIPAL_ID"];
   const buildEnvironment = { HOME: join(scratch, "build-home"), PATH: `${dirname(node)}:${process.env.PATH}`,
-    NODE_ENV: "production", CI: "1", NEXT_PUBLIC_API_BASE_URL: "" };
+    NODE_ENV: "production", CI: "1", ...Object.fromEntries(Object.entries({ ...process.env, ...binding })
+      .filter(([key]) => publicBuildKeys.includes(key))) };
   await mkdir(buildEnvironment.HOME, { mode: 0o700 });
   await command("frozen_dependencies", pnpm, ["install", "--frozen-lockfile", "--prod=false"], { cwd: release, env: buildEnvironment });
   // Privileged target validation runs only after the verified pre-target backup.
@@ -345,6 +355,13 @@ gosu postgres pg_restore -h "$directory" -U "$1" -d postgres --exit-on-error --s
   await command("web_build", slot ? "bash" : pnpm,
     slot ? [slot, pnpm, "--filter", "@ai-crm/web", "build"] : ["--filter", "@ai-crm/web", "build"],
     { cwd: release, env: buildEnvironment });
+  const prerender = JSON.parse(await readFile(join(release, "apps/web/.next/prerender-manifest.json"), "utf8"));
+  if (prerender.version !== 4 || !prerender.routes || typeof prerender.routes !== "object" || Array.isArray(prerender.routes)) {
+    throw new Error("runtime_manifest_invalid");
+  }
+  if (["/", "/work", "/pilot", "/approvals", "/monitor", "/v2"].some(route => Object.hasOwn(prerender.routes, route))) {
+    throw new Error("runtime_page_prerendered");
+  }
   for (let index = 0; index < files.length; index++) {
     await copyFile(files[index], join(backupDir, `dropin-${index}`));
     await chmod(join(backupDir, `dropin-${index}`), (await lstat(files[index])).mode & 0o777);
@@ -395,14 +412,14 @@ gosu postgres pg_restore -h "$directory" -U "$1" -d postgres --exit-on-error --s
   checkInterrupted();
   changed = false;
   published = true;
-  process.stdout.write(`CRM_1CF5_LIVE release=app-1cf53882 rollback=app-e91bb512 backup=${dumpPath}\n`);
+  process.stdout.write(`CRM_1CF5_LIVE release=app-${target.slice(0, 8)} rollback=app-e91bb512 backup=${dumpPath}\n`);
 }
 
 try {
   await main();
 } catch (error) {
   const failedStage = stage;
-  const safeReason = /^(operator_approval_required|production_https_origins_required|owner_enrollment_required|new_bcrypt_enrollment_required|legacy_auth_state_must_be_preserved|environment_value_rejected|source_pin_mismatch|baseline_changed|dropin_changed|immutable_release_exists|private_file_required|database_profile_invalid|empty_dump|startup_timeout|startup_watch_ended|health_not_200|web_origin_not_ready|runtime_process_unavailable|runtime_environment_mismatch|runtime_working_directory_mismatch|node22_required|[a-z0-9_]+_exit_(\d+|null))$/;
+  const safeReason = /^(operator_approval_required|production_https_origins_required|owner_enrollment_required|new_bcrypt_enrollment_required|legacy_auth_state_must_be_preserved|environment_value_rejected|source_pin_mismatch|baseline_changed|dropin_changed|immutable_release_exists|private_file_required|database_profile_invalid|empty_dump|startup_timeout|startup_watch_ended|health_not_200|web_origin_not_ready|runtime_process_unavailable|runtime_environment_mismatch|runtime_working_directory_mismatch|runtime_manifest_invalid|runtime_page_prerendered|node22_required|[a-z0-9_]+_exit_(\d+|null))$/;
   const reason = interruptedSignal ? `interrupted_${interruptedSignal}`
     : typeof error?.message === "string" && safeReason.test(error.message) ? error.message : "private_input_or_io_rejected";
   rollingBack = true;

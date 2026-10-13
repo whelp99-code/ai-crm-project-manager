@@ -117,7 +117,8 @@ export async function withDeployment(options, inspect) {
         CRM_WEB_ORIGIN: "https://web.invalid", CRM_REVIEW_WEB_ORIGIN: "https://review.invalid",
         OPERATOR_AUTH_API_BASE_URL: "https://identity.invalid",
         DATABASE_URL: "postgresql://fixture-parent@127.0.0.1/fixture",
-        AUTH_API_KEY: "fixture-only-parent-key" };
+        AUTH_API_KEY: "fixture-only-parent-key",
+        ...(options.publicApiBase ? { NEXT_PUBLIC_API_BASE_URL: options.publicApiBase } : {}) };
     const held = options.contend ? new Promise(resolve => {
       subscription = watch(root, (_, file) => {
         if (file === "dump-held") { subscription.close(); resolve(); }

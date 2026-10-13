@@ -13,6 +13,33 @@ function restored(result) {
 }
 
 describe("PR63 deployment runtime regressions", () => {
+  it.each(["/", "/work", "/pilot", "/approvals", "/monitor", "/v2"])("refuses a build with frozen runtime route %s", async staticRoute => {
+    await withDeployment({ staticRoute }, result => {
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("runtime_page_prerendered");
+      expect(result.events.some(event => event.args.includes("daemon-reload"))).toBe(false);
+      expect(exists(result.release)).toBe(false);
+      restored(result);
+    });
+  });
+
+  it("preserves explicit public build settings without exposing operational secrets", async () => {
+    await withDeployment({ publicApiBase: "https://build-api.invalid" }, result => {
+      expect(result.code, result.stderr).toBe(0);
+      const build = result.events.filter(event => event.build);
+      expect(build.every(event => event.publicApiBase === "https://build-api.invalid")).toBe(true);
+      expect(build.every(event => event.exposed.length === 0)).toBe(true);
+    });
+  });
+
+  it("uses the approved corrected source target", async () => {
+    await withDeployment({ target: "2".repeat(40) }, result => {
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stdout).toContain("release=app-22222222");
+      expect(result.configuration("core5-api").cwd).toBe(join(result.release, "apps/api"));
+    });
+  });
+
   it("rejects catalog-readable data that fails restoration before target execution", async () => {
     await withDeployment({ badRestore: true }, result => {
       expect(exists(join(result.root, "catalog.json"))).toBe(true);
@@ -159,7 +186,7 @@ describe("PR63 deployment runtime regressions", () => {
     });
   });
 
-  it.each([{ sourceMismatch: true }, { sqlDelta: true }])("preserves source guards with modeled Git: %j", async options => {
+  it.each([{ sourceMismatch: true }, { sqlDelta: true }, { sourceUnrelated: true }])("preserves source guards with modeled Git: %j", async options => {
     await withDeployment(options, result => {
       expect(result.code).not.toBe(0);
       expect(result.events.some(event => event.name === "systemctl")).toBe(false);

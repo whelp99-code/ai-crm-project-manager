@@ -97,7 +97,7 @@ async function main() {
       return 0;
     }
     if (operation === "merge-base" && values[0] === "--is-ancestor"
-      && commits.includes(values[1]) && commits.includes(values[2])) return 0;
+      && commits.includes(values[1]) && commits.includes(values[2])) return fixture.sourceUnrelated ? 1 : 0;
     if (operation === "diff" && values[0] === "--exit-code"
       && commits.includes(values[1]) && commits.includes(values[2])) return fixture.sqlDelta ? 1 : 0;
     if (operation === "show" && commits.includes(values[0].split(":")[0])
@@ -114,13 +114,20 @@ async function main() {
   if (name === "pnpm") {
     const build = args[0] === "install" || args.includes("build");
     const exposed = Object.keys(process.env).filter(key => /DATABASE|PGHOST|PGPASSWORD|API_KEY|SECRET|TOKEN|AUTH_STATE/.test(key));
-    event({ name, args, build, exposed, backupValidated: existsSync(join(root, "restore.json")) });
+    event({ name, args, build, exposed, backupValidated: existsSync(join(root, "restore.json")),
+      publicApiBase: process.env.NEXT_PUBLIC_API_BASE_URL ?? null });
     if (fixture.mutateDb && build && exposed.length) {
       state.dbVersion++;
       saveState(root, state);
     }
     mkdirSync(join(process.cwd(), "apps/web/node_modules/next/dist/bin"), { recursive: true });
     writeFileSync(join(process.cwd(), "apps/web/node_modules/next/dist/bin/next"), "// fixture Next entry\n");
+    if (args.includes("build")) {
+      mkdirSync(join(process.cwd(), "apps/web/.next"), { recursive: true });
+      writeFileSync(join(process.cwd(), "apps/web/.next/prerender-manifest.json"), JSON.stringify({
+        version: 4, routes: fixture.staticRoute ? { [fixture.staticRoute]: {} } : {},
+      }));
+    }
     return 0;
   }
   if (name === "systemctl") {
