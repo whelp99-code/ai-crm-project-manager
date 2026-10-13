@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, watch, writeFileSync, writeSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, watch, writeFileSync, writeSync } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
@@ -113,7 +114,7 @@ async function main() {
   if (name === "pnpm") {
     const build = args[0] === "install" || args.includes("build");
     const exposed = Object.keys(process.env).filter(key => /DATABASE|PGHOST|PGPASSWORD|API_KEY|SECRET|TOKEN|AUTH_STATE/.test(key));
-    event({ name, args, build, exposed, backupValidated: existsSync(join(root, "catalog.json")) });
+    event({ name, args, build, exposed, backupValidated: existsSync(join(root, "restore.json")) });
     if (fixture.mutateDb && build && exposed.length) {
       state.dbVersion++;
       saveState(root, state);
@@ -228,6 +229,60 @@ async function main() {
     return new Promise(() => {});
   }
   if (name === "docker") {
+    event({ name, args });
+    if (fixture.realPg && (args.includes("pg_dump") || args.includes("pg_dumpall"))) {
+      if (args.includes("pg_dump")) writeFileSync(join(root, "dump-snapshot.json"), JSON.stringify({ dbVersion: state.dbVersion }));
+      await pipeline(createReadStream(args.includes("pg_dump") ? fixture.realPg.dumpPath : fixture.realPg.rolesPath), process.stdout);
+      return 0;
+    }
+    if (fixture.realPg && args.includes("pg_restore")) {
+      const child = spawn(join(fixture.realPg.bin, "pg_restore"), args.slice(args.indexOf("pg_restore") + 1),
+        { stdio: "inherit" });
+      const code = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+      writeFileSync(join(root, "catalog.json"), JSON.stringify({ native: true, code }));
+      return code;
+    }
+    if (args.includes("pg_dumpall")) {
+      process.stdout.write("CREATE ROLE fixture_source;\n");
+      return 0;
+    }
+    if (args.includes("restore-backup")) {
+      writeFileSync(join(root, "restore-container"), args[args.indexOf("--name") + 1]);
+      if (fixture.realPg) {
+        const mount = args[args.indexOf("--mount") + 1];
+        const rolePath = mount.slice("type=bind,src=".length, mount.indexOf(",dst="));
+        // Adapt only Docker's uid/mount transport; run the shipped restore
+        // commands against the real, task-owned PostgreSQL major version.
+        const script = args[args.indexOf("-ec") + 1]
+          .replaceAll("gosu postgres ", "")
+          .replace('chown postgres:postgres "$directory"', ":")
+          .replaceAll("/restore-roles.sql", rolePath)
+          + `\npsql -h "$directory" -U "$1" -d postgres -Atc 'SELECT count(*)::text || chr(58) || sum(id)::text FROM restore_probe' > ${JSON.stringify(join(root, "restore-proof"))}`;
+        const child = spawn("bash", ["-ec", script, "restore-backup", args.at(-1)], {
+          stdio: "inherit",
+          env: { ...process.env, PATH: `${fixture.realPg.bin}:/usr/bin:/bin`, TMPDIR: root },
+        });
+        const code = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+        writeFileSync(join(root, "restore.json"), JSON.stringify({ native: true, code,
+          proof: existsSync(join(root, "restore-proof")) ? readFileSync(join(root, "restore-proof"), "utf8").trim() : null }));
+        return code;
+      }
+      if (fixture.signalAt === "restore") {
+        const subscription = watch(root, () => {});
+        process.once("SIGTERM", () => { subscription.close(); process.exit(0); });
+        process.kill(process.ppid, fixture.signal);
+        return new Promise(() => {});
+      }
+      const hash = createHash("sha256");
+      let bytes = 0;
+      for await (const chunk of process.stdin) { bytes += chunk.length; hash.update(chunk); }
+      writeFileSync(join(root, "restore.json"), JSON.stringify({ bytes, sha256: hash.digest("hex") }));
+      return fixture.badRestore ? 29 : 0;
+    }
+    if (args[0] === "rm") {
+      writeFileSync(join(root, "restore-container-removed"), args.at(-1));
+      return 0;
+    }
     if (args.includes("pg_dump")) {
       if (fixture.contend && !contender) {
         await new Promise(resolve => {

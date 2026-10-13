@@ -30,7 +30,7 @@ exec "$NODE" --input-type=module - <<'NODE'
 import { spawn } from "node:child_process";
 import { constants, createReadStream } from "node:fs";
 import { access, chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join, dirname } from "node:path";
 import { parseEnv } from "node:util";
 
@@ -51,7 +51,7 @@ const oldRelease = join(root, "app-e91bb512");
 const services = ["core5-api", "core5-web"];
 const files = services.map(unit => join(units, `${unit}.service.d/90-crm-release.conf`));
 let changed = false, createdRelease = false, published = false;
-let backupDir, scratch, watcher, startupTimer, stage = "prerequisites";
+let backupDir, scratch, watcher, startupTimer, restoreContainer, stage = "prerequisites";
 let interruptedSignal, rollingBack = false;
 const children = new Map();
 const terminationTimers = new Map();
@@ -305,6 +305,31 @@ async function main() {
     }
     await command("dump_catalog", "docker", ["run", "--rm", "-i", image, "pg_restore", "--list"],
       { inputFd: input.fd, outputFd: "ignore" });
+    const rolesPath = join(backupDir, "restore-roles.sql");
+    const roles = await open(rolesPath, "wx", 0o600);
+    try {
+      await command("backup_roles", "docker", ["run", "--rm", "--network=host",
+        ...["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGSSLMODE"].flatMap(key => ["--env", key]),
+        image, "pg_dumpall", "--roles-only", "--no-role-passwords"], { env: pgEnv, outputFd: roles.fd });
+    } finally { await roles.close(); }
+    const restoreId = randomUUID().replaceAll("-", "");
+    restoreContainer = `crm-restore-${restoreId}`;
+    const restoreInput = await open(dumpPath, "r");
+    try {
+      await command("backup_restore", "docker", ["run", "--name", restoreContainer, "--network=none", "-i",
+        "--mount", `type=bind,src=${rolesPath},dst=/restore-roles.sql,readonly`, image, "bash", "-ec", `
+directory=$(mktemp -d)
+chown postgres:postgres "$directory"
+trap 'gosu postgres pg_ctl -D "$directory/data" -m immediate -w stop; rm -rf "$directory"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+gosu postgres initdb -D "$directory/data" -U "$1" -A trust --no-locale --encoding=UTF8
+gosu postgres pg_ctl -D "$directory/data" -l "$directory/server.log" -o "-c listen_addresses='' -k $directory" -w start
+gosu postgres psql -h "$directory" -U "$1" -d postgres -v ON_ERROR_STOP=1 < /restore-roles.sql
+gosu postgres pg_restore -h "$directory" -U "$1" -d postgres --exit-on-error --single-transaction --no-owner
+`, "restore-backup", `crm_restore_${restoreId}`], { inputFd: restoreInput.fd, outputFd: "ignore" });
+    } finally { await restoreInput.close(); }
     process.stdout.write(`CRM_BACKUP_OK bytes=${size} sha256=${hash.digest("hex")}\n`);
   } finally { await input.close(); }
   // The pinned e91..1cf5 SQL delta was checked above. Auth enrollment is a file, not SQL.
@@ -391,6 +416,7 @@ try {
   clearTimeout(startupTimer);
   await stopChildren();
   try {
+    if (restoreContainer) await command("restore_cleanup", "docker", ["rm", "--force", "--volumes", restoreContainer]);
     if (scratch) await rm(scratch, { recursive: true });
     if (createdRelease && !published && !changed) await rm(release, { recursive: true });
   } catch {

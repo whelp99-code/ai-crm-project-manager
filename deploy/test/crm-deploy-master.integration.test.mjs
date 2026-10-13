@@ -13,6 +13,32 @@ function restored(result) {
 }
 
 describe("PR63 deployment runtime regressions", () => {
+  it("rejects catalog-readable data that fails restoration before target execution", async () => {
+    await withDeployment({ badRestore: true }, result => {
+      expect(exists(join(result.root, "catalog.json"))).toBe(true);
+      expect(result.code).toBe(1);
+      expect(result.stdout).not.toContain("CRM_BACKUP_OK");
+      expect(result.events.some(event => event.name === "pnpm")).toBe(false);
+      expect(result.events.some(event => event.args.includes("daemon-reload"))).toBe(false);
+      expect(exists(join(result.root, "restore-container-removed"))).toBe(true);
+      expect(exists(result.release)).toBe(false);
+      restored(result);
+    });
+  });
+
+  it("removes the temporary restore container after interruption", async () => {
+    await withDeployment({ signal: "SIGHUP", signalAt: "restore" }, result => {
+      expect(result.code).toBe(129);
+      expect(result.stdout).not.toContain("CRM_BACKUP_OK");
+      expect(result.events.some(event => event.name === "pnpm")).toBe(false);
+      expect(readText(join(result.root, "restore-container-removed")))
+        .toBe(readText(join(result.root, "restore-container")));
+      expect(result.liveOwnedProcesses).toBe(0);
+      expect(exists(result.release)).toBe(false);
+      restored(result);
+    });
+  });
+
   it("waits for the restored web login port before accepting rollback", async () => {
     await withDeployment({ failReload: true, coldRollbackUrls: ["http://127.0.0.1:4313/login"] }, result => {
       expect(result.stderr).toContain("CRM_ROLLBACK_OK");
