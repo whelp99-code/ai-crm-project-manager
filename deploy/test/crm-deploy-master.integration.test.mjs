@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { withDeployment, readJson, readText, exists } from "./fixtures/deployment.mjs";
 
 function restored(result) {
@@ -13,6 +13,34 @@ function restored(result) {
 }
 
 describe("PR63 deployment runtime regressions", () => {
+  for (const atomicPhase of ["forward", "rollback"]) {
+    it.each(["partial-write", "before-rename", "after-rename"])(`atomic drop-in remains complete on ${atomicPhase} crash at %s`, async atomicCrash => {
+      await withDeployment({ atomicCrash, atomicPhase, failReload: atomicPhase === "rollback" }, result => {
+        expect(result.signal).toBe("SIGKILL");
+        const receipt = readJson(join(result.root, "atomic-receipt.json"));
+        expect(readText(result.dropins[0])).toBe(atomicCrash === "after-rename" ? receipt.next : receipt.before);
+        expect(statSync(result.dropins[0]).mode & 0o777).toBe(receipt.beforeMode);
+        expect(dirname(receipt.path)).toBe(dirname(result.dropins[0]));
+        expect(result.stdout).not.toContain("CRM_1CF5_LIVE");
+        expect(exists(result.release)).toBe(true);
+      });
+    });
+  }
+
+  it("atomic drop-in publication covers every forward and restored file", async () => {
+    await withDeployment({ failReload: true }, result => {
+      const renames = result.events.filter(event => event.name === "rename");
+      expect(renames).toHaveLength(4);
+      expect(renames.every(event => dirname(event.source) === dirname(event.destination) && event.complete)).toBe(true);
+      for (const destination of result.dropins.slice(0, 2)) {
+        expect(renames.filter(event => event.destination === destination)).toHaveLength(2);
+      }
+      expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+      restored(result);
+    });
+  });
+
+
   it.each(["SIGHUP", "SIGTERM"])("kills detached-stdio descendants after their leader exits on %s", async signal => {
     await withDeployment({ signal, signalAt: "restart", leaderExitsFirst: true, deadlineMs: 15_000 }, result => {
       expect(result.code).toBe(signal === "SIGHUP" ? 129 : 143);

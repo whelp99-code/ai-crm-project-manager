@@ -33,7 +33,7 @@ fi
 exec "$NODE" --input-type=module - <<'NODE'
 import { spawn } from "node:child_process";
 import { constants, createReadStream } from "node:fs";
-import { access, chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join, dirname } from "node:path";
 import { parseEnv } from "node:util";
@@ -218,12 +218,26 @@ async function verifyRuntime(environments, directories) {
   }
 }
 
+async function writeDropin(path, data, mode) {
+  const temporary = join(dirname(path), `.crm-dropin-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, data, { flag: "wx", mode: 0o600 });
+    const file = await open(temporary, "r+");
+    try { await file.chmod(mode); await file.sync(); }
+    finally { await file.close(); }
+    await rename(temporary, path);
+    const directory = await open(dirname(path), "r");
+    try { await directory.sync(); }
+    finally { await directory.close(); }
+  } finally { await rm(temporary, { force: true }); }
+}
+
 async function rollback() {
   if (!changed) return;
   stage = "rollback";
   for (let index = 0; index < files.length; index++) {
-    await copyFile(join(backupDir, `dropin-${index}`), files[index]);
-    await chmod(files[index], (await lstat(join(backupDir, `dropin-${index}`))).mode & 0o777);
+    await writeDropin(files[index], await readFile(join(backupDir, `dropin-${index}`)),
+      (await lstat(join(backupDir, `dropin-${index}`))).mode & 0o777);
   }
   await command("rollback_reload", "systemctl", ["--user", "daemon-reload"]);
   await command("rollback_restart", "systemctl", ["--user", "restart", "core5-api", "core5-web"]);
@@ -391,7 +405,7 @@ gosu postgres pg_restore -h "$directory" -U "$1" -d postgres --exit-on-error --s
     // EnvironmentFile values override Environment=; the final file must win.
     if (!text.endsWith("\n")) text += "\n";
     text += `EnvironmentFile=${JSON.stringify(runtimeFiles[index])}\n`;
-    await writeFile(file, text, { mode: (await lstat(file)).mode & 0o777 });
+    await writeDropin(file, text, (await lstat(file)).mode & 0o777);
     checkInterrupted();
   }
   await command("reload", "systemctl", ["--user", "daemon-reload"]);
