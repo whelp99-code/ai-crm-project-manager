@@ -1,5 +1,7 @@
 import { S1CreateWorkClient } from "./s1-create-work-client";
 
+export const dynamic = "force-dynamic";
+
 interface Overview {
   sectionOrder: string[];
   customer: { id: string; name: string; status: string; version: number };
