@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test:e2e": "playwright test",
     "test:e2e:live": "playwright test --config=playwright.live.config.ts",
+    "test:e2e:review-ui": "pnpm exec tsx e2e/fixture-control.contract.ts && PLAYWRIGHT_REVIEW_UI=1 playwright test --config=playwright.review-ui.config.ts",
     "e2e": "playwright test"
   },
   "dependencies": {

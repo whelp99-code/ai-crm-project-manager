@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { readOwnedFixtureControl, requireExternalFixtureDirectory } from "./e2e/fixture-control";
 
 /**
  * Minimal Playwright scaffold (T-019).
@@ -31,12 +32,16 @@ async function ephemeralPort(): Promise<number> {
 
 const port = Number(process.env.PLAYWRIGHT_WEB_PORT ?? await ephemeralPort());
 process.env.PLAYWRIGHT_WEB_PORT = String(port);
-const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${port}`;
+const externalBaseURL = process.env.PLAYWRIGHT_BASE_URL;
+const baseURL = externalBaseURL ?? `http://127.0.0.1:${port}`;
 const runId = process.env.PLAYWRIGHT_RUN_ID ?? String(process.pid);
 if (!/^[A-Za-z0-9_-]{1,80}$/.test(runId)) throw new Error("PLAYWRIGHT_RUN_ID is invalid");
 process.env.PLAYWRIGHT_RUN_ID = runId;
-const fixtureDirectory = join(tmpdir(), `crm-playwright-auth-${runId}`);
-process.env.PLAYWRIGHT_FIXTURE_DIRECTORY = fixtureDirectory;
+const fixtureDirectory = externalBaseURL
+  ? requireExternalFixtureDirectory(externalBaseURL, process.env.PLAYWRIGHT_FIXTURE_DIRECTORY)
+  : join(tmpdir(), `crm-playwright-auth-${runId}`);
+if (!externalBaseURL) process.env.PLAYWRIGHT_FIXTURE_DIRECTORY = fixtureDirectory;
+if (externalBaseURL) await readOwnedFixtureControl(fixtureDirectory, externalBaseURL);
 
 export default defineConfig({
   testDir: "./e2e",

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { isIP } from "node:net";
 import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { createApp } from "../../api/src/app.js";
-import { InMemoryCwosV2StateStore } from "../../api/src/customer-work-os-v2-runtime.js";
+import { CustomerWorkOsV2RuntimeManager, InMemoryCwosV2StateStore, type CwosV2StateStore, type V2PgQueryable } from "../../api/src/customer-work-os-v2-runtime.js";
 import { operatorPasswordHash, operatorTotpCode } from "../../api/src/operator-auth-crypto.js";
 import type { OperatorAuthRecord } from "../../api/src/operator-auth-store.js";
 import { OperatorStepUpService } from "../../api/src/operator-step-up.js";
@@ -46,14 +46,77 @@ function enroll(previousGeneration = 0): OperatorAuthRecord {
   };
 }
 
-export async function startNativeAuthFixture(directory: string): Promise<{
+class ReplaceableCwosStateStore implements CwosV2StateStore {
+  private inner = new InMemoryCwosV2StateStore();
+
+  replace(): void {
+    this.inner = new InMemoryCwosV2StateStore();
+  }
+
+  load(workspaceId: string): ReturnType<InMemoryCwosV2StateStore["load"]> {
+    return this.inner.load(workspaceId);
+  }
+
+  compareAndSwap(
+    ...args: Parameters<InMemoryCwosV2StateStore["compareAndSwap"]>
+  ): ReturnType<InMemoryCwosV2StateStore["compareAndSwap"]> {
+    return this.inner.compareAndSwap(...args);
+  }
+}
+
+async function seedReviewCandidates(runtime: CustomerWorkOsV2RuntimeManager): Promise<void> {
+  const owner = { workspaceId, principalId, kind: "human", stepUpVerified: true } as const;
+  for (const [command, payload] of [
+    ["identity.registerPrincipal", { id: principalId, kind: "human", displayName: "Synthetic owner", active: true }],
+    ["identity.addMembership", { id: "review-owner-membership", principalId }],
+    ["identity.registerPrincipal", { id: "review-writer", kind: "service", displayName: "Synthetic writer", active: true }],
+    ["identity.addMembership", { id: "review-writer-membership", principalId: "review-writer" }],
+  ] as const) {
+    const current = await runtime.read(workspaceId);
+    await runtime.command({
+      workspaceId, actor: owner, expectedVersion: current.version,
+      idempotencyKey: payload.id, command, payload,
+    });
+  }
+  for (let index = 1; index <= 5; index += 1) {
+    const current = await runtime.read(workspaceId);
+    await runtime.command({
+      workspaceId, actor: { workspaceId, principalId: "review-writer", kind: "service", stepUpVerified: false },
+      expectedVersion: current.version, idempotencyKey: `review-candidate-${index}`,
+      command: "mail.candidate.create",
+      payload: {
+        id: `review-candidate-${index}`, provider: "GMAIL", mailbox: "fixture@example.test",
+        sourceLocator: `gmail://synthetic/${index}`, providerEventId: `synthetic-${index}`,
+        subject: `Synthetic candidate ${index}`, summary: `Synthetic candidate ${index}`,
+        bodyDigest: "a".repeat(64), senderCompany: "Synthetic company",
+        receivedAt: "2026-10-13T00:00:00.000Z", evidenceUrl: `https://example.test/evidence/${index}`,
+      },
+    });
+  }
+}
+
+export async function startNativeAuthFixture(
+  directory: string,
+  options: { readonly mailCandidates?: boolean; readonly webOrigin: string },
+): Promise<{
   app: FixtureApp;
   origin: string;
 }> {
+  if (!options.webOrigin) throw new Error("native auth fixture web origin is required");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
   const controlPath = `${directory}/auth-control.json`;
   let resetCode = "";
+  const writeControl = async (apiOrigin: string) => {
+    await writeFile(controlPath, JSON.stringify({
+      origin: apiOrigin,
+      webOrigin: options.webOrigin,
+      controlSecret,
+      password: fixturePassword,
+      totp: resetCode,
+    }), { mode: 0o600 });
+    await chmod(controlPath, 0o600);
+  };
   const auth = new OperatorStepUpService({
     workspaceId,
     principalId,
@@ -65,10 +128,31 @@ export async function startNativeAuthFixture(directory: string): Promise<{
     now: () => now,
     cookieSecure: false,
   });
+  const state = new ReplaceableCwosStateStore();
+  const runtime = new CustomerWorkOsV2RuntimeManager(state, () => "2026-10-13T00:00:00.000Z");
+  const accountId = "synthetic-review-account";
+  // Only the normalized account projection is synthetic; list and decisions use
+  // the production routes, authorization, domain commands and versioned store.
+  const accounts: V2PgQueryable = {
+    async query<T>() { return { rows: [] as T[], rowCount: 0 }; },
+    async withWorkspaceScope<T>(scope: string, fn: (db: V2PgQueryable) => Promise<T>) {
+      if (scope !== workspaceId) throw new Error("unexpected synthetic workspace");
+      return fn({ async query<T2>(text: string, values?: readonly unknown[]) {
+        if (!text.includes("FROM cwos_accounts") || values?.[0] !== workspaceId) {
+          throw new Error("unexpected synthetic account query");
+        }
+        const rows = text.includes("AND id=$2") && values[1] !== accountId
+          ? [] : [{ id: accountId, name: "Synthetic account" }];
+        return { rows: rows as T2[], rowCount: rows.length };
+      } });
+    },
+  };
+  if (options.mailCandidates) await seedReviewCandidates(runtime);
   const app = createApp({
     authApiKey: apiKey,
     customerWorkOsV2Profile: "production",
-    customerWorkOsV2Store: new InMemoryCwosV2StateStore(),
+    customerWorkOsV2Store: state,
+    ...(options.mailCandidates ? { customerWorkOsV2NormalizedProjectionPool: accounts } : {}),
     customerWorkOsV2ActorBinding: { workspaceId, principalId, kind: "human", stepUpVerified: false },
     customerWorkOsV2OperatorStepUp: auth,
   });
@@ -81,12 +165,11 @@ export async function startNativeAuthFixture(directory: string): Promise<{
     record = enroll(record.generation);
     resetCode = operatorTotpCode(record.totpSecret, Math.floor(now / 30_000));
     if (!apiOrigin) return reply.status(503).send({ error: "FIXTURE_NOT_READY" });
-    await writeFile(controlPath, JSON.stringify({
-      origin: apiOrigin,
-      controlSecret,
-      password: fixturePassword,
-      totp: resetCode,
-    }), { mode: 0o600 });
+    if (options.mailCandidates) {
+      state.replace();
+      await seedReviewCandidates(runtime);
+    }
+    await writeControl(apiOrigin);
     return reply.status(200).send({ ready: true });
   });
   record = enroll();
@@ -99,9 +182,7 @@ export async function startNativeAuthFixture(directory: string): Promise<{
       throw new Error("native auth fixture did not bind to IPv4 loopback");
     }
     apiOrigin = `http://127.0.0.1:${address.port}`;
-    await writeFile(controlPath, JSON.stringify({
-      origin: apiOrigin, controlSecret, password: fixturePassword, totp: resetCode,
-    }), { mode: 0o600 });
+    await writeControl(apiOrigin);
     return { app, origin: apiOrigin };
   } catch (error) {
     try {

@@ -1,54 +1,34 @@
-import { readFile } from "node:fs/promises";
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
+import { FixtureControlError, readOwnedFixtureControl, type FixtureControl } from "./fixture-control";
 
-interface FixtureControl {
-  readonly origin: string;
-  readonly controlSecret: string;
-  readonly password: string;
-  readonly totp: string;
-}
-
-function parseFixtureControl(value: unknown): FixtureControl {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new TypeError("native auth fixture control data must be an object");
-  }
-  if (!("origin" in value) || !("controlSecret" in value) || !("password" in value) || !("totp" in value)
-    || typeof value.origin !== "string" || typeof value.controlSecret !== "string"
-    || !/^[A-Za-z0-9_-]{40,64}$/.test(value.controlSecret)
-    || typeof value.password !== "string" || value.password.length < 1
-    || typeof value.totp !== "string" || !/^\d{6}$/.test(value.totp)) {
-    throw new TypeError("native auth fixture control data is invalid");
-  }
-  const origin = new URL(value.origin);
-  if (origin.origin !== value.origin || origin.protocol !== "http:"
-    || origin.hostname !== "127.0.0.1" || !origin.port) {
-    throw new TypeError("native auth fixture origin must be an IPv4 loopback origin");
-  }
-  return {
-    origin: value.origin,
-    controlSecret: value.controlSecret,
-    password: value.password,
-    totp: value.totp,
-  };
-}
-
-async function fixtureControl(): Promise<FixtureControl> {
+async function ownedControl(): Promise<FixtureControl> {
   const directory = process.env.PLAYWRIGHT_FIXTURE_DIRECTORY;
-  if (!directory) throw new Error("PLAYWRIGHT_FIXTURE_DIRECTORY is required");
-  const value: unknown = JSON.parse(await readFile(`${directory}/auth-control.json`, "utf8"));
-  return parseFixtureControl(value);
+  if (!directory) {
+    throw new FixtureControlError(
+      "DIRECTORY_REQUIRED",
+      "PLAYWRIGHT_FIXTURE_DIRECTORY is required. When PLAYWRIGHT_BASE_URL is set it must name the owned server control directory. Refusing operator login.",
+    );
+  }
+  return readOwnedFixtureControl(directory, process.env.PLAYWRIGHT_BASE_URL);
 }
 
-export async function loginOwner(page: Page): Promise<void> {
-  const initial = await fixtureControl();
+export async function resetOwnedFixture(): Promise<void> {
+  const initial = await ownedControl();
   const reset = await fetch(`${initial.origin}/__playwright/auth/reset`, {
     method: "POST",
     headers: { "x-playwright-reset-token": initial.controlSecret },
   });
   expect(reset.status).toBe(200);
-  const { password, totp } = await fixtureControl();
-  await page.goto("/login");
+}
+
+export async function loginOwner(
+  page: Page,
+  options: { readonly navigate?: boolean } = {},
+): Promise<void> {
+  await resetOwnedFixture();
+  const { password, totp } = await ownedControl();
+  if (options.navigate !== false) await page.goto("/login");
   await page.getByLabel("비밀번호", { exact: true }).fill(password);
   await page.getByRole("button", { name: "다음: OTP 입력" }).click();
   await page.getByLabel("일회용 인증 코드 (OTP)", { exact: true }).fill(totp);
