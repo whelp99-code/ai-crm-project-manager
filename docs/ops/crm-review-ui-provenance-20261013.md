@@ -124,7 +124,10 @@ pnpm --filter @ai-crm/web exec playwright test \
 review-ui는 web과 같은 app/human EnvironmentFile과 API/principal 설정을
 사용한다. 기존 review용 Basic key 파일을 읽거나 복사하거나 새 키로
 교체하지 않는다. 새 `92-crm-release.conf`에서 이전 EnvironmentFile/ExecStart
-목록을 재설정하고 Next를 실행한다. 기존 `91-migrate.conf`는 수정하지 않는다.
+목록을 재설정하고 Next를 실행한다. 각 unit의 의도한 값은 release 안의
+mode600 환경파일을 마지막 `EnvironmentFile=`로 붙여 적용한다.
+API 인증 경로뿐 아니라 review origin도 공유 env 파일보다 우선한다.
+기존 `91-migrate.conf`와 human env/auth state/key는 수정하지 않는다.
 
 ```sh
 # 준비 검토만: 전환 없음
@@ -136,19 +139,30 @@ CRM_DEPLOY_APPROVAL=approved bash deploy/crm-deploy-review-ui.sh
 ```
 
 스크립트는 고정 archive 한 개, frozen install/build 한 번, private
-custom-format DB dump와 catalog 확인 후에 세 override의 내용·권한·존재
+custom-format DB dump의 streaming hash/catalog 확인 후에 세 override의 내용·권한·존재
 여부를 snapshot한다. 모든 snapshot이 완료된 뒤에만 롤백을 활성화하고
 전환한다. 각 서비스의 startup event를 별도로 구독하며 web의 Ready 하나를
 review-ui 기동으로 간주하지 않는다. health, 두 로그인 origin, 무인증
 후보 API의 `401 STEP_UP_REQUIRED`도 확인한다. 로그인한 상태의 LINK/UNDO
 최종 인수는 대표의 후속 단계다.
 
+성공 판정은 세 unit의 `is-active --quiet`를 **각각** 호출하고, 각
+MainPID의 실효 환경값을 비교한 뒤에만 내린다. API 인증 경로와 web/review
+origin을 사전 Node 환경만으로 확인하지 않는다. `/proc/<MainPID>/environ`의
+필요 키만 비교하며 비밀이나 환경 본문은 출력하지 않는다.
+
 ### 롤백
 
 오류 시 API90, web90, review92를 모두 원래 내용/권한으로 복원한다.
 원래 review92가 없었다면 제거하여 그대로 남아 있던91의 정적 helper로
-돌아간다. 세 서비스를 함께 reload/restart/is-active 검사한다. SQL 변경을
+돌아간다. 세 서비스를 함께 reload/restart하되 활성 여부는 각각 검사하고,
+전환 전의 실효 환경값도 복구됐는지 확인한다. 하나만 살아 있는 상태를
+`CRM_ROLLBACK_OK`로 처리하거나 새 release를 지우지 않는다. SQL 변경을
 허용하지 않으므로 DB를 자동 restore하지 않는다.
+
+SIGINT/SIGTERM은 진행 중인 소유 process group을 종료하고 close를 기다린
+뒤 직렬로 롤백한다. 복구 중 반복 신호는 복구를 끊지 않으며 완료 후
+exit130/143으로 끝난다. 원래 없던 review92는 중단 복구에서도 제거된다.
 
 backup 디렉터리에는 `api90`, `web90`, 선택적 `review92`와 각각의 `.meta`,
 DB dump가 있다. `.meta`가 `absent`이면 원래 파일이 없었고, 나머지는
@@ -173,7 +187,7 @@ DB dump가 있다. `.meta`가 `absent`이면 원래 파일이 없었고, 나머�
 | lead 직접 무CSRF 요청 | `403 OPERATOR_CSRF`, version11 및 전체 후보 상태 불변 |
 | 1440px / iPhone14 390px | 로그인·OTP·목록·LINK·UNDO, 모바일 조작부/목록 끝 확인. 가로 overflow 없음 |
 | 배포 script 문법/CLI | Bash/내장 Node syntax PASS, 승인 없음 exit1, 잘못된 인수 exit64 |
-| 격리 배포/복구 | 6/6 PASS: 성공, dump 실패, review92 없음/있음 복구, 복구 실패, review 기동 실패 |
+| 초기 격리 배포/복구 | 6/6 PASS였으나 네 배포 경계 결함을 놓침. 아래 커밋된 회귀 시험으로 보완 |
 
 브라우저 결과를 mock하지 않았다. 최종 전용 테스트는 root에서 이동한
 로그인 화면의 **동일 origin**에서 인증하며, 성공 응답뿐 아니라 reload 뒤
@@ -210,3 +224,33 @@ production의 승인된 HTTPS origin 검사는 변경하지 않았다.
 legacy helper의 SHA-256도 동일했다. QA browser/profile과 임시 인증
 디렉터리를 정리했고 합성 web 포트38993은 닫혔다. 실제 운영은 여전히
 기존 정적 helper이며, 기능 반영은 PR 검수와 별도 배포 승인 이후다.
+
+## Cursor REJECT 배포 경계 수정
+
+초기 격리 QA는 다중 unit의 ANY-active 결과와 EnvironmentFile 우선순위를
+충분히 모델링하지 못했다. 커밋된 `deploy/test` fixture는 이 두 동작을
+그대로 재현하며, 실제 OS 신호와 대용량 dump를 실제 script에 전달한다.
+
+```sh
+CI=1 PATH="$HOME/.nvm/versions/node/v22.23.2/bin:$PATH" \
+  pnpm exec vitest run deploy/test/crm-deploy-review-ui.integration.test.mjs \
+  --reporter=verbose --no-color
+```
+
+회귀 범위: 세 서비스 각각의 단독 실패(성공/롤백), 첫 쓰기와 실행 중
+자식에서의 SIGINT/SIGTERM 및 반복 신호, 새 인증 경로·review origin의
+실효값과 원본 env 보존, 건강 probe가 성공해도 stale 값이면 롤백,
+256MiB dump의 길이/hash/catalog/RSS, 빈 dump와 catalog 실패.
+실제 운영 실행이나 운영 DB 백업을 대신하는 시험은 아니다.
+
+수정 전 **14 실패 / 2 통과**, 수정 후 **16/16 통과**.
+256MiB dump 최대 RSS는 **332,856KiB → 108,208KiB**였으며,
+192MiB 상한과 전체 길이·SHA-256·catalog 입력 일치 검사를 통과했다.
+별도 실제 격리 CLI SIGTERM 검사도 exit143, signal=null, rollback=complete,
+소유 자식 0개였다. Shell/내장 Node 문법·LSP·승인/인수 거부 검사가 통과했다.
+
+API/web/review-ui의 운영 PID·경로는 계속 `20475`/`20478`/`20477`과
+기존 e91/legacy 경로로 유지됐다. fixture 디렉터리와 소유 프로세스를
+정리했다. UI·로그인·CSRF 구현은 이번 배포 경계 수정에서 바꾸지 않았으며
+운영 실행·키 생성·실제 후보 변경은 하지 않았다. CI/Bugbot 사용량 한도는
+별도 상태로 남으며 로컬 검증으로 해결됐다고 주장하지 않는다.

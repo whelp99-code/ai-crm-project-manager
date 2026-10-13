@@ -1,0 +1,21 @@
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { join } from "node:path";
+
+const root = process.env.CRM_TEST_ROOT;
+if (!root?.startsWith("/tmp/crm-deploy-test-")) throw new Error("sandbox required");
+const fixture = JSON.parse(fs.readFileSync(join(root, "fixture.json"), "utf8"));
+const originalWrite = fs.promises.writeFile;
+fs.promises.writeFile = async function (path, data, ...options) {
+  const result = await originalWrite.call(this, path, data, ...options);
+  if (fixture.signalAt === "write" && String(path) === fixture.apiDropin
+    && String(data).includes(fixture.release) && !fs.existsSync(join(root, "signal-sent"))) {
+    fs.writeFileSync(join(root, "signal-sent"), fixture.signal);
+    process.kill(process.pid, fixture.signal);
+  }
+  return result;
+};
+syncBuiltinESMExports();
+process.once("exit", () => {
+  fs.writeFileSync(join(root, `usage-${process.pid}.json`), JSON.stringify({ maxRSS: process.resourceUsage().maxRSS }));
+});
