@@ -83,8 +83,7 @@ idempotency 및 expectedVersion 경계를 유지한다.
 ## 합성 검증 실행
 
 ```sh
-pnpm --filter @ai-crm/web exec playwright test \
-  --config playwright.review-ui.config.ts
+pnpm --filter @ai-crm/web test:e2e:review-ui
 ```
 
 전용 scenario는 기존 fail-closed 기본 e2e와 분리된 config에서 실행한다.
@@ -93,6 +92,14 @@ pnpm --filter @ai-crm/web exec playwright test \
 같은 workspace-scoped 합성 projection으로 공급한다. LINK/UNDO 응답이나
 후보 목록을 브라우저에서 가로채지 않는다. 이 검증은 운영 DB의 영속성
 인수를 대신하지 않는다.
+
+이 명령은 제어 파일 계약 검사와 전용 scenario를 실행하며 두 CI workflow의
+필수 단계에도 연결되어 있다. 후보 저장소는 매 시도마다 교체·재시드한다.
+`PLAYWRIGHT_BASE_URL`로 소유한 외부 loopback 시험 서버를 사용하려면
+그 서버가 작성한 `PLAYWRIGHT_FIXTURE_DIRECTORY`도 명시해야 한다.
+디렉터리 0700, 파일 0600, 현재 사용자 소유, 비-symlink, 정확한 webOrigin을
+확인한다. 누락·불일치는 로그인 전에 거부하며 외부 디렉터리는 teardown이
+삭제하지 않는다. 운영 로그인이나 운영 제어 파일을 사용하는 설정이 아니다.
 
 ## 공통 릴리스 배포 준비
 
@@ -135,11 +142,15 @@ bash deploy/crm-deploy-review-ui.sh --help
 
 # 아래는 별도 운영 승인 이후에만 실행하며, 이번 작업에서 실행하지 않는다.
 # CRM_TARGET_SHA에는 위 조건을 충족하는 검수된 실제 40자리 커밋을 지정한다.
-CRM_DEPLOY_APPROVAL=approved bash deploy/crm-deploy-review-ui.sh
+: "${CRM_TARGET_SHA:?set the reviewed full SHA}"
+CRM_DEPLOY_APPROVAL=approved CRM_TARGET_SHA="$CRM_TARGET_SHA" bash deploy/crm-deploy-review-ui.sh
 ```
 
 스크립트는 고정 archive를 준비하고, 타깃 실행 전에 private custom-format
-DB dump의 streaming hash/catalog를 확인한다. 그 뒤 frozen install/build를
+DB dump의 streaming hash/catalog와 password-free role 정의를 보관하고,
+네트워크 없는 임시 PostgreSQL에 role·schema·data를 실제 복원한다.
+`pg_restore --exit-on-error --single-transaction --no-owner` 성공 뒤에만
+BACKUP_OK를 내고 frozen install/build를
 운영 비밀 없는 환경에서 수행하고 세 override의 내용·권한·존재
 여부를 snapshot한다. 모든 snapshot이 완료된 뒤에만 롤백을 활성화하고
 전환한다. 각 서비스의 startup event를 별도로 구독하며 web의 Ready 하나를
@@ -162,9 +173,12 @@ executable/argv가 정확히 일치해야 완료된다.
 돌아간다. 세 서비스를 함께 reload/restart하되 활성 여부는 각각 검사하고,
 전환 전의 실효 환경값도 복구됐는지 확인한다. 하나만 살아 있는 상태를
 `CRM_ROLLBACK_OK`로 처리하거나 새 release를 지우지 않는다. SQL 변경을
-허용하지 않으므로 DB를 자동 restore하지 않는다.
+허용하지 않으므로 운영 DB를 자동 restore하지 않는다. 복원 검증용 임시
+DB/container는 종료·중단 시 제거한다.
 복구도 예상 WorkingDirectory/MainPID cwd, 원래 review executable/argv,
-API `/health`·`/ready`를 통과해야 완료다. PID·start_time 같은 가변 필드는
+API `/health`·`/ready`, web4313와 review4174의 `/login`200,
+양쪽 Origin 경계 및 무인증 후보 API를 모두 통과해야 완료다.
+PID·start_time 같은 가변 필드는
 실행 명령 비교에서 제외한다. 503 또는 경로 불일치는 복구 실패이며
 새 release와 backup을 보존한다.
 
@@ -370,3 +384,45 @@ shell/내장 Node 문법·저장소 진단과 승인/인수 거부도 통과했�
 외부 QA 디렉터리의 TypeScript 미설치로 LSP 대신 Node 문법·실행을 검증했다.
 운영 실행은 하지 않았다. 원격 CI는 로컬 PASS와 다르며, 확인한 #63 새 head의
 Actions annotation은 결제/사용량 제한으로 job 미시작, Bugbot은 usage limit였다.
+
+## 다섯 번째 Cursor REJECT 수정
+
+모든 forward HTTP/runtime probe를 `verifyRuntime`에 모았다. 복구도 같은
+API·두 웹 포트·Origin·후보 인증·active·환경·cwd·review 실행 명령을 검사한다.
+과거 e91과 Basic 정적 helper가 이 HTTP 계약을 충족한다고 가정하지 않는다.
+원복했더라도 계약 미충족이면 INCOMPLETE와 자료 보존이며 검사를 생략하지 않는다.
+
+백업 검증은 실제 복원을 포함한다. PostgreSQL 16.11에서 목차가 읽히는
+반쪽 archive는 거부되고 정상 archive의 RLS와 합성 2,000행은 복원됐다.
+Docker socket 권한이 없어 권한을 바꾸지 않고 소유 경로에 빌드한 native
+16.11로 같은 SQL/restore 절차를 검증했다. Docker daemon 기동 자체는
+이 호스트에서 검증하지 못했다.
+
+여섯 runtime 경로는 force-dynamic이며 public 빌드 설정을 빈 값으로
+덮어쓰지 않는다. manifest에 해당 경로가 static이면 전환 전에 거부한다.
+운영 설정 없는 실제 production build 후 합성 runtime 설정만 넣어
+소유 브라우저에서 1440/390, light/dark 24캡처를 확인했다.
+구성된 화면과 무가로넘침을 확인했고 직접 LINK version10, UNDO version11을
+reload·GET 이력으로 확인했다. production build를 사용하되 loopback
+합성 인증만 NODE_ENV=test였으며 운영 인증은 실행하지 않았다.
+
+| 최종 로컬 검증 | 결과 |
+| --- | --- |
+| 배포 회귀 Node 20/22 시험기, SUT Node 22 | 각각 73/73 |
+| 별도 실제 curl 복구 | 4313/4174 콜드·503·Origin 총 6/6 |
+| web typecheck / production build | PASS |
+| 기존 e2e / 필수 review scenario | 19/19, 3/3; 정상 실행 flaky 없음 |
+| 외부 소유 production 서버의 review scenario | 3/3 |
+| 외부 제어 파일 누락 / origin 불일치 | 테스트·로그인 전 결정적 거부 |
+| 실제 post-LINK 실패·Playwright retry | 다음 시도에서 다섯 pending, 빈 history 복원 |
+| CI YAML 구조 | 두 workflow 모두 조건 없는 필수 단계; YAML LSP 미설치는 구조 파싱으로 보완 |
+
+재시도 증거만을 위한 의도적 실패 probe는 검증 후 저장소에서 제거했다.
+커밋되는 store 격리 회귀는 첫 시도에 통과한다. 기존 콜드 fixture는
+readiness 경로에만 적용해 새 인증 probe 응답을 잘못 200으로 만들지 않는다.
+
+근거: `~/.local/state/omonyang/TASK-CRM-63-FIX5-20261013/`의
+`review-browser-evidence.json`, `review-node20.log`, `review-node22.log`,
+`review-real-restore.log`, `review-native-curl.log`, `review-web-e2e.log`,
+`review-external-retry.log`, `review-external-refusals.log`.
+운영 서비스·DB·인증 상태·실제 후보는 수정하지 않았다.

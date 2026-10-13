@@ -13,7 +13,7 @@ async function main(): Promise<void> {
     throw new Error("Playwright web server fixture configuration is incomplete");
   }
   const reviewUi = process.env.PLAYWRIGHT_REVIEW_UI === "1";
-  const { app, origin } = await startNativeAuthFixture(directory, { mailCandidates: reviewUi });
+  const { app, origin } = await startNativeAuthFixture(directory, { mailCandidates: reviewUi, webOrigin });
   let next: ChildProcess | undefined;
   let stopping = false;
   const shutdown = async () => {

@@ -89,6 +89,9 @@ jobs:
       - name: Web e2e tests
         run: pnpm --filter @ai-crm/web test:e2e
 
+      - name: Review UI candidate scenarios
+        run: pnpm --filter @ai-crm/web test:e2e:review-ui
+
       - name: Apply migrations + live-pg RLS smoke
         env:
           DATABASE_URL: postgres://ai_crm:ai_crm_dev@localhost:5432/ai_crm

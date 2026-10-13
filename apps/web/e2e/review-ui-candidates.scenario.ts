@@ -1,10 +1,14 @@
 import { expect, test } from "@playwright/test";
-import { loginOwner } from "./auth-fixture";
+import { loginOwner, resetOwnedFixture } from "./auth-fixture";
 
 test.beforeAll(() => {
   if (process.env.PLAYWRIGHT_REVIEW_UI !== "1") {
     throw new Error("Run this native candidate scenario with PLAYWRIGHT_REVIEW_UI=1");
   }
+});
+
+test.beforeEach(async () => {
+  await resetOwnedFixture();
 });
 
 test("review entry lists five native candidates and persists LINK then UNDO", async ({ page, baseURL }) => {
@@ -74,4 +78,26 @@ test("review mutations reject absent CSRF and foreign origin without changing st
   expect(await foreign.json()).toEqual({ error: "OWNER_REVIEW_ORIGIN_REQUIRED" });
   const after = await page.request.get("/api/cwos/v2/mail-candidate-review");
   expect(await after.json()).toEqual(previous);
+});
+
+test.describe("candidate store isolation", () => {
+  test("reset restores five pending candidates after a committed LINK", async ({ page, baseURL }) => {
+    if (!baseURL) throw new Error("review UI origin is required");
+    await loginOwner(page);
+    await expect(page.locator("article[aria-labelledby^=candidate-]")).toHaveCount(5);
+    const candidate = page.locator('article[aria-labelledby="candidate-review-candidate-1"]');
+    await expect(candidate.getByText("검토 대기", { exact: true })).toBeVisible();
+    await candidate.getByLabel("확정할 거래처", { exact: true }).selectOption("synthetic-review-account");
+    const linked = page.waitForResponse(response =>
+      response.url().endsWith("/api/cwos/v2/mail-candidate-review")
+      && response.request().method() === "POST");
+    await candidate.getByRole("button", { name: "확정", exact: true }).click();
+    expect((await linked).status()).toBe(200);
+    await loginOwner(page);
+    const listed = await page.request.get("/api/cwos/v2/mail-candidate-review");
+    expect(listed.status()).toBe(200);
+    const body: { candidates: readonly { id: string; review: unknown; history: readonly unknown[] }[] } = await listed.json();
+    expect(body.candidates).toHaveLength(5);
+    expect(body.candidates.every(item => item.review === null && item.history.length === 0)).toBe(true);
+  });
 });
