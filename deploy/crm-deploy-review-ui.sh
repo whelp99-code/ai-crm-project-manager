@@ -244,7 +244,8 @@ async function verifyWorkingDirectory(unit, expected) {
 
 async function requireApiReady() {
   for (const endpoint of ["http://127.0.0.1:4312/health", "http://127.0.0.1:4312/ready"]) {
-    if ((await httpResult(endpoint)).status !== "200") throw new Error("health_not_200");
+    if ((await httpResult(endpoint, ["--retry", "120", "--retry-connrefused",
+      "--retry-delay", "1", "--retry-max-time", "120"])).status !== "200") throw new Error("health_not_200");
   }
 }
 
@@ -260,26 +261,32 @@ async function verifyReviewExecution(expected) {
   if (executionSpec(actual) !== expected) throw new Error("runtime_execution_mismatch");
 }
 
+async function verifyRuntime(environments, directories, execution) {
+  await requireApiReady();
+  await requireActive("active");
+  for (const [index, unit] of services.entries()) {
+    await verifyEnvironment(unit, environments[index]);
+    await verifyWorkingDirectory(unit, directories[index]);
+  }
+  await verifyReviewExecution(execution);
+}
+
 async function rollback() {
   if (!changed) return;
   stage = "rollback";
   for (const item of snapshots) await restoreSnapshot(item);
   await command("rollback_reload", "systemctl", ["--user", "daemon-reload"]);
   await command("rollback_restart", "systemctl", ["--user", "restart", "core5-api", "core5-web", "core5-review-ui"]);
-  await requireActive("rollback_active");
-  for (const [unit, expected] of previousEnvironment) await verifyEnvironment(unit, expected);
-  for (const [index, unit] of services.entries()) {
-    await verifyWorkingDirectory(unit, index === 2 ? legacyReview : join(oldRelease, index ? "apps/web" : "apps/api"));
-  }
-  await verifyReviewExecution(previousReviewExecution);
-  await requireApiReady();
+  await verifyRuntime([...previousEnvironment.values()],
+    services.map((_, index) => index === 2 ? legacyReview : join(oldRelease, index ? "apps/web" : "apps/api")),
+    previousReviewExecution);
   changed = false;
   process.stderr.write("CRM_ROLLBACK_OK release=app-e91bb512\n");
 }
 
 async function markRollbackFailed() {
   rollbackFailed = true;
-  process.stderr.write("CRM_ROLLBACK_FAILED operator_action_required\n");
+  process.stderr.write("ROLLBACK_INCOMPLETE operator_action_required\nCRM_ROLLBACK_FAILED operator_action_required\n");
   const marker = join(root, "CRM_ROLLBACK_FAILED");
   await mkdir(root, { recursive: true, mode: 0o700 });
   await writeFile(marker, "CRM_ROLLBACK_FAILED operator_action_required\n", { mode: 0o600 });
@@ -523,7 +530,6 @@ async function main() {
       command("restart", "systemctl", ["--user", "restart", "core5-api", "core5-web", "core5-review-ui"]))]);
   clearTimeout(startupTimer);
   await stopWatchers();
-  await requireApiReady();
   for (const [port, allowed] of [[4313, origin], [4174, reviewOrigin]]) {
     if ((await httpResult(`http://127.0.0.1:${port}/login`)).status !== "200") throw new Error("health_not_200");
     const invalid = await httpResult(`http://127.0.0.1:${port}/api/self-entry`, ["-H", `Origin: ${allowed}`,
@@ -538,12 +544,9 @@ async function main() {
   }
   const candidate = await httpResult("http://127.0.0.1:4312/api/cwos/v2/mail-candidate-review");
   if (candidate.status !== "401") throw new Error("candidate_api_not_401");
-  await requireActive("active");
-  for (const [index, unit] of services.entries()) await verifyEnvironment(unit, runtimeValues[index]);
-  for (const [index, unit] of services.entries()) {
-    await verifyWorkingDirectory(unit, join(release, index ? "apps/web" : "apps/api"));
-  }
-  await verifyReviewExecution(`${node}\n${reviewCommand.join(" ")}`);
+  await verifyRuntime(runtimeValues,
+    services.map((_, index) => join(release, index ? "apps/web" : "apps/api")),
+    `${node}\n${reviewCommand.join(" ")}`);
   checkInterrupted();
   changed = false;
   published = true;
@@ -561,7 +564,7 @@ try {
   clearTimeout(startupTimer);
   await stopChildren();
   try { await rollback(); }
-  catch { try { await markRollbackFailed(); } catch { process.stderr.write("CRM_ROLLBACK_FAILED operator_action_required\n"); } }
+  catch { try { await markRollbackFailed(); } catch { process.stderr.write("ROLLBACK_INCOMPLETE operator_action_required\nCRM_ROLLBACK_FAILED operator_action_required\n"); } }
   process.stderr.write(`CRM_DEPLOY_REFUSED_OR_FAILED stage=${failedStage} reason=${reason}\n`);
   process.exitCode = interruptedSignal === "SIGHUP" ? 129 : interruptedSignal === "SIGINT" ? 130 : interruptedSignal === "SIGTERM" ? 143 : 1;
 } finally {

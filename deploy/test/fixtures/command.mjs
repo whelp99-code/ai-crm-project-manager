@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, watch, writeFileSync, writeSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -129,7 +130,8 @@ async function main() {
       const config = configuration(root, unit);
       if (args.includes("--property=WorkingDirectory")) process.stdout.write(config.cwd + "\n");
       else if (args.includes("--property=ExecStart")) {
-        const words = environmentWords(config.exec);
+        const rollback = state.generation > 0 && !config.cwd.includes(fixture.release);
+        const words = environmentWords(rollback && fixture.rollbackExec ? `${process.execPath} wrong-server.mjs` : config.exec);
         process.stdout.write(`{ path=${words[0]} ; argv[]=${words.join(" ")} ; ignore_errors=no ; start_time=generation-${state.generation} ; pid=${state.units[unit].pid} }\n`);
       }
       else if (args.includes("--property=MainPID")) process.stdout.write(String(state.units[unit].pid) + "\n");
@@ -158,6 +160,10 @@ async function main() {
         }
         if (deployed && fixture.staleReview && unit === "core5-review-ui") {
           environment.CRM_WEB_ORIGIN = "https://old.invalid";
+        }
+        if (!deployed && fixture.rollbackEnvironmentUnit === unit) {
+          if (unit === "core5-api") environment.CWOS_V2_OPERATOR_AUTH_STATE_PATH = fixture.newAuth;
+          else environment.CRM_WEB_ORIGIN = "https://wrong.invalid";
         }
         const dead = fixture.deadUnit === unit && fixture.deadPhase === (deployed ? "deploy" : "rollback");
         const pid = dead ? 0 : 1000 + state.generation * 10 + index;
@@ -255,6 +261,51 @@ async function main() {
     const url = args.at(-1);
     const rollback = state.generation > 0 && !configuration(root, "core5-api").cwd.includes(fixture.release);
     event({ name, args, rollback });
+    if (rollback && fixture.coldRollback && url.startsWith("http://127.0.0.1:4312/")
+      && !url.endsWith(fixture.rollbackHttpFailure ?? "\0")) {
+      const requests = [];
+      const server = createServer((request, response) => {
+        requests.push(request.url);
+        response.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
+        response.end("{}");
+      });
+      const listen = () => new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(port, "127.0.0.1", resolve);
+      });
+      let port = 0, refused = false, listening, output = "", diagnostics = "";
+      const headersPath = join(root, `http-${process.pid}.headers`);
+      try {
+        await listen();
+        port = server.address().port;
+        await new Promise(resolve => server.close(resolve));
+        // Do not simulate curl retries. Bind only after native curl actually
+        // observes the Type=simple connection-refused window.
+        const curl = spawn("/usr/bin/curl", ["--verbose", "--dump-header", headersPath,
+          ...args.slice(0, -1), `http://127.0.0.1:${port}${new URL(url).pathname}`],
+        { stdio: ["ignore", "pipe", "pipe"] });
+        curl.stdout.on("data", chunk => { output += chunk; });
+        curl.stderr.on("data", chunk => {
+          diagnostics += chunk;
+          if (!listening && /Failed to connect|Connection refused/.test(diagnostics)) {
+            refused = true;
+            listening = listen();
+          }
+        });
+        const code = await new Promise((resolve, reject) => {
+          curl.once("error", reject);
+          curl.once("close", resolve);
+        });
+        await listening;
+        event({ name, args, rollback, realHttp: { port, refused, requests, code,
+          headers: readFileSync(headersPath, "utf8"), output } });
+        process.stdout.write(output);
+        return code;
+      } finally {
+        server.closeAllConnections();
+        if (server.listening) await new Promise(resolve => server.close(resolve));
+      }
+    }
     if (rollback && fixture.rollbackHttpFailure && url.endsWith(fixture.rollbackHttpFailure)) {
       process.stdout.write('{"error":"not_ready"}\n503');
       return 0;

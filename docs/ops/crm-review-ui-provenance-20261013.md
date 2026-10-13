@@ -340,3 +340,33 @@ Next build 성공(static pages 16/16, exit0). 그 산출물의 절대 Next 엔�
 에 보존했다. 이 생성 HTML의 Next inline-script 스타일 진단은 원문을
 바꾸지 않고 남겼다. 저장소 shell/JS 진단·문법은 통과했다.
 운영 전환, 실제 DB backup, 대표 인증 또는 후보 변경은 실행하지 않았다.
+
+## 네 번째 Cursor REJECT 수정
+
+성공과 롤백은 동일한 `verifyRuntime`을 호출한다. API health/ready200,
+세 unit 각각 active, 기대 실효 환경, 설정 WorkingDirectory와 MainPID cwd,
+review executable/argv까지 모두 통과해야 한다. 옛 review 경로·명령은
+복구용 기대값으로 전달하고, 새 릴리스에서는 릴리스 내부 Next 명령을 전달한다.
+
+API HTTP에는 연결 거부 재시도를 적용했다. 간격 1초, 최대 120회,
+재시도 시작 기한 120초이며 각 전송 상한 10초를 유지한다. 성공 경로의
+startup 구독도 유지한다. Type=simple restart 반환 직후 연결 거부가
+나더라도 이 검사로 기동을 기다린다. 실패하면 `ROLLBACK_INCOMPLETE`와
+기존 `CRM_ROLLBACK_FAILED`를 출력하고 release/backup 및 실패 marker를 보존한다.
+
+수정 전 **11 실패 / 36 통과**, 수정 후 Node 20/22 각각 **47/47 통과**.
+실제 `/usr/bin/curl`의 연결 거부 이벤트 뒤에만 loopback 서버를 열어
+native retry가 health/ready200을 받는 것을 확인했다. 고정 sleep은 없다.
+그 후에도 복구 환경이 잘못되면 완료하지 않는다. 세 서비스의 비활성·cwd
+불일치, `/health`·`/ready`503과 review 실행 명령 불일치도 실패·보존을 확인했다.
+
+독립 CLI:
+`~/.nvm/versions/node/v22.23.2/bin/node ~/.local/state/omonyang/TASK-CRM-63-FIX4-20261013/manual-qa.mjs review`.
+13건 PASS. 같은 디렉터리 `review-receipts.json`에 실제 응답 상태·헤더·본문,
+복원/보존과 생존 자식0·포트 종료를 기록했다. `review-node20.log`와
+`review-node22.log`는 전체 회귀 완료 기록이다.
+
+shell/내장 Node 문법·저장소 진단과 승인/인수 거부도 통과했다.
+외부 QA 디렉터리의 TypeScript 미설치로 LSP 대신 Node 문법·실행을 검증했다.
+운영 실행은 하지 않았다. 원격 CI는 로컬 PASS와 다르며, 확인한 #63 새 head의
+Actions annotation은 결제/사용량 제한으로 job 미시작, Bugbot은 usage limit였다.
