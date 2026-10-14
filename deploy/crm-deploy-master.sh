@@ -65,6 +65,8 @@ let interruptedSignal, rollingBack = false;
 const children = new Map();
 const terminationTimers = new Map();
 const previousEnvironment = new Map();
+const databaseNames = ["DATABASE_URL", "ADMIN_DATABASE_URL", "WORKSPACE_ID", "CWOS_V2_OPERATOR_WORKSPACE_ID"];
+let previousDatabase;
 
 function startChild(executable, args, options) {
   const child = spawn(executable, args, { ...options, detached: true });
@@ -207,7 +209,39 @@ async function requireHttpReady(contract) {
   }
 }
 
-async function verifyRuntime(environments, directories, contract) {
+async function verifyIdentity(origin) {
+  for (const [path, expected] of [["/health", "ok"], ["/ready", "ready"]]) {
+    const result = (await command("identity_probe", "curl", ["--disable", "--silent", "--show-error",
+      "--proto", "=https", "--noproxy", "*", "--max-redirs", "0", "--connect-timeout", "5", "--max-time", "10",
+      "--write-out", "\n%{http_code}", `${origin}${path}`])).toString();
+    if (!result.endsWith("\n200")) throw new Error("identity_not_ready");
+    let body;
+    try { body = JSON.parse(result.slice(0, -4)); }
+    catch (error) { if (!(error instanceof SyntaxError)) throw error; throw new Error("identity_not_ready"); }
+    if (body?.status !== expected) throw new Error("identity_not_ready");
+  }
+}
+
+function databaseIdentity(environment) {
+  const profiles = Object.fromEntries(databaseNames.slice(0, 2).map(name => {
+    let profile;
+    try { profile = new URL(environment[name]?.trim()); }
+    catch (error) { if (!(error instanceof TypeError)) throw error; throw new Error("database_profile_invalid"); }
+    if (!["postgres:", "postgresql:"].includes(profile.protocol) || !profile.hostname
+      || !profile.username || !profile.pathname.slice(1)
+      || ["host", "hostaddr", "port", "dbname", "database", "user", "username", "service"]
+        .some(key => profile.searchParams.has(key))) throw new Error("database_profile_invalid");
+    return [name, { host: profile.hostname.toLowerCase(), port: profile.port || "5432",
+      dbname: decodeURIComponent(profile.pathname.slice(1)), role: decodeURIComponent(profile.username) }];
+  }));
+  const api = profiles.DATABASE_URL, admin = profiles.ADMIN_DATABASE_URL;
+  const workspace = environment.WORKSPACE_ID?.trim(), operatorWorkspace = environment.CWOS_V2_OPERATOR_WORKSPACE_ID?.trim();
+  if (api.host !== admin.host || api.port !== admin.port || api.dbname !== admin.dbname
+    || api.role === admin.role || !workspace || workspace !== operatorWorkspace) throw new Error("database_profile_invalid");
+  return { ...profiles, WORKSPACE_ID: workspace, CWOS_V2_OPERATOR_WORKSPACE_ID: operatorWorkspace };
+}
+
+async function verifyRuntime(environments, directories, contract, expectedDatabase) {
   await requireHttpReady(contract);
   if (contract.nativeAuth) {
     const boundary = (await command("origin_probe", "curl", ["--silent", "--show-error", "--max-time", "10",
@@ -222,6 +256,8 @@ async function verifyRuntime(environments, directories, contract) {
     await verifyEnvironment(unit, environments[index]);
     await verifyWorkingDirectory(unit, directories[index]);
   }
+  const actualDatabase = databaseIdentity(await runtimeEnvironment("core5-api", databaseNames));
+  if (JSON.stringify(actualDatabase) !== JSON.stringify(expectedDatabase)) throw new Error("runtime_database_identity_mismatch");
 }
 
 async function writeDropin(path, data, mode) {
@@ -248,7 +284,7 @@ async function rollback() {
   await command("rollback_reload", "systemctl", ["--user", "daemon-reload"]);
   await command("rollback_restart", "systemctl", ["--user", "restart", "core5-api", "core5-web"]);
   await verifyRuntime([...previousEnvironment.values()],
-    services.map((_, index) => join(oldRelease, index ? "apps/web" : "apps/api")), releaseContracts.baseline);
+    services.map((_, index) => join(oldRelease, index ? "apps/web" : "apps/api")), releaseContracts.baseline, previousDatabase);
   changed = false;
   process.stderr.write("CRM_ROLLBACK_OK release=app-e91bb512\n");
 }
@@ -275,6 +311,7 @@ async function main() {
     NODE_ENV: "production", CRM_WEB_ORIGIN: origin, OPERATOR_AUTH_API_BASE_URL: identityOrigin,
     CWOS_V2_OPERATOR_AUTH_STATE_PATH: authPath,
   };
+  const expectedDatabase = databaseIdentity(binding);
   const oldAuthPath = parseEnv(await privateText(humanEnv)).CWOS_V2_OPERATOR_AUTH_STATE_PATH;
   const resolvedAuth = await realpath(authPath), resolvedOldAuth = await realpath(oldAuthPath);
   const authStat = await lstat(resolvedAuth), oldAuthStat = await lstat(resolvedOldAuth);
@@ -291,6 +328,7 @@ async function main() {
   for (const value of [origin, identityOrigin, authPath]) {
     if (/[\r\n\0]/.test(value)) throw new Error("environment_value_rejected");
   }
+  await verifyIdentity(identityOrigin);
   for (const executable of [node, pnpm, ...(slot ? [slot] : [])]) await access(executable);
   const revision = (await command("source_pin", "git", ["-C", repo, "rev-parse", `${target}^{commit}`])).toString().trim();
   if (revision !== target) throw new Error("source_pin_mismatch");
@@ -306,6 +344,7 @@ async function main() {
     if (!/^WorkingDirectory=.*app-e91bb512\/apps\/(api|web)$/m.test(text)) throw new Error("dropin_changed");
     previousEnvironment.set(unit, await runtimeEnvironment(unit, Object.keys(runtimeValues[index])));
   }
+  previousDatabase = databaseIdentity(await runtimeEnvironment("core5-api", databaseNames));
   try { await lstat(release); throw new Error("immutable_release_exists"); }
   catch (error) { if (error.code !== "ENOENT") throw error; }
   scratch = await mkdtemp(join(root, `.prepare-${target.slice(0, 8)}-`));
@@ -321,8 +360,8 @@ async function main() {
   await chmod(backupDir, 0o700);
   const database = new URL(binding.ADMIN_DATABASE_URL);
   if (!["postgres:", "postgresql:"].includes(database.protocol)) throw new Error("database_profile_invalid");
-  const pgEnv = { ...process.env, PGHOST: database.hostname, PGPORT: database.port || "5432",
-    PGDATABASE: decodeURIComponent(database.pathname.slice(1)), PGUSER: decodeURIComponent(database.username),
+  const pgEnv = { ...process.env, PGHOST: expectedDatabase.ADMIN_DATABASE_URL.host, PGPORT: expectedDatabase.ADMIN_DATABASE_URL.port,
+    PGDATABASE: expectedDatabase.ADMIN_DATABASE_URL.dbname, PGUSER: expectedDatabase.ADMIN_DATABASE_URL.role,
     PGPASSWORD: decodeURIComponent(database.password), PGSSLMODE: database.searchParams.get("sslmode") || "prefer" };
   const image = process.env.CRM_PG_IMAGE || "postgres:16";
   const dumpPath = join(backupDir, `crm-before-${target.slice(0, 8)}.dump`);
@@ -439,7 +478,7 @@ gosu postgres pg_restore -h "$directory" -U "$1" -d postgres --exit-on-error --s
   clearTimeout(startupTimer);
   await stopWatcher();
   await verifyRuntime(runtimeValues,
-    services.map((_, index) => join(release, index ? "apps/web" : "apps/api")), releaseContracts.target);
+    services.map((_, index) => join(release, index ? "apps/web" : "apps/api")), releaseContracts.target, expectedDatabase);
   checkInterrupted();
   changed = false;
   published = true;
@@ -452,7 +491,9 @@ try {
   const failedStage = stage;
   const safeReason = /^(operator_approval_required|production_https_origins_required|owner_enrollment_required|new_bcrypt_enrollment_required|legacy_auth_state_must_be_preserved|environment_value_rejected|source_pin_mismatch|baseline_changed|dropin_changed|immutable_release_exists|private_file_required|database_profile_invalid|empty_dump|startup_timeout|startup_watch_ended|health_not_200|web_origin_not_ready|runtime_process_unavailable|runtime_environment_mismatch|runtime_working_directory_mismatch|runtime_manifest_invalid|runtime_page_prerendered|node22_required|[a-z0-9_]+_exit_(\d+|null))$/;
   const reason = interruptedSignal ? `interrupted_${interruptedSignal}`
-    : typeof error?.message === "string" && safeReason.test(error.message) ? error.message : "private_input_or_io_rejected";
+    : typeof error?.message === "string" && (safeReason.test(error.message)
+      || ["identity_not_ready", "runtime_database_identity_mismatch"].includes(error.message))
+      ? error.message : "private_input_or_io_rejected";
   rollingBack = true;
   clearTimeout(startupTimer);
   await stopChildren();
