@@ -13,6 +13,80 @@ function restored(result) {
 }
 
 describe("PR63 deployment runtime regressions", () => {
+  it.each([
+    { DATABASE_URL: "postgresql://runtime_api@wrong.invalid/fixture" },
+    { DATABASE_URL: "postgresql://runtime_api@127.0.0.1:5433/fixture" },
+    { DATABASE_URL: "postgresql://runtime_api@127.0.0.1/other" },
+    { DATABASE_URL: "postgresql://wrong_role@127.0.0.1/fixture" },
+    { ADMIN_DATABASE_URL: "postgresql://admin@wrong.invalid/fixture" },
+    { ADMIN_DATABASE_URL: "postgresql://wrong_admin@127.0.0.1/fixture" },
+    { WORKSPACE_ID: "wrong-workspace" },
+    { CWOS_V2_OPERATOR_WORKSPACE_ID: "wrong-workspace" },
+  ])("rolls back mismatched API database identity: %j", async deployDatabaseEnvironment => {
+    await withDeployment({ deployDatabaseEnvironment }, result => {
+      expect(result.code).toBe(1);
+      expect(result.stdout).not.toContain("CRM_1CF5_LIVE");
+      expect(result.stderr).toContain("CRM_ROLLBACK_OK");
+      expect(exists(result.release)).toBe(false);
+      restored(result);
+    });
+  });
+
+  it.each([
+    { DATABASE_URL: "postgresql://runtime_api@wrong.invalid/fixture" },
+    { DATABASE_URL: "postgresql://runtime_api@127.0.0.1/fixture?host=wrong.invalid" },
+    { DATABASE_URL: "postgresql://admin@127.0.0.1/fixture" },
+    { WORKSPACE_ID: "wrong-workspace" },
+  ])("rejects inconsistent configured database identity before backup: %j", async databaseBinding => {
+    await withDeployment({ databaseBinding }, result => {
+      expect(result.code).toBe(1);
+      expect(result.events.some(event => event.backupIdentity)).toBe(false);
+      expect(result.events.some(event => event.args.includes("daemon-reload"))).toBe(false);
+      restored(result);
+    });
+  });
+
+  it("retains recovery files when restored API database identity mismatches", async () => {
+    await withDeployment({ failReload: true, rollbackDatabaseEnvironment: { WORKSPACE_ID: "wrong-workspace" } }, result => {
+      expect(result.stderr).toContain("ROLLBACK_INCOMPLETE");
+      expect(result.stderr).not.toContain("CRM_ROLLBACK_OK");
+      expect(exists(result.release)).toBe(true);
+      restored(result);
+    });
+  });
+
+  it("normalizes database identity without comparing passwords or default-port spelling", async () => {
+    await withDeployment({ deployDatabaseEnvironment: { DATABASE_URL: "postgresql://runtime_api:changed-password@127.0.0.1/fixture" } }, result => {
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.events.find(event => event.backupIdentity).backupIdentity)
+        .toEqual({ host: "127.0.0.1", port: "5432", dbname: "fixture", role: "admin" });
+      expect(result.stdout + result.stderr).not.toContain("changed-password");
+    });
+  });
+
+  it.each(["unreachable", "untrusted", "hostname", "not-ready", "wrong-body", "invalid-json", "redirect"])(
+    "rejects identity HTTPS failure before switching: %s", async identityFailure => {
+      await withDeployment({ realIdentity: true, identityFailure }, result => {
+        expect(result.code).toBe(1);
+        expect(result.stdout).not.toContain("CRM_1CF5_LIVE");
+        expect(result.events.some(event => event.args.includes("daemon-reload"))).toBe(false);
+        expect(result.events.some(event => event.realIdentity)).toBe(true);
+        expect(exists(result.release)).toBe(false);
+        restored(result);
+      });
+    });
+
+  it("verifies identity HTTPS health and readiness without credentials", async () => {
+    await withDeployment({ realIdentity: true }, result => {
+      expect(result.code, result.stderr).toBe(0);
+      const responses = result.events.filter(event => event.realIdentity);
+      expect(responses).toHaveLength(2);
+      expect(responses.every(event => event.realIdentity.code === 0
+        && event.realIdentity.requests.length === 1 && !event.realIdentity.requests[0].credentialSent)).toBe(true);
+      expect(responses.map(event => event.realIdentity.requests[0].path).sort()).toEqual(["/health", "/ready"]);
+    });
+  });
+
   it("cleanup permits retry after restore fails before container creation", async () => {
     await withDeployment({ restoreNotCreated: true, retryAfterFailure: true }, result => {
       expect(result.code).toBe(1);

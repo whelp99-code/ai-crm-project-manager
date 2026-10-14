@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
+import { createServer as createTlsServer } from "node:https";
 import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, watch, writeFileSync, writeSync } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import { basename, join } from "node:path";
@@ -164,6 +165,9 @@ async function main() {
         const config = configuration(root, unit);
         const deployed = config.cwd.includes(fixture.release);
         const environment = { ...config.environment };
+        if (unit === "core5-api") {
+          Object.assign(environment, deployed ? fixture.deployDatabaseEnvironment : fixture.rollbackDatabaseEnvironment);
+        }
         if (deployed && fixture.staleAuth && unit === "core5-api") {
           environment.CWOS_V2_OPERATOR_AUTH_STATE_PATH = fixture.oldAuth;
         }
@@ -246,7 +250,10 @@ async function main() {
     return new Promise(() => {});
   }
   if (name === "docker") {
-    event({ name, args });
+    event({ name, args, ...(args.includes("pg_dump") ? { backupIdentity: {
+      host: process.env.PGHOST, port: process.env.PGPORT,
+      dbname: process.env.PGDATABASE, role: process.env.PGUSER,
+    } } : {}) });
     if (fixture.realPg && (args.includes("pg_dump") || args.includes("pg_dumpall"))) {
       if (args.includes("pg_dump")) writeFileSync(join(root, "dump-snapshot.json"), JSON.stringify({ dbVersion: state.dbVersion }));
       await pipeline(createReadStream(args.includes("pg_dump") ? fixture.realPg.dumpPath : fixture.realPg.rolesPath), process.stdout);
@@ -340,6 +347,59 @@ async function main() {
   }
   if (name === "curl") {
     const url = args.at(-1);
+    if (url.startsWith("https://identity.invalid/")) {
+      event({ name, args });
+      const expected = new URL(url).pathname === "/health" ? "ok" : "ready";
+      if (!fixture.realIdentity) {
+        process.stdout.write(JSON.stringify({ status: expected }) + "\n200");
+        return 0;
+      }
+      const key = join(root, "identity.key"), cert = join(root, "identity.crt");
+      if (!existsSync(cert)) {
+        const host = fixture.identityFailure === "hostname" ? "wrong.invalid" : "identity.invalid";
+        const openssl = spawn("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes",
+          "-keyout", key, "-out", cert, "-days", "1", "-subj", `/CN=${host}`,
+          "-addext", `subjectAltName=DNS:${host}`], { stdio: "ignore" });
+        const code = await new Promise((resolve, reject) => {
+          openssl.once("error", reject); openssl.once("close", resolve);
+        });
+        if (code !== 0) throw new Error("fixture TLS certificate generation failed");
+      }
+      const requests = [];
+      const server = createTlsServer({ key: readFileSync(key), cert: readFileSync(cert) }, (request, response) => {
+        requests.push({ path: request.url, method: request.method,
+          credentialSent: Boolean(request.headers.authorization || request.headers.cookie || request.headers["x-api-key"]) });
+        const failure = fixture.identityFailure;
+        const status = failure === "redirect" ? 302 : failure === "not-ready" && expected === "ready" ? 503 : 200;
+        response.writeHead(status, { "Content-Type": "application/json", Connection: "close",
+          ...(status === 302 ? { Location: "https://foreign.invalid/health" } : {}) });
+        response.end(failure === "invalid-json" ? "<html>not identity</html>"
+          : JSON.stringify({ status: failure === "wrong-body" ? "other-service" : expected }));
+      });
+      try {
+        await new Promise((resolve, reject) => {
+          server.once("error", reject); server.listen(0, "127.0.0.1", resolve);
+        });
+        const port = server.address().port;
+        if (fixture.identityFailure === "unreachable") await new Promise(resolve => server.close(resolve));
+        const nativeArgs = [...args.slice(0, -1), "--connect-to", `identity.invalid:443:127.0.0.1:${port}`,
+          ...(fixture.identityFailure === "untrusted" ? [] : ["--cacert", cert]), url];
+        const curl = spawn("/usr/bin/curl", nativeArgs,
+          { stdio: ["ignore", "pipe", "pipe"], env: { PATH: "/usr/bin:/bin", HOME: root } });
+        let output = "", diagnostics = "";
+        curl.stdout.on("data", chunk => { output += chunk; });
+        curl.stderr.on("data", chunk => { diagnostics += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          curl.once("error", reject); curl.once("close", resolve);
+        });
+        event({ name, args, realIdentity: { code, output, diagnostics, requests } });
+        process.stdout.write(output);
+        return code;
+      } finally {
+        server.closeAllConnections();
+        if (server.listening) await new Promise(resolve => server.close(resolve));
+      }
+    }
     const rollback = state.generation > 0 && !configuration(root, "core5-api").cwd.includes(fixture.release);
     const logical = new URL(url);
     const legacySurface = rollback && ["4313", "4174"].includes(logical.port);

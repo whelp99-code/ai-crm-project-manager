@@ -52,8 +52,12 @@ export async function withDeployment(options, inspect) {
     mkdirSync(join(root, "source/apps/web/app"), { recursive: true });
     mkdirSync(join(root, "source/apps/api"), { recursive: true });
     writeFileSync(join(root, "source/apps/web/app/page.tsx"), "export const CRM_REVIEW_UI = true;\n");
-    writeFileSync(appEnv, "ADMIN_DATABASE_URL=postgresql://fixture@127.0.0.1/fixture\nCRM_WEB_ORIGIN=https://old.invalid\n", { mode: 0o600 });
-    writeFileSync(humanEnv, `CWOS_V2_OPERATOR_AUTH_STATE_PATH=${JSON.stringify(oldAuth)}\nCWOS_V2_OPERATOR_PRINCIPAL_ID=fixture\n`, { mode: 0o600 });
+    const databaseBinding = { DATABASE_URL: "postgresql://runtime_api:fixture-password@127.0.0.1:5432/fixture",
+      ADMIN_DATABASE_URL: "postgresql://admin:fixture-backup-password@127.0.0.1/fixture",
+      WORKSPACE_ID: "fixture-workspace", ...options.databaseBinding };
+    writeFileSync(appEnv, Object.entries(databaseBinding).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join("\n")
+      + "\nCRM_WEB_ORIGIN=https://old.invalid\n", { mode: 0o600 });
+    writeFileSync(humanEnv, `CWOS_V2_OPERATOR_AUTH_STATE_PATH=${JSON.stringify(oldAuth)}\nCWOS_V2_OPERATOR_PRINCIPAL_ID=fixture\nCWOS_V2_OPERATOR_WORKSPACE_ID=fixture-workspace\n`, { mode: 0o600 });
     writeFileSync(newAuth, JSON.stringify({ enrolled: true, totpPending: false, passwordHash: "$2b$12$" + ".".repeat(53) }), { mode: 0o600 });
     writeFileSync(oldAuth, readText(newAuth), { mode: 0o600 });
     if (options.authAlias === "dotdot") {
