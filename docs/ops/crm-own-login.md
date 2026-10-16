@@ -51,15 +51,25 @@ or payment is part of this authentication change.
 
 ## Web registration
 
-`/login/enroll` is the browser form for the same first enrollment the CLI writes.
-It is served only when the request URL is loopback (`127.0.0.1`, `localhost`,
-`::1`) or HTTPS on port 8446 or 8447. Any other host renders a closed notice
-and the POST is refused with `ENROLLMENT_HOST_DENIED`. The form posts password,
-TOTP secret and the current code to the same-origin `/api/self-entry/enroll`
-route, which calls `writeNewOperatorEnrollment` and stores the CLI record
-(`generation`, `enrolled`, `totpPending`, bcrypt cost 12, `totpSecret`,
-`lastTotpStep`) with mode 0600 and `wx`. Responses, errors and this page do not
-return the password or the TOTP secret.
+Enrollment is not decided from `Host`, `Origin`, `X-Forwarded-*`, or the request
+URL. tailscale serve publishes `8446` to `127.0.0.1:4313` and `8447` to
+`127.0.0.1:4312`, so a loopback remote address on those ports is still a tailnet
+request. The public Next routes on 4312 and 4313 always return
+`ENROLLMENT_HOST_DENIED` and do not render the form.
+
+The registration form is served only by a separate listener bound to
+`127.0.0.1:4321`, a port tailscale serve does not forward. The listener allows
+a request only when the accepted socket's local port is 4321 and its remote
+address is loopback. Connecting to 4312 or 4313 on the machine itself cannot
+open enrollment, because those sockets are rejected even if `Host` is
+`localhost`. Open `http://127.0.0.1:4321/login/enroll` on the server, or tunnel
+that port. This change does not start the listener.
+
+The form posts password, TOTP secret and the current code to the same-origin
+`/api/self-entry/enroll` route, which calls `writeNewOperatorEnrollment` and
+stores the CLI record (`generation`, `enrolled`, `totpPending`, bcrypt cost 12,
+`totpSecret`, `lastTotpStep`) with mode 0600 and `wx`. Responses, errors and
+this page do not return the password or the TOTP secret.
 
 Set `CWOS_V2_OPERATOR_AUTH_STATE_PATH` to a new private path that does not exist
 yet. If the variable is unset the form stays closed (`CONFIGURATION_REQUIRED`)

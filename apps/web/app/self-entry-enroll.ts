@@ -1,20 +1,44 @@
 import { lstatSync } from "node:fs";
 
-const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);
-const HTTPS_PORTS = new Set(["8446", "8447"]);
+/** tailscale serve forwards 8446 to 4313 and 8447 to 4312. Both are tailnet paths. */
+export const TAILSCALE_BACKEND_PORTS = new Set([4312, 4313]);
+/** Not forwarded by tailscale serve. The enrollment process binds 127.0.0.1 only. */
+export const ENROLLMENT_BIND_HOST = "127.0.0.1";
+export const ENROLLMENT_BIND_PORT = 4321;
+export const ENROLLMENT_ORIGIN = `http://${ENROLLMENT_BIND_HOST}:${ENROLLMENT_BIND_PORT}`;
 
-export function enrollmentSurfaceAllowed(url: URL): boolean {
-  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (LOOPBACK.has(host)) return true;
-  const port = url.port || (url.protocol === "https:" ? "443" : "80");
-  return url.protocol === "https:" && HTTPS_PORTS.has(port);
+const LOOPBACK_REMOTE = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+export type EnrollmentListener = {
+  localPort: number;
+  remoteAddress: string;
+};
+
+export function enrollmentListener(socket: {
+  localPort?: number;
+  remoteAddress?: string | null | undefined;
+}): EnrollmentListener | undefined {
+  if (typeof socket.localPort !== "number" || !Number.isInteger(socket.localPort)) return undefined;
+  if (!socket.remoteAddress) return undefined;
+  return { localPort: socket.localPort, remoteAddress: socket.remoteAddress };
+}
+
+/** Allow only the dedicated loopback listener. Host, Origin and the request URL are not consulted. */
+export function enrollmentSurfaceAllowed(listener: EnrollmentListener | undefined): boolean {
+  if (!listener) return false;
+  if (TAILSCALE_BACKEND_PORTS.has(listener.localPort)) return false;
+  if (listener.localPort !== ENROLLMENT_BIND_PORT) return false;
+  return LOOPBACK_REMOTE.has(listener.remoteAddress);
 }
 
 export type EnrollmentAvailability = "denied" | "unconfigured" | "enrolled" | "open";
 
 /** Existence of the state path closes the form. The file contents are not read. */
-export function enrollmentAvailability(url: URL, statePath: string | undefined): EnrollmentAvailability {
-  if (!enrollmentSurfaceAllowed(url)) return "denied";
+export function enrollmentAvailability(
+  listener: EnrollmentListener | undefined,
+  statePath: string | undefined,
+): EnrollmentAvailability {
+  if (!enrollmentSurfaceAllowed(listener)) return "denied";
   if (!statePath) return "unconfigured";
   try {
     const info = lstatSync(statePath);
@@ -26,7 +50,7 @@ export function enrollmentAvailability(url: URL, statePath: string | undefined):
   }
 }
 
-function json(status: number, body: { error: string } | { enrolled: true }): Response {
+function json(status: number, body: { error: string } | { enrolled: true } | { open: boolean }): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store" } });
 }
 
@@ -40,12 +64,12 @@ export async function submitOperatorEnrollment(
     statePath: string | undefined;
     now: number;
     write: (statePath: string, input: unknown, now: number) => void;
+    listener: EnrollmentListener | undefined;
   },
 ): Promise<Response> {
-  const url = new URL(request.url);
-  if (!enrollmentSurfaceAllowed(url)) return json(403, { error: "ENROLLMENT_HOST_DENIED" });
-  if (request.headers.get("origin") !== url.origin) return json(403, { error: "ENROLLMENT_HOST_DENIED" });
-  const availability = enrollmentAvailability(url, options.statePath);
+  if (!enrollmentSurfaceAllowed(options.listener)) return json(403, { error: "ENROLLMENT_HOST_DENIED" });
+  if (request.headers.get("origin") !== ENROLLMENT_ORIGIN) return json(403, { error: "ENROLLMENT_HOST_DENIED" });
+  const availability = enrollmentAvailability(options.listener, options.statePath);
   if (availability === "unconfigured") return json(503, { error: "CONFIGURATION_REQUIRED" });
   if (availability === "enrolled") return json(409, { error: "ALREADY_ENROLLED" });
   const raw = await request.text();
@@ -60,4 +84,8 @@ export async function submitOperatorEnrollment(
     return json(422, { error: "OPERATOR_ENROLLMENT_REJECTED" });
   }
   return json(201, { enrolled: true });
+}
+
+export function publicEnrollmentDenied(): Response {
+  return json(403, { error: "ENROLLMENT_HOST_DENIED" });
 }
