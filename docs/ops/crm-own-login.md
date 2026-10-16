@@ -49,6 +49,27 @@ multiple concurrent replicas are not supported by the existing store contract.
 No database migration, listener/port change, mail send, external business write
 or payment is part of this authentication change.
 
+## Web registration
+
+`/login/enroll` is the browser form for the same first enrollment the CLI writes.
+It is served only when the request URL is loopback (`127.0.0.1`, `localhost`,
+`::1`) or HTTPS on port 8446 or 8447. Any other host renders a closed notice
+and the POST is refused with `ENROLLMENT_HOST_DENIED`. The form posts password,
+TOTP secret and the current code to the same-origin `/api/self-entry/enroll`
+route, which calls `writeNewOperatorEnrollment` and stores the CLI record
+(`generation`, `enrolled`, `totpPending`, bcrypt cost 12, `totpSecret`,
+`lastTotpStep`) with mode 0600 and `wx`. Responses, errors and this page do not
+return the password or the TOTP secret.
+
+Set `CWOS_V2_OPERATOR_AUTH_STATE_PATH` to a new private path that does not exist
+yet. If the variable is unset the form stays closed (`CONFIGURATION_REQUIRED`)
+and nothing is written.
+If the path already exists, including a symlink, the form does not render and a
+second POST returns `ALREADY_ENROLLED` without reading or replacing the file.
+Opening the form again requires the existing offline recovery: stop the
+service, enroll a new private path, rotate the session signing secret, then
+restart. There is no web reset.
+
 ## Web entry
 
 The web server reuses `API_BASE_URL`, `WORKSPACE_ID`, `OPERATOR_PRINCIPAL_ID`
