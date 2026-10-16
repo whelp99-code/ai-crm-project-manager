@@ -463,6 +463,34 @@ export function registerCustomerWorkOsV2Routes(
         return sendKnownError(reply, error);
       }
     });
+    app.get("/api/cwos/v2/mail-candidates/:id", async (request, reply) => {
+      try {
+        const authenticatedActor = actor(request, options.actorBinding);
+        const id = (request.params as { id?: string }).id ?? "";
+        if (!/^mail-candidate-[a-f0-9]{64}$/.test(id)) {
+          throw new CustomerWorkOsV2Error("MAIL_CANDIDATE_NOT_FOUND", "mail candidate not found");
+        }
+        const envelope = await runtime.readAuthorized(authenticatedActor);
+        const item = (envelope.state.inbox.mailCandidates ?? []).find(candidate => candidate.id === id
+          && candidate.workspaceId === authenticatedActor.workspaceId
+          && candidate.createdByPrincipalId === authenticatedActor.principalId);
+        if (!item) throw new CustomerWorkOsV2Error("MAIL_CANDIDATE_NOT_FOUND", "mail candidate not found");
+        return reply.status(200).send({
+          workspaceId: authenticatedActor.workspaceId,
+          runtimeVersion: envelope.version,
+          candidate: {
+            id: item.id, provider: item.provider, mailbox: item.mailbox,
+            sourceLocator: item.sourceLocator, providerEventId: item.providerEventId,
+            subject: item.subject, bodyDigest: item.bodyDigest,
+            createdByPrincipalId: item.createdByPrincipalId,
+            status: item.status, confirmed: item.confirmed, freshness: item.freshness,
+            version: item.version,
+          },
+        });
+      } catch (error) {
+        return sendKnownError(reply, error);
+      }
+    });
   }
 
   app.get("/api/cwos/v2/mail-candidate-review", async (request, reply) => {

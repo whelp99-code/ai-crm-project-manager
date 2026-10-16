@@ -144,6 +144,32 @@ describe("MR candidate-only writer", () => {
     } finally { await f.app.close(); }
   });
 
+  it("reads one own candidate by id after a 409 and hides every other read", async () => {
+    const f = await fixture();
+    try {
+      const created = await f.app.inject({ method: "POST", url: "/api/cwos/v2/mail-candidates", headers, payload });
+      expect(created.statusCode).toBe(201);
+      const id = created.json().candidate.id as string;
+      const before = await f.runtime.read(workspaceId);
+      const read = await f.app.inject({ method: "GET", url: `/api/cwos/v2/mail-candidates/${id}`, headers });
+      expect(read.statusCode).toBe(200);
+      expect(read.json()).toMatchObject({
+        workspaceId, runtimeVersion: 5,
+        candidate: {
+          id, bodyDigest: payload.bodyDigest, providerEventId: payload.providerEventId,
+          createdByPrincipalId: principalId, status: "CANDIDATE", confirmed: false,
+        },
+      });
+      expect(read.json()).not.toHaveProperty("state");
+      expect(read.json()).not.toHaveProperty("candidates");
+      const missing = await f.app.inject({ method: "GET", url: `/api/cwos/v2/mail-candidates/mail-candidate-${"b".repeat(64)}`, headers });
+      expect(missing.statusCode).toBe(404);
+      const list = await f.app.inject({ method: "GET", url: "/api/cwos/v2/mail-candidates", headers });
+      expect(list.statusCode).toBe(403);
+      expect(await f.runtime.read(workspaceId)).toEqual(before);
+    } finally { await f.app.close(); }
+  });
+
   it("replays creation without updating the candidate and rejects changed source content", async () => {
     const f = await fixture();
     try {

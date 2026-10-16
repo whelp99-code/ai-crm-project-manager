@@ -136,8 +136,11 @@ export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInst
         return reply.status(403).send({ error: "MAIL_CANDIDATE_READ_ONLY" });
       }
       if (machineBinding.mailCandidateCreateOnly) {
+        const ownCandidate = request.method === "GET" && path !== undefined
+          && /^\/api\/cwos\/v2\/mail-candidates\/mail-candidate-[a-f0-9]{64}$/.test(path);
         if ((request.method === "POST" && path === "/api/cwos/v2/mail-candidates")
-          || (request.method === "GET" && path === "/health")) return;
+          || (request.method === "GET" && path === "/health")
+          || ownCandidate) return;
         return reply.status(403).send({ error: "MAIL_CANDIDATE_CREATE_ONLY" });
       }
       const mailAccountMaster = machineBinding.mailAccountMasterRead && request.method === "GET"
