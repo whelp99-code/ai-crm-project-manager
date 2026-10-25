@@ -159,6 +159,7 @@ export function diffNotionSync(input: {
   const updates: NotionSyncEntity[] = [];
   const holds: NotionSyncHold[] = [];
   const desiredIds = new Set<string>();
+  const heldMoneyIds = new Set<string>();
 
   for (const row of input.desired) {
     desiredIds.add(`${row.kind}\u0000${row.id}`);
@@ -199,10 +200,11 @@ export function diffNotionSync(input: {
       continue;
     }
     let changes = changedFields(row, live);
-    if (row.kind === "financial_item" && live.hasSettlement) {
+    if (row.kind === "financial_item") {
       const stopped = Object.keys(changes).filter((key) => MONEY_FIELDS.includes(key));
       if (stopped.length > 0) {
         holds.push({ notionPageId: row.pageId, kind: row.kind, reason: "AMOUNT_OR_DIRECTION" });
+        heldMoneyIds.add(row.id);
         for (const key of stopped) delete changes[key];
       }
     }
@@ -243,7 +245,7 @@ export function diffNotionSync(input: {
   const settled = input.liveSettlementFinancialItemIds ?? new Set<string>();
   const settlementInserts: NotionSyncSettlement[] = [];
   for (const row of input.desiredSettlements ?? []) {
-    if (settled.has(row.financialItemId)) continue;
+    if (settled.has(row.financialItemId) || heldMoneyIds.has(row.financialItemId)) continue;
     if (!row.settledAt) {
       holds.push({ notionPageId: row.notionPageId, kind: "settlement", reason: "MISSING_DATE" });
       continue;
