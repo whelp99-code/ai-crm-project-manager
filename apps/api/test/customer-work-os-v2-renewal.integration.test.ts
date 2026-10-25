@@ -4,10 +4,16 @@ import {
   createStandaloneCustomerWorkOsV2App,
   type CustomerWorkOsV2ActorBinding,
 } from "../src/customer-work-os-v2-routes.js";
-import type { V2Actor } from "@ai-crm/domain/customer-work-os-v2";
+import { CustomerWorkOsV2Error, type V2Actor } from "@ai-crm/domain/customer-work-os-v2";
 import {
   CustomerWorkOsV2RuntimeManager,
   InMemoryCwosV2StateStore,
+  validateAuditInput,
+  validateEnvelope,
+  v2Hash,
+  type CwosV2StateStore,
+  type V2AuditEvent,
+  type V2RuntimeEnvelope,
 } from "../src/customer-work-os-v2-runtime.js";
 
 const workspaceId = "e3333333-3333-4333-8333-333333333333";
@@ -332,7 +338,44 @@ describe("Customer Work OS v2 renewal revision fixture", () => {
     const beforeReplay = await runtime.read(workspaceIdForReplay);
     const draftBefore = beforeReplay.state.renewals?.drafts.find((item) => item.id === "w05-renewal-replay");
     expect(beforeReplay.idempotency.some((item) => item.key === "w05-transport-original")).toBe(false);
-    const reopened = new CustomerWorkOsV2RuntimeManager(store, () => "2026-10-06T00:00:00.000Z");
+    const previousAudit = store.auditLog(workspaceIdForReplay);
+    const serialized = JSON.stringify({ envelope: beforeReplay, audit: previousAudit });
+    const restored = JSON.parse(serialized) as { envelope: V2RuntimeEnvelope; audit: V2AuditEvent[] };
+    validateEnvelope(restored.envelope);
+    const restoredStore: CwosV2StateStore = {
+      async load(scope) {
+        return scope === restored.envelope.workspaceId ? structuredClone(restored.envelope) : undefined;
+      },
+      async compareAndSwap(scope, expectedVersion, next, audit) {
+        validateAuditInput(scope, audit);
+        if (scope !== restored.envelope.workspaceId) {
+          throw new CustomerWorkOsV2Error("CROSS_WORKSPACE_STATE", "fixture workspace differs");
+        }
+        if (restored.envelope.version !== expectedVersion) {
+          throw new CustomerWorkOsV2Error("CONCURRENT_MODIFICATION", "fixture version changed");
+        }
+        const prospective = { ...structuredClone(next), version: expectedVersion + 1 };
+        validateEnvelope(prospective);
+        if (audit.beforeStateHash !== restored.envelope.stateHash || audit.afterStateHash !== prospective.stateHash) {
+          throw new CustomerWorkOsV2Error("AUDIT_CHAIN_MISMATCH", "fixture audit state binding failed");
+        }
+        const previous = restored.audit.at(-1);
+        const core = {
+          ...structuredClone(audit), sequence: (previous?.sequence ?? 0) + 1,
+          previousEventHash: previous?.eventHash ?? null,
+        };
+        const event = { ...core, eventHash: v2Hash(core) };
+        restored.envelope = prospective;
+        restored.audit.push(event);
+        return structuredClone(prospective);
+      },
+    };
+    const reopened = new CustomerWorkOsV2RuntimeManager(restoredStore, () => "2026-10-07T00:00:00.000Z");
+    const afterRestore = await reopened.read(workspaceIdForReplay);
+    expect(afterRestore).toEqual(beforeReplay);
+    expect(afterRestore.idempotency).toHaveLength(500);
+    expect(afterRestore.idempotency.some((item) => item.key === "w05-transport-original")).toBe(false);
+    expect(restored.audit).toEqual(previousAudit);
     const replay = await reopened.command({
       workspaceId: workspaceIdForReplay,
       actor: owner,
@@ -346,5 +389,50 @@ describe("Customer Work OS v2 renewal revision fixture", () => {
     expect(draftAfter?.revisions).toHaveLength(draftBefore?.revisions.length ?? 0);
     expect(draftAfter?.receipts[0]?.approvalStatus).toBe("NOT_APPROVED");
     expect(draftAfter?.receipts[0]?.status).toBe("INTERNAL_CANDIDATE");
+    expect(draftBefore).toBeDefined();
+    expect(draftAfter).toEqual(draftBefore);
+    const originalRevision = first.envelope.state.renewals?.drafts[0]?.revisions[0];
+    const originalReceipt = first.envelope.state.renewals?.drafts[0]?.receipts[0];
+    if (!originalRevision || !originalReceipt) throw new Error("original W05 revision and receipt required");
+    const expectedResult = {
+      renewalId: originalPayload.renewalId,
+      revisionId: originalPayload.revisionId,
+      revisionVersion: originalRevision.version,
+      sourceHash: originalRevision.sourceHash,
+      status: originalReceipt.status,
+      approvalStatus: originalReceipt.approvalStatus,
+      requestHash: originalReceipt.requestHash,
+      createdAt: originalReceipt.createdAt,
+    };
+    expect(first.result).toEqual(expectedResult);
+    expect(replay.result).toEqual(expectedResult);
+    expect(draftAfter?.revisions[0]).toEqual(first.envelope.state.renewals?.drafts[0]?.revisions[0]);
+    expect(draftAfter?.receipts[0]).toEqual(first.envelope.state.renewals?.drafts[0]?.receipts[0]);
+    expect(replay.envelope.state).toEqual(beforeReplay.state);
+    expect(replay.envelope.stateHash).toBe(beforeReplay.stateHash);
+    expect(replay.envelope.version).toBe(beforeReplay.version + 1);
+    expect(replay.envelope.updatedAt).toBe("2026-10-07T00:00:00.000Z");
+    expect(replay.envelope.idempotency).toHaveLength(500);
+    const requestHash = v2Hash({ command: "w05.renewalRevision", payload: originalPayload, actor: owner });
+    expect(replay.envelope.idempotency.at(-1)).toEqual({
+      key: "w05-transport-original", requestHash, statusCode: 200,
+      result: expectedResult, createdAt: "2026-10-07T00:00:00.000Z",
+    });
+    expect(restored.audit.slice(0, -1)).toEqual(previousAudit);
+    expect(restored.audit).toHaveLength(previousAudit.length + 1);
+    const appended = restored.audit.at(-1);
+    if (!appended) throw new Error("replay audit required");
+    const { eventHash, ...auditCore } = appended;
+    expect(eventHash).toBe(v2Hash(auditCore));
+    expect(appended).toMatchObject({
+      workspaceId: workspaceIdForReplay, principalId: owner.principalId,
+      command: "w05.renewalRevision", idempotencyKey: "w05-transport-original", requestHash,
+      previousEventHash: previousAudit.at(-1)?.eventHash, sequence: previousAudit.length + 1,
+      beforeStateHash: beforeReplay.stateHash, afterStateHash: replay.envelope.stateHash,
+      resultHash: v2Hash(expectedResult), createdAt: "2026-10-07T00:00:00.000Z",
+    });
+    expect(await reopened.read(workspaceIdForReplay)).toEqual(replay.envelope);
+    expect(await runtime.read(workspaceIdForReplay)).toEqual(beforeReplay);
+    expect(store.auditLog(workspaceIdForReplay)).toEqual(previousAudit);
   });
 });
