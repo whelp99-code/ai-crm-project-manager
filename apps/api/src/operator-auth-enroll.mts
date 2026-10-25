@@ -1,6 +1,6 @@
-import { closeSync, constants, fstatSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { enrollOperator } from "./operator-auth-enrollment.js";
+import { writeNewOperatorEnrollment } from "./operator-auth-enrollment.js";
 
 // Owner-run offline CLI. Credential values never appear in argv, output or errors.
 try {
@@ -17,8 +17,7 @@ try {
       || stat.size > 4096) throw new Error("PRIVATE_INPUT_REQUIRED");
     input = JSON.parse(readFileSync(fd, "utf8"));
   } finally { closeSync(fd); }
-  const record = enrollOperator(input, Date.now());
-  writeFileSync(values.state, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: "wx" });
+  writeNewOperatorEnrollment(values.state, input, Date.now());
   process.stdout.write("OPERATOR_ENROLLED\n");
 } catch {
   process.stderr.write("OPERATOR_ENROLLMENT_REJECTED\n");
