@@ -18,9 +18,9 @@ const FORM = `<!doctype html>
   body { margin: 0; background: #f4f7f5; color: #17221d; font: 16px/1.65 Inter, Pretendard, sans-serif; }
   main { width: min(480px, calc(100% - 32px)); margin: 24px auto; }
   h1 { font-size: 28px; line-height: 1.2; }
-  form { display: grid; gap: 16px; background: #fff; border: 1px solid #ccd7d1; border-radius: 10px; padding: 22px; }
+  form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; background: #fff; border: 1px solid #ccd7d1; border-radius: 10px; padding: 22px; }
   label { display: grid; gap: 8px; font-weight: 600; }
-  input, button { min-height: 48px; font: inherit; }
+  input, button { box-sizing: border-box; width: 100%; min-width: 0; min-height: 48px; font: inherit; }
   input { border: 1px solid #ccd7d1; border-radius: 6px; padding: 12px; }
   button { border: 1px solid #176b47; border-radius: 6px; background: #176b47; color: #fff; font-weight: 600; }
   p { color: #526159; }
