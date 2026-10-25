@@ -4,7 +4,7 @@ import {
   createStandaloneCustomerWorkOsV2App,
   type CustomerWorkOsV2ActorBinding,
 } from "../src/customer-work-os-v2-routes.js";
-import type { V2Actor } from "@ai-crm/domain/customer-work-os-v2";
+import { CustomerWorkOsV2Platform, type CustomerWorkOsV2State, type V2Actor } from "@ai-crm/domain/customer-work-os-v2";
 import {
   CustomerWorkOsV2RuntimeManager,
   InMemoryCwosV2StateStore,
@@ -250,6 +250,105 @@ describe("Customer Work OS v2 renewal revision fixture", () => {
     } finally {
       await app.close();
     }
+  });
+
+  it("W05 boundary rejects only a mismatched citation hash without writes and accepts the valid control", async () => {
+    const store = new InMemoryCwosV2StateStore();
+    const app = createStandaloneCustomerWorkOsV2App({
+      store, profile: "test", actorBinding: binding, now: () => "2026-10-06T00:00:00.000Z",
+    });
+    await app.ready();
+    try {
+      expect((await post(app, "identity.registerPrincipal", 0, "hash-principal", {
+        id: binding.principalId, kind: "human", displayName: "Hash Owner", active: true,
+      })).statusCode).toBe(200);
+      expect((await post(app, "identity.addMembership", 1, "hash-membership", {
+        id: "hash-membership", principalId: binding.principalId,
+      })).statusCode).toBe(200);
+      const payload = renewalPayload({
+        renewalId: "hash-renewal", revisionId: "hash-revision", revisionLabel: "v1",
+        observedAt: "2026-10-06T09:00:00+09:00", expiresOn: null, noticePeriodDays: null,
+        unknownTerms: ["expiry", "notice period"], content: "갱신 조건 UNKNOWN", clauses: [["terms", "갱신 조건 UNKNOWN"]],
+      });
+      const before = await store.load(workspaceId);
+      if (!before) throw new Error("bootstrapped envelope required");
+      const auditBefore = store.auditLog(workspaceId);
+      const badPayload = {
+        ...payload,
+        citations: payload.citations.map(citation => ({
+          ...citation, sourceHash: citation.sourceHash === "0".repeat(64) ? "1".repeat(64) : "0".repeat(64),
+        })),
+      };
+      expect(badPayload.citations.map(({ sourceHash, ...citation }) => citation))
+        .toEqual(payload.citations.map(({ sourceHash, ...citation }) => citation));
+      const rejected = await post(app, "w05.renewalRevision", before.version, "hash-invalid", badPayload);
+      expect(rejected.statusCode).toBe(400);
+      expect(rejected.json()).toMatchObject({ error: "CITATION_HASH_MISMATCH" });
+      expect(await store.load(workspaceId)).toEqual(before);
+      expect(store.auditLog(workspaceId)).toEqual(auditBefore);
+      const valid = await post(app, "w05.renewalRevision", before.version, "hash-valid", payload);
+      expect(valid.statusCode).toBe(200);
+      const expectedHash = createHash("sha256").update(payload.content, "utf8").digest("hex");
+      expect(valid.json().result).toMatchObject({ sourceHash: expectedHash, approvalStatus: "NOT_APPROVED" });
+      const after = await store.load(workspaceId);
+      expect(after?.state.renewals?.drafts[0]?.revisions[0]).toMatchObject({
+        content: payload.content, sourceHash: expectedHash, citations: payload.citations,
+        expiresOn: null, noticePeriodDays: null, unknownTerms: payload.unknownTerms,
+      });
+      expect(after?.state.renewals?.drafts[0]?.receipts[0]).toMatchObject({
+        status: "INTERNAL_CANDIDATE", approvalStatus: "NOT_APPROVED",
+      });
+      expect(after?.version).toBe(before.version + 1);
+      expect(after?.idempotency.some(receipt => receipt.key === "hash-invalid")).toBe(false);
+      expect(store.auditLog(workspaceId)).toHaveLength(auditBefore.length + 1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("W05 boundary hydrates an old snapshot without renewals and preserves a subsequent revision round trip", () => {
+    const now = "2026-10-06T00:00:00.000Z";
+    const owner: V2Actor = { ...binding };
+    const original = new CustomerWorkOsV2Platform(workspaceId, () => now);
+    original.identity.registerPrincipal({
+      id: owner.principalId, workspaceId, kind: "human", displayName: "Snapshot Owner", active: true,
+      oidcIssuer: null, oidcSubject: null,
+    }, owner);
+    original.identity.addMembership({
+      id: "snapshot-membership", workspaceId, principalId: owner.principalId, status: "ACTIVE",
+    }, owner);
+    const exported = original.exportState();
+    const legacy = structuredClone(exported);
+    delete legacy.renewals;
+    expect(Object.keys(legacy).sort()).toEqual(Object.keys(exported).filter(key => key !== "renewals").sort());
+    const serialized = JSON.stringify(legacy);
+    const restored = new CustomerWorkOsV2Platform(workspaceId, () => now);
+    restored.hydrateState(JSON.parse(serialized) as CustomerWorkOsV2State);
+    expect(restored.exportState().renewals).toEqual({ schemaVersion: 1, drafts: [] });
+    expect(restored.exportState()).toEqual(exported);
+    const payload = renewalPayload({
+      renewalId: "legacy-renewal", revisionId: "legacy-revision", revisionLabel: "v1",
+      observedAt: "2026-10-06T09:00:00+09:00", expiresOn: null, noticePeriodDays: null,
+      unknownTerms: ["expiry", "notice period"], content: "갱신 조건 UNKNOWN", clauses: [["terms", "갱신 조건 UNKNOWN"]],
+    });
+    const draft = restored.renewals.recordRevision({ ...payload, workspaceId }, owner, now);
+    const sourceHash = createHash("sha256").update(payload.content, "utf8").digest("hex");
+    expect(draft.version).toBe(1);
+    expect(draft.revisions).toHaveLength(1);
+    expect(draft.revisions[0]).toMatchObject({
+      ...payload, workspaceId, observedAt: now, sourceHash, version: 1, recordedByPrincipalId: owner.principalId,
+    });
+    expect(draft.receipts).toEqual([{
+      revisionId: payload.revisionId, requestHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      status: "INTERNAL_CANDIDATE", approvalStatus: "NOT_APPROVED", createdAt: now,
+    }]);
+    const recorded = restored.exportState();
+    expect({ ...recorded, renewals: exported.renewals }).toEqual(exported);
+    const reopened = new CustomerWorkOsV2Platform(workspaceId, () => now);
+    reopened.hydrateState(JSON.parse(JSON.stringify(recorded)) as CustomerWorkOsV2State);
+    expect(reopened.exportState()).toEqual(recorded);
+    expect(reopened.exportState().renewals?.drafts).toEqual([draft]);
+    expect(JSON.stringify(legacy)).toBe(serialized);
   });
 
   it("semantically replays an internal receipt after 501 transport keys and manager reconstruction", async () => {
