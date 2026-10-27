@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { ModelClient } from "@ai-crm/model-gateway";
+import type { FinancePackConfig } from "@ai-crm/finance";
 import { createApp, type CreateAppOptions } from "../src/app.js";
 
 /**
@@ -28,6 +29,9 @@ function createSharedFakePool() {
   const auditChainHeads = new Map<string, { head_sequence: number; head_event_hash: string | null }>();
   const auditEvents = new Map<string, Record<string, unknown>>();
   const crmCustomers = new Map<string, Record<string, unknown>>();
+  const dailyGateStates = new Map<string, FakePgRow>();
+  const dailyGateDayRecords: FakePgRow[] = [];
+  const dailyGateVersionTransitions: FakePgRow[] = [];
   let auditEventSeq = 0;
 
   async function query<T = unknown>(
@@ -144,9 +148,10 @@ function createSharedFakePool() {
         resource_version: Number(params[5]),
         payload_hash: String(params[6]),
         policy_version: Number(params[7]),
-        requester_principal_id: String(params[8]),
-        decided_by_principal_id: (params[9] as string | null) ?? null,
-        status: String(params[10]),
+        trusted_context_hash: (params[8] as string | null) ?? null,
+        requester_principal_id: String(params[9]),
+        decided_by_principal_id: (params[10] as string | null) ?? null,
+        status: String(params[11]),
       };
       govControls.set(`${row.workspace_id}\0${row.id}`, row);
       return { rows: [] as T[], rowCount: 1 };
@@ -166,10 +171,11 @@ function createSharedFakePool() {
         resource_version: Number(params[6]),
         payload_hash: String(params[7]),
         policy_version: Number(params[8]),
-        lease_deadline: (params[9] as string | null) ?? null,
-        lease_epoch: Number(params[10]),
-        lease_token: (params[11] as string | null) ?? null,
-        control_id: (params[12] as string | null) ?? null,
+        trusted_context_hash: (params[9] as string | null) ?? null,
+        lease_deadline: (params[10] as string | null) ?? null,
+        lease_epoch: Number(params[11]),
+        lease_token: (params[12] as string | null) ?? null,
+        control_id: (params[13] as string | null) ?? null,
       };
       govIntents.set(`${row.workspace_id}\0${row.id}`, row);
       return { rows: [] as T[], rowCount: 1 };
@@ -260,6 +266,42 @@ function createSharedFakePool() {
       return { rows: rows as T[], rowCount: rows.length };
     }
 
+    if (sql.startsWith("INSERT INTO finance_daily_gate_state")) {
+      const workspaceId = String(params[0]);
+      const prior = dailyGateStates.get(workspaceId);
+      dailyGateStates.set(workspaceId, {
+        workspace_id: workspaceId, streak: Number(params[1]), tier: String(params[2]),
+        last_date_epoch: params[3] as string | number | null, activated_matrix_version: params[4] as string | number | null,
+        pack_version: params[5] as string | number | null, version: Number(prior?.version ?? 0) + 1,
+      });
+      return { rows: [] as T[], rowCount: 1 };
+    }
+    if (sql.startsWith("INSERT INTO finance_day_records")) {
+      dailyGateDayRecords.push({ workspace_id: params[0], date: params[1], qualifying: params[2], reason: params[3], streak_after: params[4], tier_after: params[5] });
+      return { rows: [] as T[], rowCount: 1 };
+    }
+    if (sql === "SELECT * FROM finance_daily_gate_state") {
+      const rows = [...dailyGateStates.values()];
+      return { rows: rows as T[], rowCount: rows.length };
+    }
+    if (sql.startsWith("SELECT * FROM finance_daily_gate_state WHERE workspace_id = $1")) {
+      const row = dailyGateStates.get(String(params[0]));
+      return { rows: (row ? [row] : []) as T[], rowCount: row ? 1 : 0 };
+    }
+    if (sql.startsWith("SELECT business_date,controller_principal_id,evidence_id,evidence_hash")) {
+      return { rows: [] as T[], rowCount: 0 };
+    }
+    if (sql.startsWith("SELECT business_date,evidence_hash,cfo_principal_id,approval_id")) {
+      return { rows: [] as T[], rowCount: 0 };
+    }
+    if (sql.startsWith("INSERT INTO finance_daily_gate_version_transitions")) {
+      dailyGateVersionTransitions.push({ workspace_id: params[0], reason: params[1], from_pack_version: params[2], to_pack_version: params[3] });
+      return { rows: [] as T[], rowCount: 1 };
+    }
+    if (sql.startsWith("SELECT * FROM finance_day_records ORDER BY")) {
+      return { rows: dailyGateDayRecords as T[], rowCount: dailyGateDayRecords.length };
+    }
+
     // --- P6-b G001 (PG-A/B/C1/C2): this fake pool does not seed any rows for
     // the new sub-aggregate/PM/delivery/finance-recon/daily-gate tables, but
     // hydrate-on-boot still issues cross-workspace listAll* reads against them
@@ -279,8 +321,7 @@ function createSharedFakePool() {
       sql.startsWith("SELECT * FROM delivery_projects ORDER BY") ||
       sql.startsWith("SELECT * FROM finance_reconciliations ORDER BY") ||
       sql.startsWith("SELECT * FROM finance_exceptions ORDER BY") ||
-      sql === "SELECT * FROM finance_daily_gate_state" ||
-      sql.startsWith("SELECT * FROM finance_day_records ORDER BY") ||
+      sql.startsWith("SELECT * FROM finance_journal_entries ORDER BY") ||
       // Q2 (D2): reports hydrate-on-boot is unconditional on `pool` (like the
       // sub-aggregate tables above), not gated on any of orch/gov/crm.
       sql.startsWith("SELECT * FROM report_snapshots ORDER BY")
@@ -291,7 +332,11 @@ function createSharedFakePool() {
     throw new Error(`unexpected SQL in shared fake pool: ${sql}`);
   }
 
-  return { query };
+  return {
+    query,
+    seedDailyGateState(row: FakePgRow) { dailyGateStates.set(String(row.workspace_id), row); },
+    dailyGateVersionTransitions,
+  };
 }
 
 function planClient(steps: Array<Record<string, unknown>>): ModelClient {
@@ -327,6 +372,11 @@ function planClient(steps: Array<Record<string, unknown>>): ModelClient {
 
 const WS = "ws-restart";
 const OPERATOR = "operator-restart";
+const FINANCE_PACK: FinancePackConfig = {
+  packVersion: 1,
+  chartOfAccounts: [{ code: "1000", name: "Cash", type: "asset" }], decimalScale: 0,
+  dayCloseCutoff: "18:00", cutoffBoundary: "inclusive", reconciliationToleranceKrw: "0", requiredConsecutiveDays: 1,
+};
 
 function headers(extra: Record<string, string> = {}) {
   return {
@@ -470,5 +520,26 @@ describe("G-01 SoR restart-consistency: hydrate-on-boot", () => {
     const runtimeB = (instanceB as FastifyInstance & { aiCrm?: { persistenceMode: string } }).aiCrm;
     expect(runtimeA?.persistenceMode).toBe("memory");
     expect(runtimeB?.persistenceMode).toBe("memory");
+  });
+
+  it("fresh app restart preserves same-version risk state, but audits one conservative reset for missing or mismatched pack versions", async () => {
+    const samePool = createSharedFakePool();
+    samePool.seedDailyGateState({
+      workspace_id: WS, streak: 1, tier: "risk_tiered", last_date_epoch: 20_000,
+      activated_matrix_version: 7, pack_version: 1, version: 1,
+    });
+    const sameRestart = await bootApp({ pgPool: samePool, financePack: FINANCE_PACK });
+    expect((await sameRestart.inject({ method: "GET", url: "/api/finance/daily-gate", headers: headers() })).json()).toEqual({ streak: 1, tier: "risk_tiered", policyVersion: 1 });
+    expect(samePool.dailyGateVersionTransitions).toHaveLength(0);
+
+    for (const [name, packVersion, reason] of [["missing", null, "persisted_pack_version_missing"], ["mismatch", 2, "pack_version_mismatch"]] as const) {
+      const driftPool = createSharedFakePool();
+      driftPool.seedDailyGateState({ workspace_id: WS, streak: 9, tier: "risk_tiered", last_date_epoch: 20_000, activated_matrix_version: 7, pack_version: packVersion, version: 1 });
+      const driftRestart = await bootApp({ pgPool: driftPool, financePack: FINANCE_PACK });
+      expect((await driftRestart.inject({ method: "GET", url: "/api/finance/daily-gate", headers: headers() })).json(), name).toEqual({ streak: 0, tier: "conservative", policyVersion: 1 });
+      expect(driftPool.dailyGateVersionTransitions).toEqual([expect.objectContaining({ reason, from_pack_version: packVersion, to_pack_version: 1 })]);
+      await bootApp({ pgPool: driftPool, financePack: FINANCE_PACK });
+      expect(driftPool.dailyGateVersionTransitions, `${name} reset is audited once`).toHaveLength(1);
+    }
   });
 });

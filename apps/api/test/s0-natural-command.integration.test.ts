@@ -93,7 +93,7 @@ describe("S0 natural command integration", () => {
   });
 
   it("S0-I-02: mock ModelClient is invoked via gateway service principal", async () => {
-    const invokeSpy = vi.fn(async () => ({
+    const invokeSpy = vi.fn(async (_request: Parameters<ModelClient["invoke"]>[0]) => ({
       structuredOutput: {
         steps: [
           {
@@ -739,12 +739,12 @@ describe("S0 natural command integration", () => {
   it("dual-write mock pool receives orch snapshot + governance rows on agent command", async () => {
     const queries: Array<{ sql: string; params?: unknown[] }> = [];
     const pgPool = {
-      async query(sql: string, params?: unknown[]) {
-        queries.push({ sql, params });
+      async query<T = unknown>(sql: string, params?: unknown[]) {
+        queries.push({ sql, ...(params ? { params } : {}) });
         if (sql.replace(/\s+/g, " ").trim().startsWith("INSERT INTO audit_events")) {
-          return { rows: [{ id: "audit-fake-dw" }] };
+          return { rows: [{ id: "audit-fake-dw" } as T], rowCount: 1 };
         }
-        return { rows: [] };
+        return { rows: [] as T[], rowCount: 0 };
       },
     };
     const api = await ready({
@@ -861,11 +861,6 @@ describe("S0 natural command integration", () => {
   });
 
   it("ready() fails closed when databaseUrl set but pool cannot connect", async () => {
-    const broken = {
-      async query() {
-        throw new Error("simulated pool failure");
-      },
-    };
     // Inject a pool that fails on first dual-write is not ready-fail; instead
     // force onReady dynamic path with invalid URL and no injectable Pool by
     // stubbing — use pgPool that is undefined and databaseUrl that cannot open.

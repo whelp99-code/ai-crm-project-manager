@@ -1,0 +1,31 @@
+name: CWOS source snapshot
+
+on:
+  push:
+    branches:
+      - release/customer-work-os-v1-stabilization
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Create source archive
+        run: |
+          set -euo pipefail
+          git archive \
+            --format=tar.gz \
+            --output="cwos-source-${GITHUB_SHA}.tar.gz" \
+            HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cwos-source-${{ github.sha }}
+          path: cwos-source-${{ github.sha }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1

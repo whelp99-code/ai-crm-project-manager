@@ -12,6 +12,18 @@
  *                          survives a worker restart. When unset, the worker keeps
  *                          a purely in-memory GovernanceAuthorizationService (dev/
  *                          test default) — no durability across restarts.
+ *   COMPANY_MEMORY_SB_COMPANY / COMPANY_MEMORY_SB_COMPANY_CONFIG /
+ *   COMPANY_MEMORY_SIGNING_KEY_FILE / COMPANY_MEMORY_AUTHORITY_FILE
+ *                       — optional. When all four are set to an absolute
+ *                          sb-company command plus key files, each tick runs
+ *                          the CRM company-memory donor. Absent = disabled.
+ *                          Incomplete or unknown COMPANY_MEMORY_* fails
+ *                          closed at boot. Personal `sb` is rejected.
+ *                          When DATABASE_URL is also set, the tick reads
+ *                          pending rows from cwos_v2_mail_outbox and fails
+ *                          closed if that schema/queryable is unavailable.
+ *                          Empty outbox is used only when DATABASE_URL is
+ *                          unset.
  *   ADMIN_DATABASE_URL  — optional (G-01 MEDIUM 4 role separation, mirrors
  *                          apps/api's `ADMIN_DATABASE_URL`). When set, the worker
  *                          opens a SECOND `pg` Pool for cross-workspace admin
@@ -45,6 +57,11 @@ import {
   DEFAULT_OUTBOX_CONSUMER_NAME,
   type OutboxConsumerTickResult,
 } from "./outbox-consumer.js";
+import {
+  loadCompanyMemoryDonorBind,
+  runBoundCompanyMemoryDonorTick,
+  type CompanyMemoryDonorPgQueryable,
+} from "./company-memory-donor-bind.js";
 
 /** Minimal shape of a real `pg.Pool` used here (query + optional end + connect for the outbox drainer). */
 interface RealPgPoolConnection {
@@ -410,9 +427,31 @@ async function runOnce(runtime: WorkerRuntime): Promise<void> {
       console.error("worker.outbox_consume_failed", message);
     }
   }
+
+  try {
+    const donor = await runBoundCompanyMemoryDonorTick(process.env, {
+      queryable: runtime.outboxNotifier as CompanyMemoryDonorPgQueryable | undefined,
+    });
+    if (!donor.skipped) {
+      console.info(
+        "worker.company_memory_donor_complete",
+        JSON.stringify({
+          attempted: donor.result.attempted,
+          emitted: donor.result.emitted.length,
+          pending: donor.result.pending.length,
+          rejected: donor.result.rejected.length,
+          rejectedCodes: donor.result.rejected.map((item) => item.code),
+        }),
+      );
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("worker.company_memory_donor_failed", message);
+  }
 }
 
 async function main(): Promise<void> {
+  loadCompanyMemoryDonorBind(process.env);
   const runtime = await loadGovernance();
   const intervalRaw = process.env.WORKER_INTERVAL_MS?.trim();
   const intervalMs = intervalRaw ? Number(intervalRaw) : 0;

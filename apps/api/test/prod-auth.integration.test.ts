@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { ModelClient } from "@ai-crm/model-gateway";
 import { createApp } from "../src/app.js";
+import { InMemoryCwosV2StateStore } from "../src/customer-work-os-v2-runtime.js";
+import { OperatorStepUpService } from "../src/operator-step-up.js";
+import { operatorPasswordHash } from "../src/operator-auth-crypto.js";
 
 /**
  * G-05: production-mode fail-closed auth posture.
@@ -30,13 +33,7 @@ afterEach(async () => {
 const WS = "ws-prod-auth";
 const OPERATOR = "operator-prod-auth";
 const KEY = "test-api-key-prod";
-
-const customer = {
-  id: "customer-prod-auth-1",
-  name: "Prod Auth Co",
-  status: "active",
-  createdAt: "2026-01-01T00:00:00Z",
-};
+const passwordHash = operatorPasswordHash("prod-auth-synthetic-password");
 
 function planClient(): ModelClient {
   return {
@@ -62,7 +59,33 @@ function planClient(): ModelClient {
 }
 
 async function ready(options: Parameters<typeof createApp>[0] = {}): Promise<FastifyInstance> {
-  const instance = createApp(options);
+  const hasApiKey = Boolean(options.authApiKey || process.env.AUTH_API_KEY || process.env.API_AUTH_TOKEN);
+  const productionFixture = process.env.NODE_ENV === "production"
+    ? {
+        customerWorkOsV2Store: new InMemoryCwosV2StateStore(),
+        ...(hasApiKey ? {
+          customerWorkOsV2OperatorStepUp: new OperatorStepUpService({
+            workspaceId: WS, principalId: OPERATOR,
+            sessionSecret: "production-auth-fixture-session-secret",
+            store: {
+              read: () => ({
+                generation: 1, enrolled: true, totpPending: false,
+                passwordHash,
+                totpSecret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+              }),
+              write: () => { throw new Error("legacy auth regression must not authenticate a native owner"); },
+            },
+          }),
+          customerWorkOsV2ActorBinding: {
+            workspaceId: WS,
+            principalId: OPERATOR,
+            kind: "human" as const,
+            stepUpVerified: false,
+          },
+        } : {}),
+      }
+    : {};
+  const instance = createApp({ ...productionFixture, ...options });
   app = instance;
   await instance.ready();
   return instance;
@@ -110,25 +133,14 @@ describe("G-05 prod-mode fail-closed auth", () => {
     expect(() => createApp()).toThrow(/AUTH_REQUIRED_IN_PROD/);
   });
 
-  it("prod-framed with no key but allowInsecureProd escape hatch: authMode stays 'dev' + [AUTH_DISABLED_IN_PROD] warning (audited)", async () => {
+  it("prod-framed native composition refuses unauthenticated bring-up even with the legacy escape hatch", async () => {
     process.env.NODE_ENV = "production";
     delete process.env.AUTH_API_KEY;
     delete process.env.API_AUTH_TOKEN;
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      const api = await ready({ allowInsecureProd: true });
-      expect((api as FastifyInstance & { aiCrm?: { authMode: string } }).aiCrm?.authMode).toBe("dev");
-      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes("[AUTH_DISABLED_IN_PROD]"))).toBe(true);
-
-      // Audited insecure bring-up: mutation succeeds because the operator
-      // explicitly opted out. Not the default. See docs/ops/runtime-dsn.md.
-      const res = await api.inject({
-        method: "POST",
-        url: "/api/customers",
-        headers: { "x-workspace-id": WS },
-        payload: customer,
-      });
-      expect(res.statusCode).toBe(201);
+      await expect(ready({ allowInsecureProd: true })).rejects.toThrow(/AUTH_REQUIRED_IN_PROD/);
+      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes("[AUTH_DISABLED_IN_PROD]"))).toBe(false);
     } finally {
       warnSpy.mockRestore();
     }

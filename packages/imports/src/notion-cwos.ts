@@ -1,3 +1,30 @@
+import { createHash } from "node:crypto";
+
+/** RFC 4122 URL namespace. Dry-run workspace binding is fixed to this value. */
+export const NOTION_CWOS_WORKSPACE_NAMESPACE = "6ba7b811-9dad-11d1-80b4-00c04fd430c8";
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function resolveNotionWorkspaceId(workspaceId: string): { workspaceId: string; rewritten: boolean } {
+  if (typeof workspaceId !== "string" || workspaceId.trim() === "") {
+    throw new NotionCwosImportError("INVALID_SNAPSHOT", "workspaceId, snapshotId and snapshotHash are required");
+  }
+  const trimmed = workspaceId.trim();
+  if (UUID_PATTERN.test(trimmed)) return { workspaceId: trimmed, rewritten: false };
+  return { workspaceId: uuidV5(NOTION_CWOS_WORKSPACE_NAMESPACE, trimmed), rewritten: true };
+}
+
+function uuidV5(namespace: string, name: string): string {
+  const namespaceBytes = Buffer.from(namespace.replace(/-/g, ""), "hex");
+  if (namespaceBytes.length !== 16) throw new NotionCwosImportError("INVALID_SNAPSHOT", "workspace namespace is not a UUID");
+  const hash = createHash("sha1").update(namespaceBytes).update(name, "utf8").digest();
+  const bytes = Buffer.from(hash.subarray(0, 16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export class NotionCwosImportError extends Error {
   constructor(readonly code: string, message: string) {
     super(message);
@@ -34,7 +61,21 @@ export type QuarantineReason =
   | "INVALID_AMOUNT"
   | "VAT_MISMATCH"
   | "DUPLICATE_FINANCE"
-  | "UNKNOWN_RELATION";
+  | "UNKNOWN_RELATION"
+  | "UNMAPPED_STAGE"
+  | "UNMAPPED_ACTIVITY_TYPE"
+  | "UNMAPPED_PARTY_ROLE"
+  | "UNMAPPED_FINANCE_KIND"
+  | "UNMAPPED_FINANCE_STATUS"
+  | "UNMAPPED_EVIDENCE_STATUS"
+  | "FINANCE_STATUS_CONFLICT";
+
+export interface OutOfScopeRow {
+  entity: "financial_item";
+  sourceId: string;
+  bucket: "price_ledger";
+  sourceKind: string;
+}
 
 export interface QuarantinedRow {
   entity: "account" | "engagement" | "activity" | "financial_item";
@@ -44,10 +85,25 @@ export interface QuarantinedRow {
   rawFingerprint: string;
 }
 
+export interface NotionProvenance {
+  naturalKey?: string;
+  evidenceGrade?: string;
+  confidence?: string;
+  sourceRevision?: string;
+}
+
+export interface NotionFinanceProvenance extends NotionProvenance {
+  evidenceStatus?: FinanceEvidenceStatus;
+  projectMappingStatus?: string;
+  expectedDateSource?: "actual_date";
+  accountSource?: "project_party";
+}
+
 export interface AccountImportRecord {
   id: string;
   workspaceId: string;
   legacySourceId: string;
+  provenance: NotionProvenance;
   sourceUrl?: string;
   name: string;
   normalizedName: string;
@@ -60,10 +116,22 @@ export interface AccountImportRecord {
   nextContactDate?: string;
 }
 
+export type EngagementPartyRole = "customer" | "prime_contractor" | "partner" | "vendor" | "manufacturer" | "outsourcer";
+
+export interface EngagementPartyImportRecord {
+  accountSourceId: string;
+  role: EngagementPartyRole;
+  notionRelation: string;
+  primary: boolean;
+  commercialResponsibility: boolean;
+  deliveryResponsibility: boolean;
+}
+
 export interface EngagementImportRecord {
   id: string;
   workspaceId: string;
   legacySourceId: string;
+  provenance: NotionProvenance;
   sourceUrl?: string;
   projectKey: string;
   name: string;
@@ -74,17 +142,19 @@ export interface EngagementImportRecord {
   nextAction?: string;
   proposedProducts?: string;
   proposedAmountKrw?: string;
-  accountSourceIds: string[];
-  partnerSourceIds: string[];
+  parties: EngagementPartyImportRecord[];
   artifactRefs: Record<string, string[]>;
 }
+
+export type ActivityImportType = "email_in" | "email_out" | "call" | "meeting" | "message" | "decision" | "note";
 
 export interface ActivityImportRecord {
   id: string;
   workspaceId: string;
   legacySourceId: string;
+  provenance: NotionProvenance;
   sourceUrl?: string;
-  activityType: string;
+  activityType: ActivityImportType;
   occurredAt: string;
   summary: string;
   decision?: string;
@@ -95,10 +165,13 @@ export interface ActivityImportRecord {
   attachmentRefs: string[];
 }
 
+export type FinanceEvidenceStatus = "unverified" | "bank_confirmed" | "wehago_confirmed" | "cross_confirmed" | "user_confirmed";
+
 export interface FinancialItemImportRecord {
   id: string;
   workspaceId: string;
   legacySourceId: string;
+  provenance: NotionFinanceProvenance;
   sourceUrl?: string;
   engagementSourceId: string | null;
   accountSourceId: string | null;
@@ -128,6 +201,9 @@ export interface NotionCwosReconciliation {
     financialItems: number;
   };
   quarantined: number;
+  outOfScope: {
+    priceLedger: number;
+  };
   finance: {
     inboundNetKrw: string;
     inboundVatKrw: string;
@@ -151,8 +227,15 @@ export interface NotionCwosImportPlan {
   activities: ActivityImportRecord[];
   financialItems: FinancialItemImportRecord[];
   quarantined: QuarantinedRow[];
+  outOfScope: OutOfScopeRow[];
   reconciliation: NotionCwosReconciliation;
   readOnlySource: true;
+  workspaceBinding?: {
+    algorithm: "uuidv5";
+    namespace: string;
+    sourceWorkspaceKey: string;
+    workspaceId: string;
+  };
 }
 
 function canonical(value: unknown): unknown {
@@ -265,20 +348,136 @@ function mapAccountStatus(value: string | undefined): AccountImportRecord["statu
   return "active";
 }
 
-function mapProjectStage(value: string | undefined): string {
-  switch (value) {
-    case "문의": return "INQUIRY";
-    case "제안": return "PROPOSAL";
-    case "협상": return "NEGOTIATION";
-    case "계약": return "CONTRACTED";
-    case "진행": return "DELIVERY";
-    case "검수": return "ACCEPTANCE";
-    case "수금": return "COLLECTION";
-    case "완료": return "CLOSED";
-    case "보류": return "ON_HOLD";
-    case "실주": return "LOST";
-    default: return "INQUIRY";
+function scalarText(properties: Record<string, unknown>, names: string[]): string | undefined {
+  for (const name of names) {
+    const value = properties[name];
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    if (typeof value === "string" && value.trim()) return value.trim();
   }
+  return undefined;
+}
+
+function provenanceOf(properties: Record<string, unknown>): NotionProvenance {
+  const naturalKey = text(properties, ["자연키"]);
+  const evidenceGrade = text(properties, ["근거등급"]);
+  const confidence = scalarText(properties, ["확신도"]);
+  const sourceRevision = scalarText(properties, ["원천 revision"]);
+  return {
+    ...(naturalKey !== undefined ? { naturalKey } : {}),
+    ...(evidenceGrade !== undefined ? { evidenceGrade } : {}),
+    ...(confidence !== undefined ? { confidence } : {}),
+    ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+  };
+}
+
+const PROJECT_STAGES = new Map<string, string>([
+  ["제안/견적", "PROPOSAL"],
+  ["고객발주", "CONTRACTED"],
+  ["매입발주", "DELIVERY"],
+  ["수행/검수", "DELIVERY"],
+  ["청구/수금", "BILLING"],
+  ["완료", "CLOSED"],
+  ["보류", "ON_HOLD"],
+  ["실패", "LOST"],
+]);
+
+const ACTIVITY_TYPES = new Map<string, ActivityImportType>([
+  ["메일 수신", "email_in"],
+  ["메일 발신", "email_out"],
+  ["전화", "call"],
+  ["미팅", "meeting"],
+  ["메신저", "message"],
+  ["결정", "decision"],
+  ["메모", "note"],
+]);
+
+const PARTY_ROLE_BY_ACCOUNT_KIND = new Map<string, EngagementPartyRole>([
+  ["customer", "customer"],
+  ["partner", "partner"],
+  ["manufacturer", "manufacturer"],
+  ["vendor", "vendor"],
+  ["outsourcer", "outsourcer"],
+]);
+
+const FINANCE_DIRECTIONS = new Map<string, "IN" | "OUT">([
+  ["매출", "IN"],
+  ["매입", "OUT"],
+]);
+
+const PRICE_LEDGER_KINDS = new Set(["기타입금", "기타출금"]);
+
+const FINANCE_LIFECYCLES = new Map<string, string>([
+  ["예정", "PLANNED"],
+  ["청구", "BILLED"],
+  ["부분처리", "PARTIAL"],
+  ["입금완료", "SETTLED"],
+  ["출금완료", "SETTLED"],
+  ["연체", "OVERDUE"],
+]);
+
+const FINANCE_EVIDENCE_STATUSES = new Map<string, FinanceEvidenceStatus>([
+  ["미확인", "unverified"],
+  ["은행확인", "bank_confirmed"],
+  ["WEHAGO확인", "wehago_confirmed"],
+  ["교차확인", "cross_confirmed"],
+  ["사용자확인", "user_confirmed"],
+]);
+
+const SNAPSHOT_TABLES = ["accounts", "projects", "activities", "finance"] as const;
+
+const LEGACY_TABLE_PROPERTIES: Array<[string, string[]]> = [
+  ["미수금/입금관리", ["입금상태", "입금액"]],
+  ["자금흐름 DB", ["입금계좌", "출금계좌", "현금변동"]],
+  ["매입/비용 DB", ["지출명", "결재수단", "납입여부"]],
+];
+
+const TODO_BOARD_PROPERTIES = new Set(["이름", "상태", "담당자"]);
+
+function assertSupportedSourceTables(snapshot: NotionCwosSnapshot): void {
+  const allowed = new Set<string>(SNAPSHOT_TABLES);
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (Array.isArray(value) && !allowed.has(key)) {
+      throw new NotionCwosImportError("FORBIDDEN_SOURCE_TABLE", `snapshot table ${key} is not an importable Notion database`);
+    }
+  }
+  for (const table of SNAPSHOT_TABLES) {
+    for (const row of snapshot[table]) {
+      const names = Object.keys(row.properties ?? {});
+      const legacy = LEGACY_TABLE_PROPERTIES.find(([, properties]) => properties.some((name) => names.includes(name)));
+      if (legacy) {
+        throw new NotionCwosImportError("FORBIDDEN_SOURCE_TABLE", `${table} row ${row.sourceId} carries ${legacy[0]} properties; legacy money tables must not enter the snapshot`);
+      }
+      if (names.includes("이름") && names.every((name) => TODO_BOARD_PROPERTIES.has(name))) {
+        throw new NotionCwosImportError("FORBIDDEN_SOURCE_TABLE", `${table} row ${row.sourceId} looks like the CFO OS todo board`);
+      }
+    }
+  }
+}
+
+function engagementParties(
+  relations: { generic: string[]; billed: string[]; endCustomers: string[]; suppliers: string[]; partners: string[] },
+  accountKinds: Map<string, string[]>,
+): EngagementPartyImportRecord[] | undefined {
+  const parties: EngagementPartyImportRecord[] = [];
+  const add = (accountSourceId: string, role: EngagementPartyRole, notionRelation: string, commercialResponsibility: boolean, deliveryResponsibility: boolean): void => {
+    if (parties.some((party) => party.accountSourceId === accountSourceId && party.role === role)) return;
+    const primary = !parties.some((party) => party.role === role);
+    parties.push({ accountSourceId, role, notionRelation, primary, commercialResponsibility, deliveryResponsibility });
+  };
+  for (const source of relations.endCustomers) add(source, "customer", "최종고객", relations.billed.includes(source), false);
+  for (const source of relations.billed) {
+    if (relations.endCustomers.includes(source)) continue;
+    add(source, relations.endCustomers.length === 0 ? "customer" : "prime_contractor", "매출처", true, false);
+  }
+  for (const source of relations.suppliers) add(source, "vendor", "매입처", true, false);
+  for (const source of relations.partners) add(source, "partner", "파트너", false, true);
+  for (const source of relations.generic) {
+    if (parties.some((party) => party.accountSourceId === source)) continue;
+    const role = PARTY_ROLE_BY_ACCOUNT_KIND.get(accountKinds.get(source)?.[0] ?? "");
+    if (!role) return undefined;
+    add(source, role, "고객·파트너", role === "customer", false);
+  }
+  return parties;
 }
 
 function looksLikeExpenseProject(name: string, projectKey: string | undefined, accountRelations: string[]): boolean {
@@ -286,38 +485,33 @@ function looksLikeExpenseProject(name: string, projectKey: string | undefined, a
   return expensePattern.test(name) && !projectKey && accountRelations.length === 0;
 }
 
-function financeCategory(direction: "IN" | "OUT", kind: string | undefined, memo: string): string {
-  if (direction === "IN") return kind === "기타입금" ? "other" : "contract_revenue";
+function financeCategory(direction: "IN" | "OUT", memo: string): string {
+  if (direction === "IN") return "contract_revenue";
   if (/라이[센선]스/i.test(memo)) return "license_cost";
   if (/장비|서버|스위치|방화벽|HCI/i.test(memo)) return "hardware_cost";
   if (/외주|설치/i.test(memo)) return "outsourcing_cost";
   if (/출장|숙박|교통/i.test(memo)) return "travel_cost";
-  return kind === "기타출금" ? "overhead" : "other";
+  return "other";
 }
 
-function financialLifecycle(kind: string | undefined, incomingDone: boolean, outgoingDone: boolean, state: string | undefined): string {
-  if ((kind === "매출" || kind === "기타입금") && incomingDone) return "SETTLED";
-  if ((kind === "매입" || kind === "기타출금") && outgoingDone) return "SETTLED";
-  if (state === "연체") return "OVERDUE";
-  if (state === "부분처리") return "PARTIAL";
-  if (state === "청구") return "BILLED";
-  if (kind === "매입") return "INCURRED";
-  return "PLANNED";
-}
 
 export class NotionCwosImportPlanner {
   plan(snapshot: NotionCwosSnapshot): NotionCwosImportPlan {
     if (!snapshot.workspaceId.trim() || !snapshot.snapshotId.trim() || !snapshot.snapshotHash.trim()) {
       throw new NotionCwosImportError("INVALID_SNAPSHOT", "workspaceId, snapshotId and snapshotHash are required");
     }
+    assertSupportedSourceTables(snapshot);
 
     const quarantined: QuarantinedRow[] = [];
+    const outOfScope: OutOfScopeRow[] = [];
     const accounts: AccountImportRecord[] = [];
     const engagements: EngagementImportRecord[] = [];
     const activities: ActivityImportRecord[] = [];
     const financialItems: FinancialItemImportRecord[] = [];
     const accountSourceIds = new Set<string>();
     const projectSourceIds = new Set<string>();
+    const projectCounterparties = new Map<string, { billed: string[]; suppliers: string[] }>();
+    const accountKinds = new Map<string, string[]>();
     const accountNames = new Map<string, string>();
     const projectKeys = new Map<string, string>();
     const financeFingerprints = new Set<string>();
@@ -345,6 +539,9 @@ export class NotionCwosImportPlanner {
         }
         accountNames.set(normalized, legacySourceId);
         accountSourceIds.add(legacySourceId);
+        const kinds = classifyAccountKind(text(row.properties, ["구분", "유형"]));
+        accountKinds.set(legacySourceId, kinds);
+        const provenance = provenanceOf(row.properties);
         const primaryContactName = text(row.properties, ["담당자", "주요 담당자"]);
         const primaryEmail = text(row.properties, ["대표 이메일", "이메일"]);
         const primaryPhone = text(row.properties, ["대표 연락처", "전화", "연락처"]);
@@ -354,10 +551,11 @@ export class NotionCwosImportPlanner {
           id: id("account", snapshot.workspaceId, legacySourceId),
           workspaceId: snapshot.workspaceId,
           legacySourceId,
+          provenance,
           ...(row.sourceUrl ? { sourceUrl: row.sourceUrl } : {}),
           name,
           normalizedName: normalized,
-          kinds: classifyAccountKind(text(row.properties, ["구분", "유형"])),
+          kinds,
           status: mapAccountStatus(text(row.properties, ["관계상태", "상태"])),
           ...(primaryContactName !== undefined ? { primaryContactName } : {}),
           ...(primaryEmail !== undefined ? { primaryEmail } : {}),
@@ -379,9 +577,15 @@ export class NotionCwosImportPlanner {
           continue;
         }
         const key = text(row.properties, ["프로젝트ID", "프로젝트 ID", "Project Key"]);
-        const accountIds = stringArray(row.properties, ["고객·파트너", "고객", "accountSourceIds"]);
-        const partnerIds = stringArray(row.properties, ["파트너", "partnerSourceIds"]);
-        if (looksLikeExpenseProject(name, key, accountIds)) {
+        const relations = {
+          generic: stringArray(row.properties, ["고객·파트너", "고객", "accountSourceIds"]),
+          billed: stringArray(row.properties, ["매출처"]),
+          endCustomers: stringArray(row.properties, ["최종고객"]),
+          suppliers: stringArray(row.properties, ["매입처"]),
+          partners: stringArray(row.properties, ["파트너", "partnerSourceIds"]),
+        };
+        const relatedAccountIds = [...new Set(Object.values(relations).flat())];
+        if (looksLikeExpenseProject(name, key, relatedAccountIds)) {
           quarantine("engagement", row, ["MIXED_EXPENSE_PROJECT"], "expense-like row is mixed into the project database");
           continue;
         }
@@ -395,14 +599,31 @@ export class NotionCwosImportPlanner {
           quarantine("engagement", row, ["DUPLICATE_PROJECT_KEY"], `project key duplicates ${prior}`);
           continue;
         }
-        const unknownRelations = [...accountIds, ...partnerIds].filter((relation) => !accountSourceIds.has(relation));
+        const unknownRelations = relatedAccountIds.filter((relation) => !accountSourceIds.has(relation));
         if (unknownRelations.length > 0) {
           orphanRelations += unknownRelations.length;
           quarantine("engagement", row, ["UNKNOWN_RELATION"], `unknown account relations: ${unknownRelations.join(", ")}`);
           continue;
         }
+        const stageLabel = text(row.properties, ["프로젝트 단계"]);
+        if (!stageLabel) {
+          quarantine("engagement", row, ["MISSING_REQUIRED_FIELD"], "프로젝트 단계 is missing");
+          continue;
+        }
+        const stage = PROJECT_STAGES.get(stageLabel);
+        if (!stage) {
+          quarantine("engagement", row, ["UNMAPPED_STAGE"], `프로젝트 단계 ${stageLabel} has no core5 stage`);
+          continue;
+        }
+        const parties = engagementParties(relations, accountKinds);
+        if (!parties) {
+          quarantine("engagement", row, ["UNMAPPED_PARTY_ROLE"], "고객·파트너 relation points at an account whose 구분 has no party role");
+          continue;
+        }
+        const provenance = provenanceOf(row.properties);
         projectKeys.set(key, legacySourceId);
         projectSourceIds.add(legacySourceId);
+        projectCounterparties.set(legacySourceId, { billed: relations.billed, suppliers: relations.suppliers });
         const proposed = integerMoney(row.properties, ["제안금액", "예상 매출"]);
         const priority = text(row.properties, ["중요도"]);
         const startDate = dateValue(row.properties, ["date:시작일:start", "시작일"]);
@@ -413,18 +634,18 @@ export class NotionCwosImportPlanner {
           id: id("engagement", snapshot.workspaceId, legacySourceId),
           workspaceId: snapshot.workspaceId,
           legacySourceId,
+          provenance,
           ...(row.sourceUrl ? { sourceUrl: row.sourceUrl } : {}),
           projectKey: key,
           name,
-          stage: mapProjectStage(text(row.properties, ["상태", "단계"])),
+          stage,
           ...(priority !== undefined ? { priority } : {}),
           ...(startDate !== undefined ? { startDate } : {}),
           ...(targetDate !== undefined ? { targetDate } : {}),
           ...(nextAction !== undefined ? { nextAction } : {}),
           ...(proposedProducts !== undefined ? { proposedProducts } : {}),
           ...(proposed !== undefined ? { proposedAmountKrw: proposed.toString() } : {}),
-          accountSourceIds: accountIds,
-          partnerSourceIds: partnerIds,
+          parties,
           artifactRefs: {
             quote: stringArray(row.properties, ["견적서"]),
             proposal: stringArray(row.properties, ["제안서"]),
@@ -443,8 +664,8 @@ export class NotionCwosImportPlanner {
         const legacySourceId = sourceId(row);
         const projectIds = stringArray(row.properties, ["프로젝트", "projectSourceIds"]);
         const accountIds = stringArray(row.properties, ["고객·파트너", "accountSourceIds"]);
-        if (projectIds.length === 0 && accountIds.length === 0) {
-          quarantine("activity", row, ["ORPHAN_ACTIVITY"], "activity has no account or project relation");
+        if (projectIds.length === 0) {
+          quarantine("activity", row, ["ORPHAN_ACTIVITY"], "activity has no project relation; cwos_activities.engagement_id is required");
           continue;
         }
         const unknownProjects = projectIds.filter((relation) => !projectSourceIds.has(relation));
@@ -456,10 +677,17 @@ export class NotionCwosImportPlanner {
         }
         const summary = text(row.properties, ["요약", "활동명", "내용"]);
         const occurredAt = text(row.properties, ["date:활동일:start", "활동일", "일시"]);
-        if (!summary || !occurredAt) {
-          quarantine("activity", row, ["MISSING_REQUIRED_FIELD"], "activity summary or date is missing");
+        const typeLabel = text(row.properties, ["유형", "활동 유형"]);
+        if (!summary || !occurredAt || !typeLabel) {
+          quarantine("activity", row, ["MISSING_REQUIRED_FIELD"], "activity summary, date or 유형 is missing");
           continue;
         }
+        const activityType = ACTIVITY_TYPES.get(typeLabel);
+        if (!activityType) {
+          quarantine("activity", row, ["UNMAPPED_ACTIVITY_TYPE"], `activity 유형 ${typeLabel} has no cwos_activities type`);
+          continue;
+        }
+        const provenance = provenanceOf(row.properties);
         const decision = text(row.properties, ["결정사항"]);
         const nextAction = text(row.properties, ["다음 행동"]);
         const nextContactDate = dateValue(row.properties, ["date:다음 연락일:start", "다음 연락일"]);
@@ -467,8 +695,9 @@ export class NotionCwosImportPlanner {
           id: id("activity", snapshot.workspaceId, legacySourceId),
           workspaceId: snapshot.workspaceId,
           legacySourceId,
+          provenance,
           ...(row.sourceUrl ? { sourceUrl: row.sourceUrl } : {}),
-          activityType: text(row.properties, ["유형", "활동 유형"]) ?? "메모",
+          activityType,
           occurredAt,
           summary,
           ...(decision !== undefined ? { decision } : {}),
@@ -487,13 +716,25 @@ export class NotionCwosImportPlanner {
       try {
         const legacySourceId = sourceId(row);
         const kind = text(row.properties, ["구분", "유형"]);
-        const direction: "IN" | "OUT" = kind === "매출" || kind === "기타입금" ? "IN" : "OUT";
+        if (!kind) {
+          quarantine("financial_item", row, ["MISSING_REQUIRED_FIELD"], "finance 구분 is missing");
+          continue;
+        }
+        if (PRICE_LEDGER_KINDS.has(kind)) {
+          outOfScope.push({ entity: "financial_item", sourceId: legacySourceId, bucket: "price_ledger", sourceKind: kind });
+          continue;
+        }
+        const direction = FINANCE_DIRECTIONS.get(kind);
+        if (!direction) {
+          quarantine("financial_item", row, ["UNMAPPED_FINANCE_KIND"], `finance 구분 ${kind} is not 매출/매입/기타입금/기타출금`);
+          continue;
+        }
         const name = text(row.properties, ["거래명", "제목", "Name"]) ?? legacySourceId;
         const projectRelations = stringArray(row.properties, ["프로젝트", "projectSourceIds"]);
         const accountRelations = stringArray(row.properties, ["거래처", "accountSourceIds"]);
-        const category = financeCategory(direction, kind, name);
+        const category = financeCategory(direction, name);
         const engagementSourceId = projectRelations[0] ?? null;
-        if (engagementSourceId === null && category !== "overhead") {
+        if (engagementSourceId === null) {
           orphanRelations += 1;
           quarantine("financial_item", row, ["ORPHAN_FINANCE"], "project financial item has no project relation");
           continue;
@@ -503,10 +744,17 @@ export class NotionCwosImportPlanner {
           quarantine("financial_item", row, ["UNKNOWN_RELATION"], "financial item references unknown project");
           continue;
         }
-        const accountSourceId = accountRelations[0] ?? null;
-        if (accountSourceId && !accountSourceIds.has(accountSourceId)) {
+        const listedAccountSourceId = accountRelations[0];
+        if (listedAccountSourceId && !accountSourceIds.has(listedAccountSourceId)) {
           orphanRelations += 1;
           quarantine("financial_item", row, ["UNKNOWN_RELATION"], "financial item references unknown account");
+          continue;
+        }
+        const projectPartyName = direction === "IN" ? "매출처" : "매입처";
+        const projectParties = [...new Set(projectCounterparties.get(engagementSourceId)?.[direction === "IN" ? "billed" : "suppliers"] ?? [])];
+        const accountSourceId = listedAccountSourceId ?? (projectParties.length === 1 ? projectParties[0] : undefined);
+        if (!accountSourceId) {
+          quarantine("financial_item", row, ["MISSING_REQUIRED_FIELD"], `financial item has no 거래처 and its project has ${projectParties.length} ${projectPartyName}; cwos_financial_items.account_id is required`);
           continue;
         }
         const net = integerMoney(row.properties, ["금액", "공급가액"]);
@@ -521,10 +769,46 @@ export class NotionCwosImportPlanner {
           quarantine("financial_item", row, ["VAT_MISMATCH"], "gross amount does not equal net plus VAT");
           continue;
         }
-        const expectedDate = direction === "IN"
+        const statusLabel = text(row.properties, ["상태"]);
+        if (!statusLabel) {
+          quarantine("financial_item", row, ["MISSING_REQUIRED_FIELD"], "finance 상태 is missing");
+          continue;
+        }
+        const statusLifecycle = FINANCE_LIFECYCLES.get(statusLabel);
+        if (!statusLifecycle) {
+          quarantine("financial_item", row, ["UNMAPPED_FINANCE_STATUS"], `finance 상태 ${statusLabel} has no lifecycle`);
+          continue;
+        }
+        if ((statusLabel === "입금완료" && direction !== "IN") || (statusLabel === "출금완료" && direction !== "OUT")) {
+          quarantine("financial_item", row, ["FINANCE_STATUS_CONFLICT"], `finance 상태 ${statusLabel} contradicts 구분 ${kind}`);
+          continue;
+        }
+        const settledByCheckbox = booleanValue(row.properties, [direction === "IN" ? "입금처리여부" : "출금처리여부"]);
+        const lifecycle = settledByCheckbox ? "SETTLED" : statusLifecycle;
+        const plannedDate = direction === "IN"
           ? dateValue(row.properties, ["date:예상 입금일:start", "예상 입금일"])
           : dateValue(row.properties, ["date:예상 출금일:start", "예상 출금일"]);
         const actualDate = dateValue(row.properties, ["date:실제 처리일:start", "실제 처리일"]);
+        const settledByStatus = statusLabel === "입금완료" || statusLabel === "출금완료";
+        const expectedDate = plannedDate ?? (settledByStatus ? actualDate : undefined);
+        if (!expectedDate) {
+          quarantine("financial_item", row, ["MISSING_REQUIRED_FIELD"], `finance ${direction === "IN" ? "예상 입금일" : "예상 출금일"} is missing${settledByStatus ? " and 실제 처리일 is missing" : ""}; cwos_financial_items.expected_date is required`);
+          continue;
+        }
+        const evidenceLabel = text(row.properties, ["증거 상태"]);
+        const evidenceStatus = evidenceLabel === undefined ? undefined : FINANCE_EVIDENCE_STATUSES.get(evidenceLabel);
+        if (evidenceLabel !== undefined && !evidenceStatus) {
+          quarantine("financial_item", row, ["UNMAPPED_EVIDENCE_STATUS"], `finance 증거 상태 ${evidenceLabel} is unknown`);
+          continue;
+        }
+        const projectMappingStatus = text(row.properties, ["프로젝트 매핑 상태"]);
+        const provenance: NotionFinanceProvenance = {
+          ...provenanceOf(row.properties),
+          ...(evidenceStatus ? { evidenceStatus } : {}),
+          ...(projectMappingStatus !== undefined ? { projectMappingStatus } : {}),
+          ...(plannedDate === undefined ? { expectedDateSource: "actual_date" as const } : {}),
+          ...(listedAccountSourceId === undefined ? { accountSource: "project_party" as const } : {}),
+        };
         const fingerprint = notionCwosHash({ direction, name, net: net.toString(), vat: vat.toString(), expectedDate, actualDate, engagementSourceId, accountSourceId });
         if (financeFingerprints.has(fingerprint)) {
           duplicateCandidates += 1;
@@ -536,16 +820,17 @@ export class NotionCwosImportPlanner {
           id: id("financial", snapshot.workspaceId, legacySourceId),
           workspaceId: snapshot.workspaceId,
           legacySourceId,
+          provenance,
           ...(row.sourceUrl ? { sourceUrl: row.sourceUrl } : {}),
           engagementSourceId,
           accountSourceId,
           direction,
           category,
-          lifecycle: financialLifecycle(kind, booleanValue(row.properties, ["입금처리여부"]), booleanValue(row.properties, ["출금처리여부"]), text(row.properties, ["상태"])),
+          lifecycle,
           netAmountKrw: net.toString(),
           vatAmountKrw: vat.toString(),
           grossAmountKrw: gross.toString(),
-          ...(expectedDate ? { expectedDate } : {}),
+          expectedDate,
           ...(actualDate ? { actualDate } : {}),
           evidenceRefs: stringArray(row.properties, ["증빙"]),
           sourceFingerprint: fingerprint,
@@ -571,6 +856,7 @@ export class NotionCwosImportPlanner {
       source: { accounts: snapshot.accounts.length, projects: snapshot.projects.length, activities: snapshot.activities.length, finance: snapshot.finance.length },
       imported: { accounts: accounts.length, engagements: engagements.length, activities: activities.length, financialItems: financialItems.length },
       quarantined: quarantined.length,
+      outOfScope: { priceLedger: outOfScope.filter((row) => row.bucket === "price_ledger").length },
       finance: {
         inboundNetKrw: sums.inbound.net.toString(),
         inboundVatKrw: sums.inbound.vat.toString(),
@@ -583,7 +869,7 @@ export class NotionCwosImportPlanner {
       duplicateCandidates,
     };
 
-    const planCore = { workspaceId: snapshot.workspaceId, snapshotId: snapshot.snapshotId, snapshotHash: snapshot.snapshotHash, accounts, engagements, activities, financialItems, quarantined, reconciliation };
+    const planCore = { workspaceId: snapshot.workspaceId, snapshotId: snapshot.snapshotId, snapshotHash: snapshot.snapshotHash, accounts, engagements, activities, financialItems, quarantined, outOfScope, reconciliation };
     return { ...planCore, capturedAt: snapshot.capturedAt, planHash: notionCwosHash(planCore), readOnlySource: true };
   }
 }

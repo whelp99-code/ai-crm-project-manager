@@ -18,13 +18,10 @@
 --     amountKrw/rowFingerprint) without inventing extra columns.
 --   - finance_daily_gate_state: ONE row per workspace holding the
 --     `DailyGate` MACHINE STATE (streak/tier/lastDateEpoch/
---     activatedMatrixVersion) — NOT a replay log. `policyVersion` is
---     intentionally NOT stored: it is reconstructed from the live
---     `FinancePackConfig.packVersion` at boot (§4 rule 5 semantics — a pack
---     change must still reset the streak even if the persisted row predates
---     the change), so hydrate always calls `new DailyGate(pack, ws,
---     pack.packVersion)` and then restores streak/tier/lastDateEpoch/
---     activatedMatrixVersion on top.
+--     activatedMatrixVersion) — NOT a replay log. This original migration
+--     lacked a persisted pack version; migration 0020 adds nullable
+--     `pack_version` and makes missing or mismatched versions fail closed
+--     with a drift reset before restoring the remaining machine state.
 --   - finance_day_records: read-only day-by-day history for
 --     `DailyGate.records`. Composite PRIMARY KEY (workspace_id, date) —
 --     NO id, NO version (an already-recorded day is never mutated in place;

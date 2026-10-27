@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { pgSmokeConnectionEnv } from "./pg-smoke-connection-env.js";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,6 +61,7 @@ const currentDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(currentDir, "../../..");
 const smokeScript = join(repoRoot, "packages/persistence/scripts/pg-rls-smoke.sh");
 const migration0010 = join(repoRoot, "packages/persistence/migrations/0010_finance_recon_dailygate.sql");
+const migration0020 = join(repoRoot, "packages/persistence/migrations/0020_finance_daily_gate_pack_version.sql");
 
 const WS_A = "55555555-5555-5555-5555-555555555555";
 const WS_B = "66666666-6666-6666-6666-666666666666";
@@ -132,11 +134,7 @@ describe.skipIf(!LIVE)("PG-C2 finance reconciliation + daily-gate against REAL P
     execFileSync("bash", [smokeScript], {
       env: {
         ...process.env,
-        PGHOST: "localhost",
-        PGPORT: "5432",
-        PGUSER: "ai_crm",
-        PGPASSWORD: "ai_crm_dev",
-        PGDATABASE: "ai_crm",
+        ...pgSmokeConnectionEnv(DATABASE_URL),
       },
       stdio: "pipe",
     });
@@ -160,6 +158,12 @@ describe.skipIf(!LIVE)("PG-C2 finance reconciliation + daily-gate against REAL P
         const sql = readFileSync(migration0010, "utf8");
         await setupClient.query(sql);
       }
+      const versionTransitionTable = await setupClient.query(
+        `SELECT to_regclass('public.finance_daily_gate_version_transitions') IS NOT NULL AS applied`,
+      );
+      if (!(versionTransitionTable.rows[0] as { applied: boolean }).applied) {
+        await setupClient.query(readFileSync(migration0020, "utf8"));
+      }
       await setupClient.query(`GRANT ai_crm_runtime_api TO CURRENT_USER`);
     } finally {
       await setupClient.end();
@@ -177,6 +181,7 @@ describe.skipIf(!LIVE)("PG-C2 finance reconciliation + daily-gate against REAL P
       for (const ws of [WS_A, WS_B]) {
         await client.query(`SELECT set_config('app.workspace_id', $1, false)`, [ws]);
         await client.query(`DELETE FROM finance_day_records WHERE workspace_id = $1`, [ws]);
+        await client.query(`DELETE FROM finance_daily_gate_version_transitions WHERE workspace_id = $1`, [ws]);
         await client.query(`DELETE FROM finance_daily_gate_state WHERE workspace_id = $1`, [ws]);
         await client.query(`DELETE FROM finance_exceptions WHERE workspace_id = $1`, [ws]);
         await client.query(`DELETE FROM finance_reconciliations WHERE workspace_id = $1`, [ws]);
@@ -311,9 +316,15 @@ describe.skipIf(!LIVE)("PG-C2 finance reconciliation + daily-gate against REAL P
       const repoB = createPgDailyGateRepository(createScopedPgQueryable(pool));
       const persistedState = await repoB.getDailyGateState(WS_B);
       expect(persistedState).toBeDefined();
-      // policyVersion is reconstructed from the live pack, never persisted.
+      // The matching persisted pack version is required for an exact restore.
       const gateB = new DailyGate(FINANCE_PACK, WS_B, FINANCE_PACK.packVersion);
-      gateB.restoreState(persistedState!);
+      gateB.restoreState({
+        streak: persistedState!.streak,
+        tier: persistedState!.tier,
+        ...(persistedState!.lastDateEpoch !== undefined ? { lastDateEpoch: persistedState!.lastDateEpoch } : {}),
+        ...(persistedState!.activatedMatrixVersion !== undefined ? { activatedMatrixVersion: persistedState!.activatedMatrixVersion } : {}),
+        ...(persistedState!.packVersion !== undefined ? { packVersion: persistedState!.packVersion } : {}),
+      });
 
       const persistedRecords = await repoB.listDayRecords(WS_B);
       expect(persistedRecords).toHaveLength(3);
@@ -337,6 +348,65 @@ describe.skipIf(!LIVE)("PG-C2 finance reconciliation + daily-gate against REAL P
     },
     60_000,
   );
+
+  it("daily-gate: mismatched persisted pack version atomically resets risk-tiered state and writes transition proof", async () => {
+    const repo = createPgDailyGateRepository(createScopedPgQueryable(pool));
+    await repo.saveDailyGateState(WS_A, {
+      streak: 3,
+      tier: "risk_tiered",
+      lastDateEpoch: 20_000,
+      activatedMatrixVersion: 7,
+      packVersion: 2,
+    });
+    const persisted = await repo.getDailyGateState(WS_A);
+    const gate = new DailyGate(FINANCE_PACK, WS_A, FINANCE_PACK.packVersion);
+    const restore = gate.restoreState(persisted!);
+    expect(restore).toMatchObject({ reset: true, reason: "pack_version_mismatch", fromPackVersion: 2, toPackVersion: 1 });
+    if (!restore.reset) throw new Error("expected DailyGate version drift reset");
+
+    await repo.resetDailyGateStateWithAudit(WS_A, restore.resetState, {
+      reason: restore.reason,
+      fromPackVersion: restore.fromPackVersion,
+      toPackVersion: restore.toPackVersion,
+      prior: restore.prior,
+    });
+    expect(await repo.getDailyGateState(WS_A)).toMatchObject({
+      streak: 0, tier: "conservative", lastDateEpoch: 20_000, packVersion: 1,
+    });
+    expect(await repo.listDailyGateVersionTransitions(WS_A)).toEqual([expect.objectContaining({
+      reason: "pack_version_mismatch", fromPackVersion: 2, toPackVersion: 1,
+      prior: expect.objectContaining({ streak: 3, tier: "risk_tiered", activatedMatrixVersion: 7 }),
+    })]);
+  }, 60_000);
+
+  it("daily-gate: legacy NULL pack_version fails closed and records the missing-version audit reason", async () => {
+    const repo = createPgDailyGateRepository(createScopedPgQueryable(pool));
+    // Deliberately omit packVersion: migration 0020 represents pre-existing rows as NULL.
+    await repo.saveDailyGateState(WS_A, {
+      streak: 3,
+      tier: "risk_tiered",
+      lastDateEpoch: 20_001,
+      activatedMatrixVersion: 8,
+    });
+    const gate = new DailyGate(FINANCE_PACK, WS_A, FINANCE_PACK.packVersion);
+    const restore = gate.restoreState((await repo.getDailyGateState(WS_A))!);
+    expect(restore).toMatchObject({ reset: true, reason: "persisted_pack_version_missing", fromPackVersion: undefined, toPackVersion: 1 });
+    if (!restore.reset) throw new Error("expected legacy DailyGate version drift reset");
+    await repo.resetDailyGateStateWithAudit(WS_A, restore.resetState, {
+      reason: restore.reason,
+      fromPackVersion: restore.fromPackVersion,
+      toPackVersion: restore.toPackVersion,
+      prior: restore.prior,
+    });
+    expect(await repo.getDailyGateState(WS_A)).toMatchObject({
+      streak: 0, tier: "conservative", lastDateEpoch: 20_001, packVersion: 1,
+    });
+    const audits = await repo.listDailyGateVersionTransitions(WS_A);
+    expect(audits.at(-1)).toEqual(expect.objectContaining({
+      reason: "persisted_pack_version_missing", toPackVersion: 1,
+      prior: expect.objectContaining({ tier: "risk_tiered", activatedMatrixVersion: 8 }),
+    }));
+  }, 60_000);
 
   it("cross-workspace denial under raw SET ROLE ai_crm_runtime_api (NOBYPASSRLS) for all four PG-C2 tables", async () => {
     const { Client } = (await import("pg")) as typeof import("pg");

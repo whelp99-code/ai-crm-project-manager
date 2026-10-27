@@ -178,9 +178,10 @@ describe("GOV-PG-03 createPgGovernanceRepository mock client", () => {
             resource_version: Number(params[5]),
             payload_hash: String(params[6]),
             policy_version: Number(params[7]),
-            requester_principal_id: String(params[8]),
-            decided_by_principal_id: (params[9] as string | null) ?? null,
-            status: String(params[10]),
+            trusted_context_hash: (params[8] as string | null) ?? null,
+            requester_principal_id: String(params[9]),
+            decided_by_principal_id: (params[10] as string | null) ?? null,
+            status: String(params[11]),
           };
           controls.set(`${row.workspace_id}\0${row.id}`, row);
           return { rows: [] as T[], rowCount: 1 };
@@ -200,10 +201,11 @@ describe("GOV-PG-03 createPgGovernanceRepository mock client", () => {
             resource_version: Number(params[6]),
             payload_hash: String(params[7]),
             policy_version: Number(params[8]),
-            lease_deadline: (params[9] as string | null) ?? null,
-            lease_epoch: Number(params[10]),
-            lease_token: (params[11] as string | null) ?? null,
-            control_id: (params[12] as string | null) ?? null,
+            trusted_context_hash: (params[9] as string | null) ?? null,
+            lease_deadline: (params[10] as string | null) ?? null,
+            lease_epoch: Number(params[11]),
+            lease_token: (params[12] as string | null) ?? null,
+            control_id: (params[13] as string | null) ?? null,
           };
           intents.set(`${row.workspace_id}\0${row.id}`, row);
           return { rows: [] as T[], rowCount: 1 };
@@ -240,6 +242,7 @@ describe("GOV-PG-03 createPgGovernanceRepository mock client", () => {
       resourceVersion: 1,
       payloadHash: "h",
       policyVersion: 1,
+      trustedContextHash: "a".repeat(64),
       actionType: "CUSTOMER_SEND",
       kind: "APPROVAL",
       requesterPrincipalId: "ai",
@@ -248,6 +251,7 @@ describe("GOV-PG-03 createPgGovernanceRepository mock client", () => {
     const loaded = await repo.loadControl("ws-1", "c-1");
     expect(loaded?.status).toBe("PENDING");
     expect(loaded?.actionType).toBe("CUSTOMER_SEND");
+    expect(loaded?.trustedContextHash).toBe("a".repeat(64));
 
     await repo.saveIntent({
       id: "i-1",
@@ -256,6 +260,7 @@ describe("GOV-PG-03 createPgGovernanceRepository mock client", () => {
       resourceVersion: 1,
       payloadHash: "h",
       policyVersion: 1,
+      trustedContextHash: "b".repeat(64),
       actionType: "INTERNAL_REVERSIBLE_UPDATE",
       status: "QUEUED",
       idempotencyKey: "k",
@@ -263,6 +268,7 @@ describe("GOV-PG-03 createPgGovernanceRepository mock client", () => {
     });
     const intent = await repo.loadIntent("ws-1", "i-1");
     expect(intent?.status).toBe("QUEUED");
+    expect(intent?.trustedContextHash).toBe("b".repeat(64));
   });
 
   it("listAllControls/listAllIntents read across every workspace via the admin/hydrate path", async () => {
@@ -281,9 +287,10 @@ describe("GOV-PG-03 createPgGovernanceRepository mock client", () => {
             resource_version: Number(params[5]),
             payload_hash: String(params[6]),
             policy_version: Number(params[7]),
-            requester_principal_id: String(params[8]),
-            decided_by_principal_id: (params[9] as string | null) ?? null,
-            status: String(params[10]),
+            trusted_context_hash: (params[8] as string | null) ?? null,
+            requester_principal_id: String(params[9]),
+            decided_by_principal_id: (params[10] as string | null) ?? null,
+            status: String(params[11]),
           };
           controls.set(`${row.workspace_id}\0${row.id}`, row);
           return { rows: [] as T[], rowCount: 1 };
@@ -299,10 +306,11 @@ describe("GOV-PG-03 createPgGovernanceRepository mock client", () => {
             resource_version: Number(params[6]),
             payload_hash: String(params[7]),
             policy_version: Number(params[8]),
-            lease_deadline: (params[9] as string | null) ?? null,
-            lease_epoch: Number(params[10]),
-            lease_token: (params[11] as string | null) ?? null,
-            control_id: (params[12] as string | null) ?? null,
+            trusted_context_hash: (params[9] as string | null) ?? null,
+            lease_deadline: (params[10] as string | null) ?? null,
+            lease_epoch: Number(params[11]),
+            lease_token: (params[12] as string | null) ?? null,
+            control_id: (params[13] as string | null) ?? null,
           };
           intents.set(`${row.workspace_id}\0${row.id}`, row);
           return { rows: [] as T[], rowCount: 1 };
@@ -428,9 +436,10 @@ describe("GOV-PG-04 getControlsForWorkspace/getIntentsForWorkspace scoped read",
             resource_version: Number(params[5]),
             payload_hash: String(params[6]),
             policy_version: Number(params[7]),
-            requester_principal_id: String(params[8]),
-            decided_by_principal_id: (params[9] as string | null) ?? null,
-            status: String(params[10]),
+            trusted_context_hash: (params[8] as string | null) ?? null,
+            requester_principal_id: String(params[9]),
+            decided_by_principal_id: (params[10] as string | null) ?? null,
+            status: String(params[11]),
           };
           controls.set(`${row.workspace_id}\0${row.id}`, row);
           return { rows: [] as T[], rowCount: 1 };

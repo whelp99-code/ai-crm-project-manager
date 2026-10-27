@@ -41,7 +41,12 @@ async function createApp(store: InMemoryCustomerWorkOsSnapshotStore, approvals?:
   for (const [workspaceId, principalId] of [[WORKSPACE, PRINCIPAL], [WORKSPACE, "approver-1"], ["22222222-2222-4222-8222-222222222222", "owner-2"]] as const) {
     identities.set(`${workspaceId}\u0000${principalId}`, { workspaceId, principalId, kind: "HUMAN", role: "owner", active: true });
   }
-  await registerDurableCustomerWorkOsRoutes(app, { store, approvals, identityResolver: new StaticCustomerWorkOsIdentityResolver(identities), now: () => "2026-08-14T00:00:00.000Z" });
+  await registerDurableCustomerWorkOsRoutes(app, {
+    store,
+    ...(approvals ? { approvals } : {}),
+    identityResolver: new StaticCustomerWorkOsIdentityResolver(identities),
+    now: () => "2026-08-14T00:00:00.000Z",
+  });
   await app.ready();
   return app;
 }

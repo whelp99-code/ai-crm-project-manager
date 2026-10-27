@@ -353,7 +353,26 @@ describe("CRM and delivery API", () => {
   });
 
   it("opens and resolves reconciliation variances and reports the daily gate", async () => {
-    app = createApp({ financePack: fixturePack });
+    app = createApp({
+      financePack: fixturePack,
+      dailyGateControlPlane: {
+        async dayFacts({ workspaceId, date }) {
+          return {
+            actor: { id: "finance-controller", workspaceId, role: "CONTROLLER", kind: "HUMAN", active: true },
+            metrics: { importsCompleted: true, entriesBalanced: true, openFinanceExceptions: 0 },
+            receivedAt: `${date}T17:00:00+09:00`,
+            provenance: {
+              refs: ["reconciliation:recon-1"], digests: ["a".repeat(64)],
+              observedAt: `${date}T16:55:00+09:00`, expiresAt: `${date}T18:00:00+09:00`,
+            },
+            matrixVersion: 1, matrixActive: true, policyVersion: 1, packVersion: 1,
+            evidenceId: `evidence-${date}`, evidenceSecret: "test-only-daily-gate-secret",
+          };
+        },
+        async activationFacts() { throw new Error("activation is not exercised by this test"); },
+        now: () => new Date("2026-07-01T17:30:00+09:00"),
+      },
+    });
     await app.ready();
     const variance = await app.inject({
       method: "POST", url: "/api/finance/reconciliations", headers,
@@ -377,7 +396,7 @@ describe("CRM and delivery API", () => {
 
     const day = await app.inject({
       method: "POST", url: "/api/finance/daily-gate/days", headers,
-      payload: { date: "2026-07-01", importsCompleted: true, entriesBalanced: true, openFinanceExceptions: 0, receivedAt: "2026-07-01T17:00:00+09:00" },
+      payload: { date: "2026-07-01" },
     });
     expect(day.statusCode).toBe(201);
     expect(day.json()).toMatchObject({ qualifying: true, streakAfter: 1, tierAfter: "conservative" });

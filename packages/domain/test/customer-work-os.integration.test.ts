@@ -105,6 +105,43 @@ function createQuote(service: CustomerWorkOsService, id = "quote", cost = "60000
 }
 
 describe("CustomerWorkOsService", () => {
+  it("keeps the prior renewal quote revision after a correction", () => {
+    const service = new CustomerWorkOsService();
+    seed(service);
+    service.createEngagement({
+      id: "renewal-engagement",
+      workspaceId: WORKSPACE,
+      projectKey: "PRJ-2026-001-R",
+      name: "선진엔지니어링 HCI 갱신",
+      type: "renewal",
+      stage: "PROPOSAL",
+      health: "normal",
+      ownerPrincipalId: "owner-1",
+    });
+    const quote = service.createQuote({
+      id: "renewal-quote",
+      workspaceId: WORKSPACE,
+      engagementId: "renewal-engagement",
+      versionLabel: "v1",
+      status: "DRAFT",
+      validUntil: "2026-08-31",
+      scope: "기존 유지보수",
+      exclusions: ["신규 하드웨어"],
+      bomLines: [{ id: "renewal-line", productId: "hci", description: "HCI 4노드", quantity: 1, unitCostKrw: "60000000", unitPriceKrw: "100000000", vendorAccountId: "vendor" }],
+    });
+    const corrected = service.correctRenewalQuote(WORKSPACE, quote.id, quote.version, {
+      versionLabel: "v2",
+      validUntil: "2026-09-30",
+      scope: "기존 유지보수, 검수 일정 수정",
+      exclusions: ["신규 하드웨어", "교체 작업"],
+    });
+    expect(corrected.versionLabel).toBe("v2");
+    expect(corrected.validUntil).toBe("2026-09-30");
+    expect(service.renewalQuoteHistory(WORKSPACE, quote.id)).toEqual([
+      { versionLabel: "v1", validUntil: "2026-08-31", scope: "기존 유지보수", exclusions: ["신규 하드웨어"], version: 1 },
+    ]);
+  });
+
   it("runs a CRM → CPQ → contract → PSA → procurement → asset → finance vertical slice", () => {
     const service = new CustomerWorkOsService();
     seed(service);

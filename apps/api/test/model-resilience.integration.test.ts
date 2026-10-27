@@ -151,7 +151,7 @@ describe("D7 model-gateway resilience (offline, fetch-stub, no network)", () => 
   });
 
   it("aborts a hung request after the configured timeout and surfaces PROVIDER_TIMEOUT", async () => {
-    const fetchMock = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
+    const fetchMock = vi.fn((_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
       return new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener("abort", () => {
           reject(new DOMException("The operation was aborted.", "AbortError"));
@@ -169,7 +169,7 @@ describe("D7 model-gateway resilience (offline, fetch-stub, no network)", () => 
 
   it("retries a timeout as a transient failure and succeeds once the provider responds in time", async () => {
     let calls = 0;
-    const fetchMock = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
+    const fetchMock = vi.fn((_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
       calls += 1;
       if (calls === 1) {
         return new Promise<Response>((_resolve, reject) => {
@@ -195,7 +195,7 @@ describe("D7 model-gateway resilience (offline, fetch-stub, no network)", () => 
       // headers resolve), this attempt would hang forever instead of
       // aborting; with the fix, the still-armed timer aborts the in-flight
       // body read and the client surfaces PROVIDER_TIMEOUT.
-      const fetchMock = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
+      const fetchMock = vi.fn((_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
         const stalledResponse = {
           ok: true,
           status: 200,
@@ -234,7 +234,7 @@ describe("D7 model-gateway resilience (offline, fetch-stub, no network)", () => 
             releaseLock: () => {},
           }),
         }) as unknown as ReadableStream<Uint8Array>;
-      const fetchMock = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
+      const fetchMock = vi.fn((_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
         const stalledResponse = {
           ok: true,
           status: 200,

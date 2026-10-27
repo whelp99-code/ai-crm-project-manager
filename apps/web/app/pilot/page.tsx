@@ -1,5 +1,7 @@
 import { PilotWizardClient } from "./pilot-wizard-client";
 
+export const dynamic = "force-dynamic";
+
 export default function PilotPage() {
   const apiBase = process.env.API_BASE_URL ?? process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
   const workspaceId = process.env.WORKSPACE_ID ?? process.env.NEXT_PUBLIC_WORKSPACE_ID ?? "";

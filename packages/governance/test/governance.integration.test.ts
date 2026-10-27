@@ -21,16 +21,87 @@ const request = {
 };
 
 function bindingFrom(control: NonNullable<ReturnType<GovernanceAuthorizationService["authorize"]>["control"]>): Binding {
-  return {
+  const binding: Binding = {
     workspaceId: control.workspaceId,
     resourceId: control.resourceId,
     resourceVersion: control.resourceVersion,
     payloadHash: control.payloadHash,
     policyVersion: control.policyVersion,
   };
+  if (control.trustedContextHash !== undefined) binding.trustedContextHash = control.trustedContextHash;
+  return binding;
 }
 
 describe("GovernanceAuthorizationService", () => {
+  it("uses only injected trusted finance context and binds its fingerprint to finance controls", () => {
+    const financeRegistry = new ActionRegistry({ verifyFinance: "FINANCE_VERIFY" });
+    const trusted = {
+      workspaceId: "ws-1", effectiveDate: "2026-01-01", tier: "risk_tiered" as const,
+      matrixVersion: 1, packVersion: 1, financePolicyVersion: 1,
+      evidenceHash: "a".repeat(64), validUntil: "2026-01-02T00:00:00.000Z",
+    };
+    const sut = new GovernanceAuthorizationService(financeRegistry, undefined, {
+      financePolicyContext: () => trusted,
+      now: () => new Date("2026-01-01T12:00:00.000Z"),
+    });
+    const result = sut.authorize({ ...request, command: "verifyFinance" });
+    expect(result.requiredControl).toBe("ALLOW");
+    expect(result.intent?.trustedContextHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(sut.snapshot().audits[0]?.data).toMatchObject({
+      decisionReason: "Active risk-tiered finance policy permits bounded verification without a control.",
+      trustedFinanceContext: { tier: "risk_tiered", matrixVersion: "1" },
+    });
+  });
+
+  it.each([
+    ["FINANCE_CONTEXT_ABSENT", undefined],
+    ["FINANCE_CONTEXT_WORKSPACE_MISMATCH", { workspaceId: "ws-2" }],
+    ["FINANCE_CONTEXT_DATE_MISMATCH", { effectiveDate: "2025-12-31" }],
+    ["FINANCE_CONTEXT_MATRIX_MISMATCH", { matrixVersion: 2 }],
+    ["FINANCE_CONTEXT_PACK_MISMATCH", { packVersion: 2 }],
+    ["FINANCE_CONTEXT_POLICY_MISMATCH", { financePolicyVersion: 2 }],
+    ["FINANCE_CONTEXT_EVIDENCE_INVALID", { evidenceHash: "forged" }],
+    ["FINANCE_CONTEXT_STALE", { validUntil: "2026-01-01T11:59:59.000Z" }],
+  ] as const)("fails closed with auditable %s", (machineReason, override) => {
+    const financeRegistry = new ActionRegistry({ verifyFinance: "FINANCE_VERIFY" });
+    const base = {
+      workspaceId: "ws-1", effectiveDate: "2026-01-01", tier: "risk_tiered" as const,
+      matrixVersion: 1, packVersion: 1, financePolicyVersion: 1,
+      evidenceHash: "a".repeat(64), validUntil: "2026-01-02T00:00:00.000Z",
+    };
+    const sut = new GovernanceAuthorizationService(financeRegistry, undefined, {
+      financePolicyContext: () => override === undefined ? undefined : { ...base, ...override },
+      now: () => new Date("2026-01-01T12:00:00.000Z"),
+    });
+    const result = sut.authorize({ ...request, command: "verifyFinance" });
+    expect(result.requiredControl).toBe("REQUIRE_APPROVAL");
+    expect(sut.snapshot().audits[0]?.data).toMatchObject({
+      policyTier: "conservative",
+      trustedFinanceContext: { source: "fallback", machineReason },
+    });
+  });
+
+  it("rejects an approved finance control when trusted DailyGate context changes", () => {
+    const financeRegistry = new ActionRegistry({ verifyFinance: "FINANCE_VERIFY" });
+    let trusted = {
+      workspaceId: "ws-1", effectiveDate: "2026-01-01", tier: "eligible" as const,
+      matrixVersion: 1, packVersion: 1, financePolicyVersion: 1,
+      evidenceHash: "a".repeat(64), validUntil: "2026-01-02T00:00:00.000Z",
+    };
+    const sut = new GovernanceAuthorizationService(financeRegistry, undefined, {
+      financePolicyContext: () => trusted,
+      now: () => new Date("2026-01-01T12:00:00.000Z"),
+    });
+    const control = sut.authorize({ ...request, command: "verifyFinance" }).control!;
+    sut.decideControl(control.id, "controller-2", "APPROVE", "ws-1");
+    trusted = { ...trusted, evidenceHash: "b".repeat(64) };
+    try {
+      sut.consumeControl(control.id, bindingFrom(control));
+      expect.unreachable("stale finance control must be rejected");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "STALE_CONTROL_FINANCE_CONTEXT" });
+    }
+  });
   it("fails closed for an unmapped command without mutating state", () => {
     const sut = service();
     expect(() => sut.authorize({ ...request, command: "notRegistered" })).toThrowError(GovernanceError);
@@ -245,4 +316,3 @@ describe("GOV-U-HYDRATE hydrate-on-boot restart consistency", () => {
     expect(() => sut.getControl("ws-1", stale.id)).toThrowError(/CONTROL_NOT_FOUND|not found/);
   });
 });
-

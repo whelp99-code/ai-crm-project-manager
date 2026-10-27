@@ -10,6 +10,7 @@ import {
   type CrmSubRepository,
   type PgQueryable,
 } from "@ai-crm/domain/pg-crm-sub-adapter";
+import { pgSmokeConnectionEnv } from "./pg-smoke-connection-env.js";
 
 /**
  * PG-A — CRM sub-aggregates PG proof (P6-b G001, mirrors N-12/N-13's
@@ -109,11 +110,7 @@ describe.skipIf(!LIVE)("PG-A CRM sub-aggregates PG-primary against REAL Postgres
     execFileSync("bash", [smokeScript], {
       env: {
         ...process.env,
-        PGHOST: "localhost",
-        PGPORT: "5432",
-        PGUSER: "ai_crm",
-        PGPASSWORD: "ai_crm_dev",
-        PGDATABASE: "ai_crm",
+        ...pgSmokeConnectionEnv(DATABASE_URL),
       },
       stdio: "pipe",
     });

@@ -11,10 +11,11 @@
   "scripts": {
     "typecheck": "tsc -b --noEmit",
     "test": "vitest run",
-    "start": "node --experimental-strip-types src/main.ts"
+    "start": "exec tsx src/main.ts"
   },
   "dependencies": {
     "@ai-crm/contracts": "workspace:*",
+    "@ai-crm/domain": "workspace:*",
     "@ai-crm/governance": "workspace:*",
     "pg": "^8.13.1"
   },

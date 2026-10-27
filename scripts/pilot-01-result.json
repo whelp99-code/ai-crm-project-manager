@@ -1,0 +1,274 @@
+{
+  "pilot": "PILOT-01",
+  "branch": "pilot/cwos-pilot-01",
+  "baseCommit": "cdefbeff4ba56782558d974a7a7dcb28f942d265",
+  "ranAt": "2026-08-15T00:00:00.000Z",
+  "node": "v22.23.0",
+  "pnpm": "9.15.0",
+  "workspaceId": "ws-pilot-01",
+  "projectId": "PRJ-PILOT-001",
+  "customerId": "customer-pilot-01",
+  "passed": true,
+  "stepCount": 43,
+  "failedCount": 0,
+  "steps": [
+    {
+      "id": "seed-customer",
+      "description": "고객 등록 (customer-pilot-01)",
+      "ok": true,
+      "detail": "201 Pilot Partner Corp"
+    },
+    {
+      "id": "seed-partner",
+      "description": "파트너십 계약 등록 (contract-pilot-01)",
+      "ok": true,
+      "detail": "201 Pilot Partner Agreement"
+    },
+    {
+      "id": "seed-activity",
+      "description": "활동(커뮤니케이션) 등록",
+      "ok": true,
+      "detail": "201 meeting"
+    },
+    {
+      "id": "seed-next-action",
+      "description": "다음 행동 등록",
+      "ok": true,
+      "detail": "201 priority 1"
+    },
+    {
+      "id": "seed-project",
+      "description": "PRJ-PILOT-001 프로젝트 생성",
+      "ok": true,
+      "detail": "201 CWOS v2 PILOT-01 프로젝트"
+    },
+    {
+      "id": "seed-finance",
+      "description": "매출/비용 전표 등록·검증·승인·전기",
+      "ok": true,
+      "detail": "매출 1,000,000,000 / 비용 600,000,000 POSTED"
+    },
+    {
+      "id": "seed-bank-freshness",
+      "description": "은행명세 freshness 확보",
+      "ok": true,
+      "detail": "asOf=2026-08-15"
+    },
+    {
+      "id": "verify-pnl",
+      "description": "프로젝트 손익 검증",
+      "ok": true,
+      "detail": "매출 1,000,000,000 − 비용 600,000,000 = 마진 400,000,000 KRW"
+    },
+    {
+      "id": "adversarial-duplicate",
+      "description": "중복 요청 차단 (DUPLICATE_ID)",
+      "ok": true,
+      "detail": "409 DUPLICATE_ID"
+    },
+    {
+      "id": "adversarial-vat",
+      "description": "VAT 오류 차단 (UNBALANCED_ENTRY)",
+      "ok": true,
+      "detail": "400 UNBALANCED_ENTRY"
+    },
+    {
+      "id": "adversarial-cross-workspace",
+      "description": "Cross-workspace 차단",
+      "ok": true,
+      "detail": "다른 워크스페이스 접근 400 CROSS_WORKSPACE"
+    },
+    {
+      "id": "v2-bootstrap-principal",
+      "description": "v2 부트스트랩: principal 등록",
+      "ok": true,
+      "detail": "200 → v1"
+    },
+    {
+      "id": "v2-bootstrap-membership",
+      "description": "v2 부트스트랩: 멤버십 추가",
+      "ok": true,
+      "detail": "200 → v2"
+    },
+    {
+      "id": "v2-team",
+      "description": "v2 팀 등록",
+      "ok": true,
+      "detail": "200 → v3"
+    },
+    {
+      "id": "v2-psa-resource",
+      "description": "v2 PSA 리소스 등록",
+      "ok": true,
+      "detail": "200 → v4"
+    },
+    {
+      "id": "v2-psa-capacity",
+      "description": "v2 PSA 캐파시티 설정",
+      "ok": true,
+      "detail": "200 → v5"
+    },
+    {
+      "id": "v2-psa-assign",
+      "description": "v2 PSA 배정",
+      "ok": true,
+      "detail": "200 → v6"
+    },
+    {
+      "id": "v2-slo",
+      "description": "v2 operations SLO 정의",
+      "ok": true,
+      "detail": "200 → v7"
+    },
+    {
+      "id": "v2-milestone-start-1.1.0",
+      "description": "v2 마일스톤 1.1.0 시작",
+      "ok": true,
+      "detail": "200 → v8"
+    },
+    {
+      "id": "v2-milestone-complete-1.1.0",
+      "description": "v2 마일스톤 1.1.0 완료",
+      "ok": true,
+      "detail": "200 → v9"
+    },
+    {
+      "id": "v2-milestone-start-1.2.0",
+      "description": "v2 마일스톤 1.2.0 시작",
+      "ok": true,
+      "detail": "200 → v10"
+    },
+    {
+      "id": "v2-milestone-complete-1.2.0",
+      "description": "v2 마일스톤 1.2.0 완료",
+      "ok": true,
+      "detail": "200 → v11"
+    },
+    {
+      "id": "v2-milestone-start-1.3.0",
+      "description": "v2 마일스톤 1.3.0 시작",
+      "ok": true,
+      "detail": "200 → v12"
+    },
+    {
+      "id": "v2-milestone-complete-1.3.0",
+      "description": "v2 마일스톤 1.3.0 완료",
+      "ok": true,
+      "detail": "200 → v13"
+    },
+    {
+      "id": "v2-milestone-start-1.4.0",
+      "description": "v2 마일스톤 1.4.0 시작",
+      "ok": true,
+      "detail": "200 → v14"
+    },
+    {
+      "id": "v2-milestone-complete-1.4.0",
+      "description": "v2 마일스톤 1.4.0 완료",
+      "ok": true,
+      "detail": "200 → v15"
+    },
+    {
+      "id": "v2-milestone-start-1.5.0",
+      "description": "v2 마일스톤 1.5.0 시작",
+      "ok": true,
+      "detail": "200 → v16"
+    },
+    {
+      "id": "v2-milestone-complete-1.5.0",
+      "description": "v2 마일스톤 1.5.0 완료",
+      "ok": true,
+      "detail": "200 → v17"
+    },
+    {
+      "id": "v2-milestone-start-1.6.0",
+      "description": "v2 마일스톤 1.6.0 시작",
+      "ok": true,
+      "detail": "200 → v18"
+    },
+    {
+      "id": "v2-milestone-complete-1.6.0",
+      "description": "v2 마일스톤 1.6.0 완료",
+      "ok": true,
+      "detail": "200 → v19"
+    },
+    {
+      "id": "v2-milestone-start-1.7.0",
+      "description": "v2 마일스톤 1.7.0 시작",
+      "ok": true,
+      "detail": "200 → v20"
+    },
+    {
+      "id": "v2-milestone-complete-1.7.0",
+      "description": "v2 마일스톤 1.7.0 완료",
+      "ok": true,
+      "detail": "200 → v21"
+    },
+    {
+      "id": "v2-milestone-start-1.8.0",
+      "description": "v2 마일스톤 1.8.0 시작",
+      "ok": true,
+      "detail": "200 → v22"
+    },
+    {
+      "id": "v2-milestone-complete-1.8.0",
+      "description": "v2 마일스톤 1.8.0 완료",
+      "ok": true,
+      "detail": "200 → v23"
+    },
+    {
+      "id": "v2-milestone-start-1.9.0",
+      "description": "v2 마일스톤 1.9.0 시작",
+      "ok": true,
+      "detail": "200 → v24"
+    },
+    {
+      "id": "v2-milestone-complete-1.9.0",
+      "description": "v2 마일스톤 1.9.0 완료",
+      "ok": true,
+      "detail": "200 → v25"
+    },
+    {
+      "id": "v2-milestone-start-2.0.0",
+      "description": "v2 마일스톤 2.0.0 시작",
+      "ok": true,
+      "detail": "200 → v26"
+    },
+    {
+      "id": "v2-milestone-complete-2.0.0",
+      "description": "v2 마일스톤 2.0.0 완료",
+      "ok": true,
+      "detail": "200 → v27"
+    },
+    {
+      "id": "v2-finding",
+      "description": "v2 finding 기록",
+      "ok": true,
+      "detail": "200 → v28"
+    },
+    {
+      "id": "v2-finding-resolve",
+      "description": "v2 finding 해결",
+      "ok": true,
+      "detail": "200 → v29"
+    },
+    {
+      "id": "v2-release-manifest",
+      "description": "v2 릴리스 매니페스트 게이트 (OPERATIONS_GATES_INCOMPLETE fail-closed)",
+      "ok": true,
+      "detail": "400 → v29"
+    },
+    {
+      "id": "v2-operations-gates",
+      "description": "operations 게이트 fail-closed 확인",
+      "ok": true,
+      "detail": "매니페스트 차단 (drill/pilot/runbook/cutover/security 커맨드 미노출)"
+    },
+    {
+      "id": "v2-readiness",
+      "description": "v2 readiness (fail-closed)",
+      "ok": true,
+      "detail": "ready=false openFindings=0 manifests=0 runtimeVersion=29"
+    }
+  ]
+}

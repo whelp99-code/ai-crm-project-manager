@@ -40,6 +40,42 @@ function receipt(version: number, actionType: AuthorizationReceipt["actionType"]
 }
 
 describe("DeliveryService", () => {
+  it("keeps accept and reject revisions instead of overwriting them", () => {
+    const { service, project } = created();
+    const submitted = service.updateDeliverableStatus("ws-1", project.id, project.version, "deliverable-1", "submitted");
+    const rejected = service.updateDeliverableStatus("ws-1", project.id, submitted.version, "deliverable-1", "rejected");
+    const history = rejected.deliverables[0]?.statusHistory ?? [];
+    expect(history.map((item) => item.status)).toEqual(["submitted", "rejected"]);
+    expect(rejected.deliverables[0]?.status).toBe("rejected");
+    expect(history[0]?.version).toBe(submitted.version);
+  });
+
+  it("keeps each partial acceptance instead of replacing the previous quantity", () => {
+    const service = new DeliveryService();
+    const project = service.createProject({
+      id: "project-1",
+      workspaceId: "ws-1",
+      customerId: "customer-1",
+      name: "Delivery",
+      contractId: "contract-1",
+      contractScope: "Build approved scope",
+      scheduleStart: "2026-01-01",
+      scheduleEnd: "2026-03-31",
+      deliverables: [{ id: "deliverable-1", title: "Final", required: true, status: "pending", requirementIds: ["req-1"], quantityOrdered: 4 }],
+      completionRule: "all_required_deliverables_approved",
+      riskThreshold: 0.4,
+      requirementIds: ["req-1"],
+    });
+    const first = service.recordPartialAcceptance("ws-1", project.id, project.version, "deliverable-1", 1);
+    const second = service.recordPartialAcceptance("ws-1", project.id, first.version, "deliverable-1", 3);
+    expect(second.deliverables[0]?.quantityAccepted).toBe(3);
+    expect(second.deliverables[0]?.quantityHistory).toEqual([
+      { accepted: 1, version: first.version },
+      { accepted: 3, version: second.version },
+    ]);
+    expect(() => service.recordPartialAcceptance("ws-1", project.id, second.version, "deliverable-1", 5)).toThrow(DeliveryDomainError);
+  });
+
   it("persists the five project configuration dimensions", () => {
     const { project } = created();
     expect(project).toMatchObject({

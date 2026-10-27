@@ -101,7 +101,8 @@ export class InMemoryCustomerWorkOsControlService implements CustomerWorkOsContr
   ) {}
 
   async request(input: ControlRequester): Promise<CustomerWorkOsControl> {
-    const expectedHash = controlRequestHash({ ...input, requestHash: undefined as never });
+    const { requestHash: _requestHash, ...requestFields } = input;
+    const expectedHash = controlRequestHash(requestFields);
     if (input.requestHash !== expectedHash) throw new CustomerWorkOsError("REQUEST_HASH_MISMATCH", "control request hash does not match request fields");
     const policy = customerWorkOsControlPolicy(input.action);
     const requester = this.principals.get(input.requesterPrincipalId);
@@ -164,6 +165,10 @@ export class InMemoryCustomerWorkOsControlService implements CustomerWorkOsContr
       if (evaluation.code === "APPROVAL_EXPIRED") {
         control.status = "EXPIRED";
         control.updatedAt = decisionAt;
+        control.decidedByPrincipalId = approver.id;
+        control.decisionReason = evaluation.reason;
+        this.decisionKeys.set(key, control.id);
+        return copy(control);
       }
       throw new CustomerWorkOsError(evaluation.code, evaluation.reason);
     }
@@ -309,7 +314,8 @@ export class PgCustomerWorkOsControlService implements CustomerWorkOsControlServ
   constructor(private readonly pool: SqlPool, private readonly now: () => string = () => new Date().toISOString()) {}
 
   async request(input: ControlRequester): Promise<CustomerWorkOsControl> {
-    const expectedHash = controlRequestHash({ ...input, requestHash: undefined as never });
+    const { requestHash: _requestHash, ...requestFields } = input;
+    const expectedHash = controlRequestHash(requestFields);
     if (input.requestHash !== expectedHash) throw new CustomerWorkOsError("REQUEST_HASH_MISMATCH", "control request hash does not match request fields");
     const policy = customerWorkOsControlPolicy(input.action);
     const createdAt = this.now();
@@ -392,11 +398,16 @@ export class PgCustomerWorkOsControlService implements CustomerWorkOsControlServ
       });
       if (!evaluation.allowed) {
         if (evaluation.code === "APPROVAL_EXPIRED") {
-          await connection.query(
-            `UPDATE orch_governance_controls SET status = 'EXPIRED', updated_at = $3::timestamptz
-              WHERE workspace_id = $1 AND id = $2 AND status = 'REQUESTED'`,
-            [input.workspaceId, input.controlId, decisionAt],
+          const updated = await connection.query<ControlRow>(
+            `UPDATE orch_governance_controls
+                SET status = 'EXPIRED', decided_by_principal_id = $3,
+                    decision_reason = $4, updated_at = $5::timestamptz
+              WHERE workspace_id = $1 AND id = $2 AND status = 'REQUESTED'
+              RETURNING ${CONTROL_COLUMNS}`,
+            [input.workspaceId, input.controlId, approver.id, evaluation.reason, decisionAt],
           );
+          const row = updated.rows[0];
+          if (!row) throw new CustomerWorkOsError("CONCURRENT_MODIFICATION", "control was decided concurrently");
           await connection.query(
             `INSERT INTO cwos_control_decision_events
               (workspace_id, control_id, event_type, actor_principal_id, reason,
@@ -405,6 +416,7 @@ export class PgCustomerWorkOsControlService implements CustomerWorkOsControlServ
             [input.workspaceId, input.controlId, approver.id, evaluation.reason,
              input.idempotencyKey, control.payloadHash, decisionAt],
           );
+          return rowToControl(row);
         }
         throw new CustomerWorkOsError(evaluation.code, evaluation.reason);
       }
