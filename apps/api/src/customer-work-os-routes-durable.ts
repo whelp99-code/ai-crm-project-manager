@@ -25,11 +25,18 @@ import {
   type CustomerWorkOsSnapshotStore,
   type GovernanceApprovalResolver,
 } from "./customer-work-os-runtime.js";
+import { buildOwnerCockpit } from "@ai-crm/reports/customer-work-os-reports";
+import {
+  StaticCustomerWorkOsIdentityResolver,
+  type CustomerWorkOsIdentity,
+  type CustomerWorkOsIdentityResolver,
+} from "./customer-work-os-identity.js";
 
 export interface DurableCustomerWorkOsRouteOptions {
   store?: CustomerWorkOsSnapshotStore;
   approvals?: GovernanceApprovalResolver;
   now?: () => string;
+  identityResolver?: CustomerWorkOsIdentityResolver;
 }
 
 function header(request: FastifyRequest, name: string): string {
@@ -88,10 +95,9 @@ function status(error: CustomerWorkOsError): number {
   return 400;
 }
 
-function sendError(reply: FastifyReply, error: unknown): void {
+function sendError(reply: FastifyReply, error: unknown): FastifyReply {
   if (error instanceof CustomerWorkOsError) {
-    reply.code(status(error)).send({ error: error.code, message: error.message });
-    return;
+    return reply.code(status(error)).send({ error: error.code, message: error.message });
   }
   throw error;
 }
@@ -109,6 +115,14 @@ export async function registerDurableCustomerWorkOsRoutes(
   const approvals = options.approvals ?? infrastructure?.approvals;
   const manager = new CustomerWorkOsRuntimeManager(store);
   const now = options.now ?? (() => new Date().toISOString());
+  const identities = options.identityResolver ?? new StaticCustomerWorkOsIdentityResolver(new Map<string, CustomerWorkOsIdentity>());
+
+  async function trustedIdentity(workspaceId: string, principalId: string, mutation: boolean): Promise<void> {
+    const identity = await identities.resolve(workspaceId, principalId);
+    if (mutation && identity.kind !== "HUMAN") {
+      throw new CustomerWorkOsError("HUMAN_AUTHORITY_REQUIRED", "AI and service principals cannot commit business mutations");
+    }
+  }
 
   if (infrastructure) app.addHook("onClose", async () => infrastructure.close());
   else if (store.close) app.addHook("onClose", async () => store.close?.());
@@ -122,6 +136,7 @@ export async function registerDurableCustomerWorkOsRoutes(
     try {
       const workspaceId = header(request, "x-workspace-id");
       const principalId = header(request, "x-principal-id");
+      await trustedIdentity(workspaceId, principalId, true);
       const idempotencyKey = header(request, "idempotency-key");
       const body = bodyObject(request);
       const requestHash = customerWorkOsPayloadHash({ routeKey, workspaceId, principalId, body });
@@ -136,7 +151,7 @@ export async function registerDurableCustomerWorkOsRoutes(
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false");
       reply.code(result.statusCode).send(result.payload);
     } catch (error) {
-      sendError(reply, error);
+      return sendError(reply, error);
     }
   }
 
@@ -249,7 +264,7 @@ export async function registerDurableCustomerWorkOsRoutes(
 
   app.post<{ Params: { requestId: string } }>("/api/cwos/change-requests/:requestId/approve", async (request, reply) => {
     try {
-      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); const idempotencyKey = header(request, "idempotency-key"); const body = bodyObject(request);
+      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); await trustedIdentity(workspaceId, principalId, true); const idempotencyKey = header(request, "idempotency-key"); const body = bodyObject(request);
       const engagementId = stringField(body, "engagementId"); const expectedVersion = numberField(body, "expectedVersion"); const disposition = stringField(body, "disposition") as NonNullable<ChangeRequest["disposition"]>;
       const change = await manager.read(workspaceId, (service) => service.getEngagementSnapshot(workspaceId, engagementId).changes.find((item) => item.id === request.params.requestId));
       if (!change) throw new CustomerWorkOsError("NOT_FOUND", `change request not found: ${request.params.requestId}`);
@@ -258,7 +273,7 @@ export async function registerDurableCustomerWorkOsRoutes(
       const requestHash = customerWorkOsPayloadHash({ route: "change.approve", workspaceId, principalId, requestId: change.id, body });
       const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operation: (service) => service.approveChangeRequest(workspaceId, change.id, expectedVersion, disposition, receipt), now: now() });
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false").code(result.statusCode).send(result.payload);
-    } catch (error) { sendError(reply, error); }
+    } catch (error) { return sendError(reply, error); }
   });
 
   app.post<{ Params: { requestId: string } }>("/api/cwos/change-requests/:requestId/apply", async (request, reply) => {
@@ -274,7 +289,7 @@ export async function registerDurableCustomerWorkOsRoutes(
 
   app.post<{ Params: { orderId: string } }>("/api/cwos/purchase-orders/:orderId/approve", async (request, reply) => {
     try {
-      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); const idempotencyKey = header(request, "idempotency-key"); const body = bodyObject(request);
+      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); await trustedIdentity(workspaceId, principalId, true); const idempotencyKey = header(request, "idempotency-key"); const body = bodyObject(request);
       const engagementId = stringField(body, "engagementId"); const expectedVersion = numberField(body, "expectedVersion");
       const order = await manager.read(workspaceId, (service) => service.getEngagementSnapshot(workspaceId, engagementId).purchaseOrders.find((item) => item.id === request.params.orderId));
       if (!order) throw new CustomerWorkOsError("NOT_FOUND", `purchase order not found: ${request.params.orderId}`);
@@ -284,7 +299,7 @@ export async function registerDurableCustomerWorkOsRoutes(
       const requestHash = customerWorkOsPayloadHash({ route: "po.approve", workspaceId, principalId, orderId: order.id, body });
       const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operation: (service) => service.approvePurchaseOrder(workspaceId, order.id, expectedVersion, receipt), now: now() });
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false").code(result.statusCode).send(result.payload);
-    } catch (error) { sendError(reply, error); }
+    } catch (error) { return sendError(reply, error); }
   });
 
   app.post<{ Params: { orderId: string } }>("/api/cwos/purchase-orders/:orderId/ordered", async (request, reply) => {
@@ -304,7 +319,7 @@ export async function registerDurableCustomerWorkOsRoutes(
 
   app.post("/api/cwos/financial-items", async (request, reply) => {
     try {
-      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); const idempotencyKey = header(request, "idempotency-key"); const body = bodyObject(request);
+      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); await trustedIdentity(workspaceId, principalId, true); const idempotencyKey = header(request, "idempotency-key"); const body = bodyObject(request);
       stringField(body, "id"); stringField(body, "accountId"); stringField(body, "direction"); stringField(body, "category"); stringField(body, "lifecycle"); stringField(body, "netAmountKrw"); stringField(body, "vatAmountKrw"); stringField(body, "grossAmountKrw"); stringField(body, "expectedDate");
       const input = { ...(body as unknown as Omit<FinancialItem, "workspaceId">), workspaceId };
       if (input.lifecycle !== "PLANNED") {
@@ -314,12 +329,12 @@ export async function registerDurableCustomerWorkOsRoutes(
       const requestHash = customerWorkOsPayloadHash({ route: "finance.item.create", workspaceId, principalId, body });
       const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operation: (service) => service.addFinancialItem(input), now: now() });
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false").code(result.statusCode).send(result.payload);
-    } catch (error) { sendError(reply, error); }
+    } catch (error) { return sendError(reply, error); }
   });
 
   app.post("/api/cwos/settlements", async (request, reply) => {
     try {
-      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); const idempotencyKey = header(request, "idempotency-key"); const body = bodyObject(request);
+      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); await trustedIdentity(workspaceId, principalId, true); const idempotencyKey = header(request, "idempotency-key"); const body = bodyObject(request);
       const engagementId = stringField(body, "engagementId"); stringField(body, "id"); stringField(body, "financialItemId"); stringField(body, "direction"); stringField(body, "amountKrw"); stringField(body, "settledAt"); stringField(body, "accountOrCard"); stringField(body, "evidenceRef");
       const settlement = { ...(body as unknown as Omit<Settlement, "workspaceId">), workspaceId };
       const item = await manager.read(workspaceId, (service) => service.getEngagementSnapshot(workspaceId, engagementId).financialItems.find((current) => current.id === settlement.financialItemId));
@@ -329,7 +344,7 @@ export async function registerDurableCustomerWorkOsRoutes(
       const requestHash = customerWorkOsPayloadHash({ route: "finance.settlement.record", workspaceId, principalId, body });
       const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operation: (service) => service.recordSettlement(settlement), now: now() });
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false").code(result.statusCode).send(result.payload);
-    } catch (error) { sendError(reply, error); }
+    } catch (error) { return sendError(reply, error); }
   });
 
   app.post<{ Params: { engagementId: string } }>("/api/cwos/engagements/:engagementId/transition", async (request, reply) => {
@@ -338,16 +353,26 @@ export async function registerDurableCustomerWorkOsRoutes(
 
   app.get<{ Params: { engagementId: string } }>("/api/cwos/engagements/:engagementId", async (request, reply) => {
     try {
-      const workspaceId = header(request, "x-workspace-id"); header(request, "x-principal-id");
+      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); await trustedIdentity(workspaceId, principalId, false);
       return await manager.read(workspaceId, (service) => service.getEngagementSnapshot(workspaceId, request.params.engagementId));
-    } catch (error) { sendError(reply, error); return undefined; }
+    } catch (error) { return sendError(reply, error); }
   });
 
   app.get<{ Params: { engagementId: string } }>("/api/cwos/engagements/:engagementId/finance", async (request, reply) => {
     try {
-      const workspaceId = header(request, "x-workspace-id"); header(request, "x-principal-id");
+      const workspaceId = header(request, "x-workspace-id"); const principalId = header(request, "x-principal-id"); await trustedIdentity(workspaceId, principalId, false);
       return await manager.read(workspaceId, (service) => service.financeSummary(workspaceId, request.params.engagementId));
-    } catch (error) { sendError(reply, error); return undefined; }
+    } catch (error) { return sendError(reply, error); }
+  });
+
+  app.get("/api/cwos/cockpit", async (request, reply) => {
+    try {
+      const workspaceId = header(request, "x-workspace-id");
+      const principalId = header(request, "x-principal-id");
+      await trustedIdentity(workspaceId, principalId, false);
+      const asOf = now().slice(0, 10);
+      return await manager.read(workspaceId, (service) => buildOwnerCockpit(service.exportState(), asOf));
+    } catch (error) { return sendError(reply, error); }
   });
 
   return manager;

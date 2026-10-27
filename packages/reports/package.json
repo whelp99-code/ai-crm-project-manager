@@ -5,8 +5,8 @@
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
-  "exports": { ".": "./src/index.ts", "./pg-reports-adapter": "./src/pg-reports-adapter.ts" },
+  "exports": { ".": "./src/index.ts", "./pg-reports-adapter": "./src/pg-reports-adapter.ts", "./customer-work-os-reports": "./src/customer-work-os-reports.ts" },
   "scripts": { "typecheck": "tsc -b --noEmit", "test": "vitest run" },
-  "dependencies": { "@ai-crm/contracts": "workspace:*" },
+  "dependencies": { "@ai-crm/contracts": "workspace:*", "@ai-crm/domain": "workspace:*" },
   "devDependencies": { "typescript": "^5.7.2", "vitest": "^2.1.8" }
 }

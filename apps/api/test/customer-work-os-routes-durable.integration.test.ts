@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { customerWorkOsPayloadHash, type ApprovalReceipt } from "@ai-crm/domain/customer-work-os";
 import { registerDurableCustomerWorkOsRoutes } from "../src/customer-work-os-routes-durable.js";
 import { InMemoryCustomerWorkOsSnapshotStore, type GovernanceApprovalResolver } from "../src/customer-work-os-runtime.js";
+import { StaticCustomerWorkOsIdentityResolver, type CustomerWorkOsIdentity } from "../src/customer-work-os-identity.js";
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 const PRINCIPAL = "owner-1";
@@ -36,7 +37,11 @@ class FakeApprovals implements GovernanceApprovalResolver {
 
 async function createApp(store: InMemoryCustomerWorkOsSnapshotStore, approvals?: GovernanceApprovalResolver) {
   const app = Fastify();
-  await registerDurableCustomerWorkOsRoutes(app, { store, approvals, now: () => "2026-08-14T00:00:00.000Z" });
+  const identities = new Map<string, CustomerWorkOsIdentity>();
+  for (const [workspaceId, principalId] of [[WORKSPACE, PRINCIPAL], [WORKSPACE, "approver-1"], ["22222222-2222-4222-8222-222222222222", "owner-2"]] as const) {
+    identities.set(`${workspaceId}\u0000${principalId}`, { workspaceId, principalId, kind: "HUMAN", role: "owner", active: true });
+  }
+  await registerDurableCustomerWorkOsRoutes(app, { store, approvals, identityResolver: new StaticCustomerWorkOsIdentityResolver(identities), now: () => "2026-08-14T00:00:00.000Z" });
   await app.ready();
   return app;
 }

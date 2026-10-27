@@ -325,6 +325,28 @@ export interface ApprovalReceipt {
   approvedByPrincipalId: string;
 }
 
+export interface CustomerWorkOsState {
+  schemaVersion: 1;
+  accounts: Account[];
+  contacts: Contact[];
+  engagements: Engagement[];
+  parties: EngagementParty[];
+  activities: Activity[];
+  knowledge: KnowledgeItem[];
+  commitments: Commitment[];
+  products: Product[];
+  quotes: Quote[];
+  contracts: Contract[];
+  deliveryProjects: DeliveryProject[];
+  changes: ChangeRequest[];
+  purchaseOrders: PurchaseOrder[];
+  assets: Asset[];
+  financialItems: FinancialItem[];
+  settlements: Settlement[];
+  financialItemBaseLifecycle: Array<[string, FinancialItem["lifecycle"]]>;
+  consumedReceiptIds: string[];
+}
+
 export interface ProjectFinanceSummary {
   engagementId: string;
   expectedRevenueKrw: MoneyKrw;
@@ -445,6 +467,70 @@ export class CustomerWorkOsService {
   private readonly settlements = new Map<string, Settlement>();
   private readonly financialItemBaseLifecycle = new Map<string, FinancialItem["lifecycle"]>();
   private readonly consumedReceiptIds = new Set<string>();
+
+  exportState(): CustomerWorkOsState {
+    return {
+      schemaVersion: 1,
+      accounts: [...this.accounts.values()].map((item) => copy(item)),
+      contacts: [...this.contacts.values()].map((item) => copy(item)),
+      engagements: [...this.engagements.values()].map((item) => copy(item)),
+      parties: [...this.parties.values()].map((item) => copy(item)),
+      activities: [...this.activities.values()].map((item) => copy(item)),
+      knowledge: [...this.knowledge.values()].map((item) => copy(item)),
+      commitments: [...this.commitments.values()].map((item) => copy(item)),
+      products: [...this.products.values()].map((item) => copy(item)),
+      quotes: [...this.quotes.values()].map((item) => copy(item)),
+      contracts: [...this.contracts.values()].map((item) => copy(item)),
+      deliveryProjects: [...this.deliveryProjects.values()].map((item) => copy(item)),
+      changes: [...this.changes.values()].map((item) => copy(item)),
+      purchaseOrders: [...this.purchaseOrders.values()].map((item) => copy(item)),
+      assets: [...this.assets.values()].map((item) => copy(item)),
+      financialItems: [...this.financialItems.values()].map((item) => copy(item)),
+      settlements: [...this.settlements.values()].map((item) => copy(item)),
+      financialItemBaseLifecycle: [...this.financialItemBaseLifecycle.entries()],
+      consumedReceiptIds: [...this.consumedReceiptIds],
+    };
+  }
+
+  hydrateState(state: CustomerWorkOsState): void {
+    if (state.schemaVersion !== 1) throw new CustomerWorkOsError("UNSUPPORTED_STATE", "unsupported Customer Work OS state schema");
+    this.accounts.clear();
+    this.contacts.clear();
+    this.engagements.clear();
+    this.parties.clear();
+    this.activities.clear();
+    this.knowledge.clear();
+    this.commitments.clear();
+    this.products.clear();
+    this.quotes.clear();
+    this.contracts.clear();
+    this.deliveryProjects.clear();
+    this.changes.clear();
+    this.purchaseOrders.clear();
+    this.assets.clear();
+    this.financialItems.clear();
+    this.settlements.clear();
+    this.financialItemBaseLifecycle.clear();
+    this.consumedReceiptIds.clear();
+    for (const item of state.accounts) this.accounts.set(item.id, copy(item));
+    for (const item of state.contacts) this.contacts.set(item.id, copy(item));
+    for (const item of state.engagements) this.engagements.set(item.id, copy(item));
+    for (const item of state.parties) this.parties.set(item.id, copy(item));
+    for (const item of state.activities) this.activities.set(item.id, copy(item));
+    for (const item of state.knowledge) this.knowledge.set(item.id, copy(item));
+    for (const item of state.commitments) this.commitments.set(item.id, copy(item));
+    for (const item of state.products) this.products.set(item.id, copy(item));
+    for (const item of state.quotes) this.quotes.set(item.id, copy(item));
+    for (const item of state.contracts) this.contracts.set(item.id, copy(item));
+    for (const item of state.deliveryProjects) this.deliveryProjects.set(item.id, copy(item));
+    for (const item of state.changes) this.changes.set(item.id, copy(item));
+    for (const item of state.purchaseOrders) this.purchaseOrders.set(item.id, copy(item));
+    for (const item of state.assets) this.assets.set(item.id, copy(item));
+    for (const item of state.financialItems) this.financialItems.set(item.id, copy(item));
+    for (const item of state.settlements) this.settlements.set(item.id, copy(item));
+    for (const [id, lifecycle] of state.financialItemBaseLifecycle) this.financialItemBaseLifecycle.set(id, lifecycle);
+    for (const id of state.consumedReceiptIds) this.consumedReceiptIds.add(id);
+  }
 
   createAccount(input: Omit<Account, "normalizedName" | "version">): Account {
     this.ensureNew(this.accounts, input.id, "account");
