@@ -1,0 +1,118 @@
+name: CWOS One Shot API Error Exports
+
+on:
+  push:
+    branches:
+      - feat/customer-work-os-v1-full
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'fix(cwos): normalize coded errors and package exports') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/customer-work-os-v1-full
+          fetch-depth: 0
+      - name: Patch imports and coded errors
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+
+          ai_store = Path('apps/api/src/customer-work-os-ai-store.ts')
+          text = ai_store.read_text().replace('from "@ai-crm/ai-orchestrator/customer-work-os-ai";', 'from "@ai-crm/ai-orchestrator";')
+          ai_store.write_text(text)
+
+          reports = Path('packages/reports/src/customer-work-os-reports.ts')
+          text = reports.read_text().replace('from "@ai-crm/domain/customer-work-os";', 'from "@ai-crm/domain";')
+          reports.write_text(text)
+
+          routes = Path('apps/api/src/customer-work-os-routes-durable.ts')
+          text = routes.read_text().replace('import { buildOwnerCockpit } from "@ai-crm/reports/customer-work-os-reports";', 'import { buildOwnerCockpit } from "@ai-crm/reports";')
+          old_status = '''function status(error: CustomerWorkOsError): number {
+  if (error.code === "NOT_FOUND" || error.code === "APPROVAL_NOT_FOUND") return 404;
+  if (error.code === "CROSS_WORKSPACE") return 403;
+  if (error.code === "APPROVAL_INFRASTRUCTURE_REQUIRED") return 503;
+  if ([
+    "DUPLICATE_ID",
+    "DUPLICATE_ACCOUNT",
+    "DUPLICATE_PROJECT_KEY",
+    "DUPLICATE_SKU",
+    "REPLAYED_APPROVAL",
+    "STALE_VERSION",
+    "STALE_APPROVAL",
+    "IDEMPOTENCY_KEY_CONFLICT",
+    "CONCURRENT_MODIFICATION",
+  ].includes(error.code)) return 409;
+  return 400;
+}
+
+function sendError(reply: FastifyReply, error: unknown): void {
+  if (error instanceof CustomerWorkOsError) {
+    reply.code(status(error)).send({ error: error.code, message: error.message });
+    return;
+  }
+  throw error;
+}'''
+          new_status = '''function codedError(error: unknown): { code: string; message: string } | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const code = (error as Error & { code?: unknown }).code;
+  if (typeof code !== "string" || !code.trim()) return undefined;
+  return { code, message: error.message };
+}
+
+function status(code: string): number {
+  if (code === "NOT_FOUND" || code === "APPROVAL_NOT_FOUND") return 404;
+  if (["CROSS_WORKSPACE", "CROSS_WORKSPACE_STATE", "PRINCIPAL_BINDING_FAILED", "APPROVER_ROLE_FORBIDDEN"].includes(code)) return 403;
+  if (["UNAUTHENTICATED", "PRINCIPAL_NOT_FOUND"].includes(code)) return 401;
+  if (["APPROVAL_INFRASTRUCTURE_REQUIRED", "IDENTITY_INFRASTRUCTURE_REQUIRED", "PG_DRIVER_UNAVAILABLE", "PERSISTENCE_FAILED"].includes(code)) return 503;
+  if ([
+    "DUPLICATE_ID", "DUPLICATE_ACCOUNT", "DUPLICATE_PROJECT_KEY", "DUPLICATE_SKU",
+    "DUPLICATE_ARTIFACT_VERSION", "REPLAYED_APPROVAL", "STALE_VERSION", "STALE_APPROVAL",
+    "IDEMPOTENCY_KEY_CONFLICT", "IDEMPOTENCY_AUDIT_CONFLICT", "CONCURRENT_MODIFICATION",
+    "INVALID_STATE", "INVALID_TRANSITION", "ALREADY_APPLIED",
+  ].includes(code)) return 409;
+  return 400;
+}
+
+function sendError(reply: FastifyReply, error: unknown): void {
+  const coded = codedError(error);
+  if (coded) {
+    reply.code(status(coded.code)).send({ error: coded.code, message: coded.message });
+    return;
+  }
+  throw error;
+}'''
+          if old_status not in text:
+              raise SystemExit('status/sendError block not found')
+          routes.write_text(text.replace(old_status, new_status))
+
+          for package_path, export_path in [
+            (Path('packages/ai-orchestrator/package.json'), './src/index.ts'),
+            (Path('packages/domain/package.json'), './src/index.ts'),
+            (Path('packages/reports/package.json'), './src/index.ts'),
+          ]:
+            data = json.loads(package_path.read_text())
+            exports = data.get('exports')
+            if exports is None:
+              data['exports'] = {'.': export_path}
+            elif isinstance(exports, dict):
+              exports['.'] = exports.get('.') or export_path
+            package_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+
+          Path('.github/workflows/cwos-one-shot-api-error-exports.yml').unlink()
+          PY
+      - name: Synchronize lockfile and commit
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.15.0 --activate
+          pnpm install --lockfile-only
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps packages pnpm-lock.yaml .github/workflows/cwos-one-shot-api-error-exports.yml
+          git commit -m "fix(cwos): normalize coded errors and package exports"
+          git push origin HEAD:feat/customer-work-os-v1-full

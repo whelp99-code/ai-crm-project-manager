@@ -101,10 +101,9 @@ function status(error: CustomerWorkOsError): number {
   return 400;
 }
 
-function sendError(reply: FastifyReply, error: unknown): void {
+function sendError(reply: FastifyReply, error: unknown): FastifyReply {
   if (error instanceof CustomerWorkOsError) {
-    reply.code(status(error)).send({ error: error.code, message: error.message });
-    return;
+    return reply.code(status(error)).send({ error: error.code, message: error.message });
   }
   throw error;
 }
@@ -169,7 +168,7 @@ export async function registerDurableCustomerWorkOsRoutes(
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false");
       reply.code(result.statusCode).send(result.payload);
     } catch (error) {
-      sendError(reply, error);
+      return sendError(reply, error);
     }
   }
 
@@ -307,7 +306,7 @@ export async function registerDurableCustomerWorkOsRoutes(
       const requestHash = customerWorkOsPayloadHash({ route: "change.approve", workspaceId, principalId, requestId: change.id, body });
       const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operationId: "change.approve", operation: (service) => service.approveChangeRequest(workspaceId, change.id, expectedVersion, disposition, receipt), now: now() });
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false").code(result.statusCode).send(result.payload);
-    } catch (error) { sendError(reply, error); }
+    } catch (error) { return sendError(reply, error); }
   });
 
   app.post<{ Params: { requestId: string } }>("/api/cwos/change-requests/:requestId/apply", async (request, reply) => {
@@ -334,7 +333,7 @@ export async function registerDurableCustomerWorkOsRoutes(
       const requestHash = customerWorkOsPayloadHash({ route: "po.approve", workspaceId, principalId, orderId: order.id, body });
       const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operationId: "purchase_order.approve", operation: (service) => service.approvePurchaseOrder(workspaceId, order.id, expectedVersion, receipt), now: now() });
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false").code(result.statusCode).send(result.payload);
-    } catch (error) { sendError(reply, error); }
+    } catch (error) { return sendError(reply, error); }
   });
 
   app.post<{ Params: { orderId: string } }>("/api/cwos/purchase-orders/:orderId/ordered", async (request, reply) => {
@@ -365,7 +364,7 @@ export async function registerDurableCustomerWorkOsRoutes(
       const requestHash = customerWorkOsPayloadHash({ route: "finance.item.create", workspaceId, principalId, body });
       const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operationId: "finance.item.create", operation: (service) => service.addFinancialItem(input), now: now() });
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false").code(result.statusCode).send(result.payload);
-    } catch (error) { sendError(reply, error); }
+    } catch (error) { return sendError(reply, error); }
   });
 
   app.post("/api/cwos/settlements", async (request, reply) => {
@@ -381,7 +380,7 @@ export async function registerDurableCustomerWorkOsRoutes(
       const requestHash = customerWorkOsPayloadHash({ route: "finance.settlement.record", workspaceId, principalId, body });
       const result = await manager.mutate({ workspaceId, principalId, idempotencyKey, requestHash, operationId: "finance.settlement.record", operation: (service) => service.recordSettlement(settlement), now: now() });
       reply.header("x-idempotent-replay", result.replayed ? "true" : "false").code(result.statusCode).send(result.payload);
-    } catch (error) { sendError(reply, error); }
+    } catch (error) { return sendError(reply, error); }
   });
 
   app.post<{ Params: { engagementId: string } }>("/api/cwos/engagements/:engagementId/transition", async (request, reply) => {
@@ -408,7 +407,7 @@ export async function registerDurableCustomerWorkOsRoutes(
           generatedAt: now(),
         };
       });
-    } catch (error) { sendError(reply, error); return undefined; }
+    } catch (error) { return sendError(reply, error); }
   });
 
   app.get<{ Params: { engagementId: string } }>("/api/cwos/engagements/:engagementId", async (request, reply) => {
@@ -417,7 +416,7 @@ export async function registerDurableCustomerWorkOsRoutes(
       const principalId = header(request, "x-principal-id");
       await verifyIdentity(workspaceId, principalId, false);
       return await manager.read(workspaceId, (service) => service.getEngagementSnapshot(workspaceId, request.params.engagementId));
-    } catch (error) { sendError(reply, error); return undefined; }
+    } catch (error) { return sendError(reply, error); }
   });
 
   app.get<{ Params: { engagementId: string } }>("/api/cwos/engagements/:engagementId/finance", async (request, reply) => {
@@ -426,8 +425,9 @@ export async function registerDurableCustomerWorkOsRoutes(
       const principalId = header(request, "x-principal-id");
       await verifyIdentity(workspaceId, principalId, false);
       return await manager.read(workspaceId, (service) => service.financeSummary(workspaceId, request.params.engagementId));
-    } catch (error) { sendError(reply, error); return undefined; }
+    } catch (error) { return sendError(reply, error); }
   });
+
 
   return manager;
 }
