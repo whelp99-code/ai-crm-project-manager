@@ -60,7 +60,17 @@ jobs:
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
           sudo apt-get update
           sudo apt-get install -y postgresql-client-16
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+          export PATH="/usr/lib/postgresql/16/bin:$PATH"
+          command -v psql
+          command -v pg_dump
+          command -v pg_restore
           psql --version
+          pg_dump --version
+          pg_restore --version
+          test "$(psql --version | grep -oE '[0-9]+' | head -1)" = 16
+          test "$(pg_dump --version | grep -oE '[0-9]+' | head -1)" = 16
+          test "$(pg_restore --version | grep -oE '[0-9]+' | head -1)" = 16
 
       - name: Test @ai-crm/persistence
         run: pnpm --filter @ai-crm/persistence test
