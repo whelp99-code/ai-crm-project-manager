@@ -1,9 +1,5 @@
-import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { createServer } from "node:http";
-import { createServer as createTlsServer } from "node:https";
-import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, watch, writeFileSync, writeSync } from "node:fs";
-import { pipeline } from "node:stream/promises";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, watch, writeFileSync, writeSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
@@ -67,11 +63,11 @@ export function saveState(root, state) {
   renameSync(temporary, join(root, "state.json"));
 }
 
-async function main() {
+export async function main(commandName = process.argv[2], commandArgs = process.argv.slice(3)) {
   const root = process.env.CRM_TEST_ROOT;
   if (!root?.startsWith("/tmp/crm-deploy-test-")) throw new Error("sandbox required");
   const fixture = JSON.parse(readFileSync(join(root, "fixture.json"), "utf8"));
-  const [name, ...args] = process.argv.slice(2);
+  const [name, ...args] = [commandName, ...commandArgs];
   const contender = process.env.CRM_TEST_CONTENDER === "1";
   const state = JSON.parse(readFileSync(join(root, "state.json"), "utf8"));
   writeFileSync(join(root, `child-${process.pid}`), name);
@@ -256,6 +252,8 @@ async function main() {
     } } : {}) });
     if (fixture.realPg && (args.includes("pg_dump") || args.includes("pg_dumpall"))) {
       if (args.includes("pg_dump")) writeFileSync(join(root, "dump-snapshot.json"), JSON.stringify({ dbVersion: state.dbVersion }));
+      const { createReadStream } = await import("node:fs");
+      const { pipeline } = await import("node:stream/promises");
       await pipeline(createReadStream(args.includes("pg_dump") ? fixture.realPg.dumpPath : fixture.realPg.rolesPath), process.stdout);
       return 0;
     }
@@ -298,6 +296,7 @@ async function main() {
         process.kill(process.ppid, fixture.signal);
         return new Promise(() => {});
       }
+      const { createHash } = await import("node:crypto");
       const hash = createHash("sha256");
       let bytes = 0;
       for await (const chunk of process.stdin) { bytes += chunk.length; hash.update(chunk); }
@@ -337,6 +336,7 @@ async function main() {
       return 0;
     }
     if (args.includes("pg_restore")) {
+      const { createHash } = await import("node:crypto");
       const hash = createHash("sha256");
       let bytes = 0;
       for await (const chunk of process.stdin) { bytes += chunk.length; hash.update(chunk); }
@@ -366,6 +366,7 @@ async function main() {
         if (code !== 0) throw new Error("fixture TLS certificate generation failed");
       }
       const requests = [];
+      const { createServer: createTlsServer } = await import("node:https");
       const server = createTlsServer({ key: readFileSync(key), cert: readFileSync(cert) }, (request, response) => {
         requests.push({ path: request.url, method: request.method,
           credentialSent: Boolean(request.headers.authorization || request.headers.cookie || request.headers["x-api-key"]) });
@@ -421,6 +422,7 @@ async function main() {
       || fixture.coldRollbackUrls?.includes(url) || fixture.legacyHttp && legacySurface)
       && !url.endsWith(fixture.rollbackHttpFailure ?? "\0")) {
       const requests = [];
+      const { createServer } = await import("node:http");
       const server = createServer((request, response) => {
         requests.push(request.url);
         const reply = legacySurface ? legacyReply(request.url)
