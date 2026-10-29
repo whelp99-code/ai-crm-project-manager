@@ -6,7 +6,7 @@ const rateSchema = z.object({
   lockoutUntil: z.number().finite().nonnegative(),
   failures: z.number().int().nonnegative(),
   globalHits: z.array(z.number().finite().nonnegative()),
-  perIp: z.record(z.array(z.number().finite().nonnegative())),
+  perIp: z.record(z.string(), z.array(z.number().finite().nonnegative())),
 });
 
 /** CRM-owned bcrypt record; legacy KDF files require explicit offline enrollment. */
