@@ -85,10 +85,10 @@ export function DocumentDraftClient() {
   useEffect(() => {
     const connectSession = async () => {
       const response = await fetch("/api/self-entry", { cache: "no-store", signal: AbortSignal.timeout(10_000) });
-      if (!response.ok) throw new Error("현재 로그인 세션을 확인하지 못했습니다. 다시 로그인해 주세요.");
-      const session: unknown = await response.json();
-      if (!object(session) || typeof session.csrf !== "string") throw new Error("로그인 세션 응답이 올바르지 않습니다.");
-      setCsrf(session.csrf);
+      if (response.ok) {
+        const session: unknown = await response.json();
+        if (object(session) && typeof session.csrf === "string") setCsrf(session.csrf);
+      }
       await load();
     };
     void connectSession().catch((caught: unknown) => setError(caught instanceof Error ? caught.message : "초안을 불러오지 못했습니다."));

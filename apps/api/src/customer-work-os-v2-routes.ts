@@ -19,6 +19,7 @@ import {
 } from "./customer-work-os-v2-runtime.js";
 import { readNormalizedBusinessProjection } from "./customer-work-os-v2-normalized-projection.js";
 import { OperatorStepUpError, type OperatorStepUpService } from "./operator-step-up.js";
+import { loginDisabledLoopbackRead } from "./login-disabled.js";
 import { contractTermsSchema, renewalDraftRequestSchema } from "./customer-work-os-v2-document-schemas.js";
 
 export interface CustomerWorkOsV2ActorBinding {
@@ -165,6 +166,30 @@ function optionalHeader(request: FastifyRequest, name: string): string | undefin
   return text.trim();
 }
 
+function peerAddress(request: FastifyRequest): string | undefined {
+  const socketAddress = request.socket?.remoteAddress;
+  return typeof socketAddress === "string" && socketAddress.length > 0 ? socketAddress : request.ip;
+}
+
+function loginDisabledRead(request: FastifyRequest, binding?: V2Actor): boolean {
+  return loginDisabledLoopbackRead({
+    flag: process.env.CWOS_LOGIN_DISABLED,
+    method: request.method,
+    peerAddress: peerAddress(request),
+    binding,
+  });
+}
+
+function requireHumanRead(request: FastifyRequest, actor: V2Actor, binding: V2Actor | undefined, stepUp?: OperatorStepUpService): void {
+  if (loginDisabledRead(request, binding)) {
+    if (actor.kind !== "human") throw new CustomerWorkOsV2Error("HUMAN_REQUIRED", "a human principal is required");
+    return;
+  }
+  if (actor.kind !== "human" || !actor.stepUpVerified || !stepUp) {
+    throw new CustomerWorkOsV2Error("STEP_UP_REQUIRED", "fresh admitted operator proof is required");
+  }
+}
+
 /** Bind the CWOS actor from headers in dev, or from authenticated server config in API-key mode. */
 function actor(request: FastifyRequest, binding?: V2Actor, stepUp?: OperatorStepUpService): V2Actor {
   const claimedKind = header(request, "x-principal-kind") as PrincipalKind;
@@ -195,13 +220,17 @@ function actor(request: FastifyRequest, binding?: V2Actor, stepUp?: OperatorStep
     if (botId && binding.kind === "human") {
       throw new CustomerWorkOsV2Error("HUMAN_SPOOF", "bot clients cannot bind a human principal");
     }
-    return stepUp ? {
-      ...binding,
-      stepUpVerified: stepUp.authorize({
-        cookieHeader: optionalHeader(request, "cookie"),
-        csrfHeader: optionalHeader(request, "x-csrf-token"), method: request.method,
-      }),
-    } : { ...binding };
+    const readWithoutLogin = loginDisabledRead(request, binding);
+    if (stepUp && !readWithoutLogin) {
+      return {
+        ...binding,
+        stepUpVerified: stepUp.authorize({
+          cookieHeader: optionalHeader(request, "cookie"),
+          csrfHeader: optionalHeader(request, "x-csrf-token"), method: request.method,
+        }),
+      };
+    }
+    return readWithoutLogin ? { ...binding, stepUpVerified: false } : { ...binding };
   }
 
   if (botId && claimedKind === "human") {
@@ -496,9 +525,7 @@ export function registerCustomerWorkOsV2Routes(
   app.get("/api/cwos/v2/mail-candidate-review", async (request, reply) => {
     try {
       const authenticatedActor = actor(request, options.actorBinding, options.operatorStepUp);
-      if (authenticatedActor.kind !== "human" || !authenticatedActor.stepUpVerified || !options.operatorStepUp) {
-        throw new CustomerWorkOsV2Error("STEP_UP_REQUIRED", "fresh admitted operator proof is required");
-      }
+      requireHumanRead(request, authenticatedActor, options.actorBinding, options.operatorStepUp);
       const envelope = await runtime.readAuthorized(authenticatedActor);
       const pool = options.normalizedProjectionPool ?? (rawPool ? scopedPool(rawPool) : undefined);
       if (!pool?.withWorkspaceScope) throw new CustomerWorkOsV2Error("NORMALIZED_STORAGE_REQUIRED", "workspace-scoped accounts require PostgreSQL");
@@ -571,9 +598,7 @@ export function registerCustomerWorkOsV2Routes(
   app.get("/api/cwos/v2/document-drafts", async (request, reply) => {
     try {
       const owner = actor(request, options.actorBinding, options.operatorStepUp);
-      if (owner.kind !== "human" || !owner.stepUpVerified || !options.operatorStepUp) {
-        throw new CustomerWorkOsV2Error("STEP_UP_REQUIRED", "fresh admitted operator proof is required");
-      }
+      requireHumanRead(request, owner, options.actorBinding, options.operatorStepUp);
       const envelope = await runtime.readAuthorized(owner);
       if (Object.keys(body(request.query)).length > 0) {
         const selection = comparisonQuerySchema.safeParse(request.query);

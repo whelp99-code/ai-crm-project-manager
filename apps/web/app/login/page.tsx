@@ -1,3 +1,6 @@
+import { headers } from "next/headers";
+import { redirect } from "next/navigation";
+import { loginDisabledReadFromEnv } from "../lib/login-disabled";
 import { selfEntryConfiguration } from "../self-entry-server";
 import { SelfEntryForm } from "./self-entry-form";
 import styles from "./self-entry-form.module.css";
@@ -7,6 +10,8 @@ export const dynamic = "force-dynamic";
 export default async function LoginPage({
   searchParams,
 }: Readonly<{ searchParams: Promise<Readonly<Record<string, string | string[] | undefined>>> }>) {
+  const headerList = await headers();
+  if (loginDisabledReadFromEnv(headerList.get("host"), headerList.get("x-forwarded-host"))) redirect("/");
   const configuration = selfEntryConfiguration();
   const query = await searchParams;
   return (
