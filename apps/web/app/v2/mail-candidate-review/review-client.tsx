@@ -153,12 +153,12 @@ export function MailCandidateReviewClient() {
   useEffect(() => {
     const connect = async () => {
       const response = await fetch("/api/self-entry", { cache: "no-store", signal: AbortSignal.timeout(10_000) });
-      if (!response.ok) throw new Error("현재 로그인 세션을 확인하지 못했습니다. 다시 로그인해 주세요.");
-      const proof: unknown = await response.json();
-      if (!object(proof) || typeof proof.csrf !== "string" || typeof proof.expiresAt !== "string") {
-        throw new Error("로그인 세션 응답이 올바르지 않습니다.");
+      if (response.ok) {
+        const proof: unknown = await response.json();
+        if (object(proof) && typeof proof.csrf === "string" && typeof proof.expiresAt === "string") {
+          setCsrf(proof.csrf); setExpiresAt(proof.expiresAt);
+        }
       }
-      setCsrf(proof.csrf); setExpiresAt(proof.expiresAt);
       await load();
     };
     void connect().catch((failure: unknown) => setError(failure instanceof Error ? failure.message : "목록 연결 실패"))
