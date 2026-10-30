@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 
 type JobView = {
   job: { id: string; status: string; rawText?: string; createdByPrincipalId?: string };
@@ -15,37 +15,27 @@ type JobView = {
   }>;
 };
 
-type Props = {
-  apiBase: string;
-  workspaceId: string;
-  defaultPrincipalId: string;
-};
+async function csrfToken(): Promise<string> {
+  const response = await fetch("/api/self-entry", { cache: "no-store" });
+  if (!response.ok) throw new Error("현재 로그인 세션을 확인하지 못했습니다. 다시 로그인해 주세요.");
+  const body: unknown = await response.json();
+  if (body === null || typeof body !== "object" || !("csrf" in body) || typeof body.csrf !== "string") {
+    throw new Error("로그인 세션 응답이 올바르지 않습니다.");
+  }
+  return body.csrf;
+}
 
-export function WorkClient({ apiBase, workspaceId, defaultPrincipalId }: Props) {
+export function WorkClient() {
   const [text, setText] = useState("");
-  const [principalId, setPrincipalId] = useState(defaultPrincipalId);
   const [idempotencyKey, setIdempotencyKey] = useState(() => `web-${Date.now()}`);
   const [jobId, setJobId] = useState<string | null>(null);
   const [job, setJob] = useState<JobView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const headers = useCallback(() => {
-    return {
-      "content-type": "application/json",
-      "x-workspace-id": workspaceId,
-      "x-principal-id": principalId,
-    };
-  }, [workspaceId, principalId]);
-
   async function refreshJob(id: string) {
-    const response = await fetch(`${apiBase}/api/agent/jobs/${id}`, {
-      headers: headers(),
-      cache: "no-store",
-    });
-    if (!response.ok) {
-      throw new Error(`job ${response.status}`);
-    }
+    const response = await fetch(`/api/agent/jobs/${id}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(`job ${response.status}`);
     setJob((await response.json()) as JobView);
   }
 
@@ -54,18 +44,13 @@ export function WorkClient({ apiBase, workspaceId, defaultPrincipalId }: Props) 
     setBusy(true);
     setError(null);
     try {
-      const response = await fetch(`${apiBase}/api/agent/commands`, {
+      const response = await fetch("/api/agent/commands", {
         method: "POST",
-        headers: {
-          ...headers(),
-          "idempotency-key": idempotencyKey,
-        },
+        headers: { "content-type": "application/json", "idempotency-key": idempotencyKey, "x-csrf-token": await csrfToken() },
         body: JSON.stringify({ text }),
       });
-      const body = (await response.json()) as { jobId?: string; error?: string; message?: string };
-      if (!response.ok) {
-        throw new Error(body.error ?? body.message ?? `command ${response.status}`);
-      }
+      const body = (await response.json()) as { jobId?: string; error?: string };
+      if (!response.ok) throw new Error(body.error ?? `command ${response.status}`);
       if (!body.jobId) throw new Error("missing jobId");
       setJobId(body.jobId);
       await refreshJob(body.jobId);
@@ -82,9 +67,9 @@ export function WorkClient({ apiBase, workspaceId, defaultPrincipalId }: Props) 
     setBusy(true);
     setError(null);
     try {
-      const response = await fetch(`${apiBase}/api/agent/jobs/${jobId}/cancel`, {
+      const response = await fetch(`/api/agent/jobs/${jobId}/cancel`, {
         method: "POST",
-        headers: headers(),
+        headers: { "x-csrf-token": await csrfToken() },
       });
       if (!response.ok) {
         const body = (await response.json()) as { error?: string };
@@ -103,18 +88,9 @@ export function WorkClient({ apiBase, workspaceId, defaultPrincipalId }: Props) 
       <section className="panel panel-action" aria-labelledby="command-title">
         <h2 id="command-title">자연어 명령</h2>
         <p className="meta">
-          요청은 Fastify <code>/api/agent/commands</code> 로만 전달됩니다. Next Route Handler mutation은 사용하지 않습니다.
+          저장과 재조회는 로그인 세션의 같은 origin에서 기존 내부 loopback <code>/api/agent/commands</code> 로만 전달됩니다.
         </p>
         <form onSubmit={onSubmit} className="stack" style={{ gap: 12 }}>
-          <label>
-            <span className="meta">운영자 principal</span>
-            <input
-              value={principalId}
-              onChange={(e) => setPrincipalId(e.target.value)}
-              required
-              style={{ display: "block", width: "100%", marginTop: 4, padding: 8 }}
-            />
-          </label>
           <label>
             <span className="meta">명령 텍스트</span>
             <textarea
@@ -140,7 +116,7 @@ export function WorkClient({ apiBase, workspaceId, defaultPrincipalId }: Props) 
               {busy ? "전송 중…" : "명령 전송"}
             </button>
             {jobId ? (
-              <button type="button" disabled={busy} onClick={() => void refreshJob(jobId)}>
+              <button type="button" disabled={busy} onClick={() => void refreshJob(jobId).catch((err: unknown) => setError(err instanceof Error ? err.message : "job failed"))}>
                 새로고침
               </button>
             ) : null}
