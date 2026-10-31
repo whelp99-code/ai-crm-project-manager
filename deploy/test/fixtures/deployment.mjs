@@ -106,7 +106,74 @@ export async function withDeployment(options, inspect) {
       symlinkSync(fixture.originalCwds[unit], join(root, "proc", String(pid), "cwd"));
     }
     saveState(root, state);
-    for (const name of ["git", "systemctl", "journalctl", "docker", "curl", "pnpm"]) {
+    // systemctl show/is-active is on the rollback hot path. Starting Node for each call
+    // took the identity rollback tests from 1.3s to 3.5s locally and past Vitest's 5s on CI.
+    writeFileSync(join(root, "bin/systemctl"), `#!/bin/bash
+node=${JSON.stringify(node)}
+commands=${JSON.stringify(commands)}
+case "$CRM_TEST_ROOT" in
+  /tmp/crm-deploy-test-*) ;;
+  *) exec "$node" "$commands" systemctl "$@" ;;
+esac
+if [[ $# -eq 5 && "$1" == --user && "$2" == show && "$4" == --property=MainPID && "$5" == --value && "$3" =~ ^core5-(api|web|review-ui)$ ]]; then
+  state=$(<"$CRM_TEST_ROOT/state.json")
+  pattern='"'"$3"'":\\{("pid":([0-9]+),"active":(true|false)|"active":(true|false),"pid":([0-9]+))'
+  if [[ "$state" =~ $pattern ]]; then
+    contender=false
+    [[ "$CRM_TEST_CONTENDER" == 1 ]] && contender=true
+    printf %s systemctl > "$CRM_TEST_ROOT/child-$$"
+    printf '{"name":"systemctl","args":["--user","show","%s","--property=MainPID","--value"],"contender":%s}' "$3" "$contender" > "$CRM_TEST_ROOT/event-$$.json"
+    printf '%s\\n' "\${BASH_REMATCH[2]:-\${BASH_REMATCH[5]}}"
+    exit 0
+  fi
+elif [[ $# -eq 5 && "$1" == --user && "$2" == show && "$3" =~ ^core5-(api|web|review-ui)$ && "$4" == --property=WorkingDirectory && "$5" == --value ]]; then
+  unit="$3"
+  cwd=""
+  shopt -s nullglob
+  files=("$CRM_TEST_ROOT/units/$unit.service" $(printf '%s\\n' "$CRM_TEST_ROOT/units/$unit.service.d/"*.conf | sort))
+  shopt -u nullglob
+  unsupported=0
+  for file in "\${files[@]}"; do
+    [[ -r "$file" ]] || { unsupported=1; break; }
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ "$line" == WorkingDirectory=* ]] || continue
+      value="\${line#WorkingDirectory=}"
+      if [[ "\${value:0:1}" == '"' && "\${value: -1}" == '"' ]]; then
+        value="\${value:1:\${#value}-2}"
+        [[ "$value" == *\\\\* || "$value" == *'"'* ]] && { unsupported=1; break; }
+      elif [[ "$value" == *'"'* || "$value" == *' '* ]]; then
+        unsupported=1
+        break
+      fi
+      [[ "$value" == /* ]] || { unsupported=1; break; }
+      cwd="$value"
+    done < "$file"
+    [[ "$unsupported" -eq 0 ]] || break
+  done
+  if [[ "$unsupported" -eq 0 && -n "$cwd" && \${#files[@]} -gt 0 ]]; then
+    contender=false
+    [[ "$CRM_TEST_CONTENDER" == 1 ]] && contender=true
+    printf %s systemctl > "$CRM_TEST_ROOT/child-$$"
+    printf '{"name":"systemctl","args":["--user","show","%s","--property=WorkingDirectory","--value"],"contender":%s}' "$unit" "$contender" > "$CRM_TEST_ROOT/event-$$.json"
+    printf '%s\\n' "$cwd"
+    exit 0
+  fi
+fi
+if [[ $# -eq 4 && "$1" == --user && "$2" == is-active && "$3" == --quiet && "$4" =~ ^core5-(api|web|review-ui)$ ]]; then
+  state=$(<"$CRM_TEST_ROOT/state.json")
+  pattern='"'"$4"'":\\{("pid":[0-9]+,"active":(true|false)|"active":(true|false),"pid":[0-9]+)'
+  if [[ "$state" =~ $pattern ]]; then
+    contender=false
+    [[ "$CRM_TEST_CONTENDER" == 1 ]] && contender=true
+    printf %s systemctl > "$CRM_TEST_ROOT/child-$$"
+    printf '{"name":"systemctl","args":["--user","is-active","--quiet","%s"],"contender":%s}' "$4" "$contender" > "$CRM_TEST_ROOT/event-$$.json"
+    active="\${BASH_REMATCH[2]:-\${BASH_REMATCH[3]}}"
+    [[ "$active" == true ]] && exit 0 || exit 3
+  fi
+fi
+exec "$node" "$commands" systemctl "$@"
+`, { mode: 0o755 });
+    for (const name of ["git", "journalctl", "docker", "curl", "pnpm"]) {
       writeFileSync(join(root, "bin", name),
         `#!/bin/sh\nCRM_TEST_ROOT=${JSON.stringify(root)} exec ${JSON.stringify(node)} ${JSON.stringify(commands)} ${name} "$@"\n`, { mode: 0o755 });
     }

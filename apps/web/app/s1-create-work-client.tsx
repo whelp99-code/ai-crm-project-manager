@@ -13,9 +13,6 @@ type Props = {
 };
 
 export function S1CreateWorkClient({
-  apiBase,
-  workspaceId,
-  principalId,
   customerId,
   customerName,
   projectId,
@@ -29,6 +26,12 @@ export function S1CreateWorkClient({
     setBusy(true);
     setError(null);
     try {
+      const session = await fetch("/api/self-entry", { cache: "no-store" });
+      if (!session.ok) throw new Error("현재 로그인 세션을 확인하지 못했습니다. 다시 로그인해 주세요.");
+      const proof: unknown = await session.json();
+      if (proof === null || typeof proof !== "object" || !("csrf" in proof) || typeof proof.csrf !== "string") {
+        throw new Error("로그인 세션 응답이 올바르지 않습니다.");
+      }
       const resourceType = projectId ? "project" : "customer";
       const resourceId = projectId ?? customerId;
       const actionHint = nextActionTitle?.trim()
@@ -39,13 +42,12 @@ export function S1CreateWorkClient({
           0,
           500,
         );
-      const response = await fetch(`${apiBase}/api/agent/commands`, {
+      const response = await fetch("/api/agent/commands", {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-workspace-id": workspaceId,
-          "x-principal-id": principalId,
           "idempotency-key": `s1-360-${customerId}-${Date.now()}`,
+          "x-csrf-token": proof.csrf,
         },
         body: JSON.stringify({
           text,
@@ -55,10 +57,9 @@ export function S1CreateWorkClient({
       const body = (await response.json()) as {
         jobId?: string;
         error?: string;
-        message?: string;
       };
       if (!response.ok) {
-        throw new Error(body.error ?? body.message ?? `command ${response.status}`);
+        throw new Error(body.error ?? `command ${response.status}`);
       }
       if (!body.jobId) throw new Error("missing jobId");
       setJobId(body.jobId);

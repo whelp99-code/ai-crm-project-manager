@@ -5,9 +5,6 @@ export const dynamic = "force-dynamic";
 export default function WorkPage() {
   const apiBase = process.env.API_BASE_URL ?? process.env.NEXT_PUBLIC_API_BASE_URL;
   const workspaceId = process.env.WORKSPACE_ID ?? process.env.NEXT_PUBLIC_WORKSPACE_ID;
-  const defaultPrincipalId =
-    process.env.OPERATOR_PRINCIPAL_ID ?? process.env.NEXT_PUBLIC_OPERATOR_PRINCIPAL_ID ?? "operator-1";
-
   if (!apiBase || !workspaceId) {
     return (
       <section className="error" aria-labelledby="unavailable-title">
@@ -29,7 +26,7 @@ export default function WorkPage() {
           <a href="/">고객 개요</a> · <a href="/approvals">승인 인박스</a>
         </p>
       </header>
-      <WorkClient apiBase={apiBase} workspaceId={workspaceId} defaultPrincipalId={defaultPrincipalId} />
+      <WorkClient />
     </>
   );
 }
