@@ -3,7 +3,9 @@ import { selfEntryConfiguration, verifySelfEntry } from "./app/self-entry-server
 
 export async function middleware(request: NextRequest) {
   const path = request.nextUrl.pathname;
-  if (path === "/login" || path === "/api/self-entry" || path === "/api/self-entry/logout") return NextResponse.next();
+  if (path === "/login" || path === "/login/enroll"
+    || path === "/api/self-entry" || path === "/api/self-entry/logout"
+    || path === "/api/self-entry/enroll") return NextResponse.next();
   const configuration = selfEntryConfiguration();
   const verified = await verifySelfEntry(request.headers.get("cookie") ?? "", configuration);
   if (verified.status === 200) return NextResponse.next();
