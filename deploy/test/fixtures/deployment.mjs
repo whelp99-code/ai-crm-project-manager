@@ -106,6 +106,8 @@ export async function withDeployment(options, inspect) {
       symlinkSync(fixture.originalCwds[unit], join(root, "proc", String(pid), "cwd"));
     }
     saveState(root, state);
+    // systemctl show/is-active is on the rollback hot path. Starting Node for each call
+    // took the identity rollback tests from 1.3s to 3.5s locally and past Vitest's 5s on CI.
     writeFileSync(join(root, "bin/systemctl"), `#!/bin/bash
 node=${JSON.stringify(node)}
 commands=${JSON.stringify(commands)}
@@ -173,7 +175,7 @@ exec "$node" "$commands" systemctl "$@"
 `, { mode: 0o755 });
     for (const name of ["git", "journalctl", "docker", "curl", "pnpm"]) {
       writeFileSync(join(root, "bin", name),
-        `#!${node}\nprocess.env.CRM_TEST_ROOT=${JSON.stringify(root)};\nconst { main } = await import(${JSON.stringify(commands)});\nmain(${JSON.stringify(name)}, process.argv.slice(2)).then(code => { process.exitCode = code; }).catch(error => { process.stderr.write(\`FIXTURE_COMMAND_FAILED \${error.message}\\n\`); process.exitCode = 1; });\n`, { mode: 0o755 });
+        `#!/bin/sh\nCRM_TEST_ROOT=${JSON.stringify(root)} exec ${JSON.stringify(node)} ${JSON.stringify(commands)} ${name} "$@"\n`, { mode: 0o755 });
     }
     const humanBefore = readText(humanEnv), ownerBefore = readText(newAuth), oldBefore = readText(oldAuth);
     const env = { HOME: root, PATH: `${root}/bin:/usr/bin:/bin`, NODE_OPTIONS: `--import=${hooks}`,

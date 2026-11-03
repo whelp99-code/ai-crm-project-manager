@@ -1,7 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { viewerWriteDenial } from "../../../../self-entry-server";
 import { isSameOrigin, operatorCookie, ownerReviewRequest } from "../../../../lib/owner-review";
 
 export async function POST(request: NextRequest) {
+  const denied = viewerWriteDenial(request.headers.get("cookie") ?? "");
+  if (denied) return denied;
   if (!isSameOrigin(request)) {
     return NextResponse.json({ error: "OWNER_REVIEW_ORIGIN_REQUIRED" }, { status: 403 });
   }
@@ -15,6 +18,8 @@ export async function POST(request: NextRequest) {
     || input.cookie.length > 4096 || !/^[A-Za-z0-9_-]{24,128}$/.test(input.csrf)) {
     return NextResponse.json({ error: "INVALID_OWNER_PROOF" }, { status: 400 });
   }
+  const importedDenial = viewerWriteDenial(input.cookie);
+  if (importedDenial) return importedDenial;
   // The API verifies the signature, admitted owner, generation and expiry first.
   const validated = await ownerReviewRequest(request, { cookie: input.cookie, method: "GET" });
   if (validated.status !== 200) {

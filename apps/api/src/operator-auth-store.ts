@@ -21,18 +21,20 @@ export const operatorAuthRecordSchema = z.object({
 }).strict();
 
 export type OperatorAuthRecord = z.infer<typeof operatorAuthRecordSchema>;
+export const viewerAuthRecordSchema = operatorAuthRecordSchema.extend({ role: z.literal("viewer") }).strict();
+export type ViewerAuthRecord = z.infer<typeof viewerAuthRecordSchema>;
 export interface OperatorAuthStore {
-  read(): OperatorAuthRecord;
-  write(record: OperatorAuthRecord): void;
+  read(): OperatorAuthRecord | ViewerAuthRecord;
+  write(record: OperatorAuthRecord | ViewerAuthRecord): void;
 }
 
 /** One human-composition process owns this file, like the existing FileOwnerStore. */
 export class FileOperatorAuthStore implements OperatorAuthStore {
-  constructor(private readonly path: string) {
+  constructor(private readonly path: string, private readonly role: "owner" | "viewer" = "owner") {
     this.read();
   }
 
-  read(): OperatorAuthRecord {
+  read(): OperatorAuthRecord | ViewerAuthRecord {
     const fd = openSync(this.path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
       const stat = fstatSync(fd);
@@ -40,14 +42,14 @@ export class FileOperatorAuthStore implements OperatorAuthStore {
         throw new Error("[OPERATOR_AUTH_FILE_PRIVATE] existing private regular auth file required");
       }
       const input: unknown = JSON.parse(readFileSync(fd, "utf8"));
-      return operatorAuthRecordSchema.parse(input);
+      return (this.role === "viewer" ? viewerAuthRecordSchema : operatorAuthRecordSchema).parse(input);
     } finally {
       closeSync(fd);
     }
   }
 
-  write(record: OperatorAuthRecord): void {
-    const next = operatorAuthRecordSchema.parse(record);
+  write(record: OperatorAuthRecord | ViewerAuthRecord): void {
+    const next = (this.role === "viewer" ? viewerAuthRecordSchema : operatorAuthRecordSchema).parse(record);
     const temporary = `${this.path}.${randomUUID()}.tmp`;
     writeFileSync(temporary, `${JSON.stringify(next)}\n`, { mode: 0o600, flag: "wx" });
     renameSync(temporary, this.path);

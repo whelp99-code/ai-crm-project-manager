@@ -1,7 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { viewerWriteDenial } from "../../../../self-entry-server";
 import { isSameOrigin, operatorCookie, ownerReviewRequest } from "../../../../lib/owner-review";
 
 async function proxy(request: NextRequest, method: "GET" | "POST") {
+  const denied = method === "POST" ? viewerWriteDenial(request.headers.get("cookie") ?? "") : undefined;
+  if (denied) return denied;
   if (method === "POST" && !isSameOrigin(request)) {
     return NextResponse.json({ error: "OWNER_REVIEW_ORIGIN_REQUIRED" }, { status: 403 });
   }
