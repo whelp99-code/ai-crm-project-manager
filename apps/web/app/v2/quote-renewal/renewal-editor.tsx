@@ -57,7 +57,8 @@ function fieldsToTerms(fields: FormData, rows: number): ContractTerms {
   };
 }
 
-export function RenewalEditor({ contracts, drafts, runtimeVersion, csrf, onSaved, onCompare, compareBusy }: {
+export function RenewalEditor({ contracts, drafts, runtimeVersion, csrf, onSaved, onCompare, compareBusy, role }: {
+  role: "owner" | "viewer";
   contracts: ContractSource[]; drafts: SavedRenewal[]; runtimeVersion: number;
   csrf: string | null; onSaved: () => Promise<void>;
   onCompare: (renewalId: string, revisionId: string) => void;
@@ -115,7 +116,7 @@ export function RenewalEditor({ contracts, drafts, runtimeVersion, csrf, onSaved
     </select></label>
     {contracts.length === 0 && <p className={styles.muted}>등록된 계약이 없습니다. 보유한 기존 계약의 근거와 값을 직접 연결하세요. 계약을 새로 만들거나 원본을 변경하지 않습니다.</p>}
     {error && <p role="alert" className={styles.error}>{error}</p>}
-    {selected === "__manual" && !manualSource && <form onSubmit={connectSource} className={styles.panel}>
+    {role === "owner" && selected === "__manual" && !manualSource && <form onSubmit={connectSource} className={styles.panel}>
       <h3>기존 계약 자료</h3>
       <div className={styles.grid}>
         <label>기존 계약 식별자<input name="sourceId" required /></label>
@@ -143,7 +144,7 @@ export function RenewalEditor({ contracts, drafts, runtimeVersion, csrf, onSaved
         <p>{source.kind === "OWNER_INPUT" ? "직접 입력 자료 · 원본 검증 전" : `등록된 원본 버전 ${source.version}`}</p>
         <p>{source.terms.startDate ?? "시작일 미확인"} → {source.terms.endDate ?? "종료일 미확인"} · {krw(source.terms.valueKrw)}</p>
       </div>
-      <form key={key(source)} onSubmit={createRenewal} className={styles.panel}>
+      {role === "owner" && <form key={key(source)} onSubmit={createRenewal} className={styles.panel}>
         <h3>재계약 변경값</h3>
         <label>재계약 초안 이름<input name="revisionLabel" required /></label>
         <div className={styles.grid}>
@@ -165,7 +166,7 @@ export function RenewalEditor({ contracts, drafts, runtimeVersion, csrf, onSaved
         <label>재계약 조건 (한 줄에 하나)<textarea name="conditions" defaultValue={source.terms.conditions?.join("\n") ?? ""} /></label>
         <p className={styles.muted}>총 계약금액은 입력값입니다. 품목 단가 합계나 부가세를 임의로 추정하지 않습니다. 승인·발송은 하지 않습니다.</p>
         <button className={styles.primary} disabled={busy || !csrf}>{busy ? "저장 중…" : "재계약 초안 만들기"}</button>
-      </form>
+      </form>}
     </>}
     <section aria-labelledby="renewal-saved"><h3 id="renewal-saved">저장된 재계약 초안</h3>
       {drafts.length === 0 && <p>아직 재계약 초안이 없습니다.</p>}
