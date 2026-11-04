@@ -106,7 +106,7 @@ function buildDraft(input: W01QuoteDraftInput): W01QuoteDraft {
     }
     sourceIds.add(sourceId);
     lineIds.add(lineId);
-    if (!Number.isInteger(line.quantity) || line.quantity <= 0) {
+    if (!Number.isSafeInteger(line.quantity) || line.quantity <= 0) {
       throw new CustomerWorkOsError("INVALID_QUANTITY", `${lineId} quantity must be a positive integer`);
     }
     totalCost += integerKrw(line.unitCostKrw, `${lineId} unit cost`) * BigInt(line.quantity);
