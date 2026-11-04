@@ -9,14 +9,14 @@ import { operatorPasswordHash, operatorProofSignature, operatorTotpCode } from "
 import { OperatorStepUpService } from "../src/operator-step-up.js";
 import { parseOperatingConfig } from "../src/ops-boot.js";
 import { CustomerWorkOsV2RuntimeManager, InMemoryCwosV2StateStore, type V2PgQueryable } from "../src/customer-work-os-v2-runtime.js";
-import { verifySelfEntry, selfEntryConfiguration } from "../../web/app/self-entry-server";
-import { POST as reviewPost } from "../../web/app/api/cwos/v2/mail-candidate-review/route";
-import { POST as draftsPost } from "../../web/app/api/cwos/v2/document-drafts/route";
-import { POST as importPost } from "../../web/app/api/cwos/v2/review-session/route";
-import { POST as commandPost } from "../../web/app/api/agent/commands/route";
-import { GET as jobGet } from "../../web/app/api/agent/jobs/[id]/route";
-import { POST as cancelPost } from "../../web/app/api/agent/jobs/[id]/cancel/route";
-import { middleware } from "../../web/middleware";
+import { verifySelfEntry, selfEntryConfiguration } from "../../web/app/self-entry-server.js";
+import { POST as reviewPost } from "../../web/app/api/cwos/v2/mail-candidate-review/route.js";
+import { POST as draftsPost } from "../../web/app/api/cwos/v2/document-drafts/route.js";
+import { POST as importPost } from "../../web/app/api/cwos/v2/review-session/route.js";
+import { POST as commandPost } from "../../web/app/api/agent/commands/route.js";
+import { GET as jobGet } from "../../web/app/api/agent/jobs/[id]/route.js";
+import { POST as cancelPost } from "../../web/app/api/agent/jobs/[id]/cancel/route.js";
+import { middleware } from "../../web/middleware.js";
 
 const webRequire = createRequire(new URL("../../web/package.json", import.meta.url));
 const { NextRequest } = webRequire("next/server") as {
@@ -250,9 +250,9 @@ describe("web viewer write boundaries", () => {
     const state = vi.fn(React.useState);
     vi.doMock(webRequire.resolve("react"), () => ({ ...React, useState: state }));
     cleanups.push(() => { vi.doUnmock(webRequire.resolve("react")); });
-    const { MailCandidateReviewClient } = await import("../../web/app/v2/mail-candidate-review/review-client");
-    const { DocumentDraftClient } = await import("../../web/app/v2/quote-renewal/draft-client");
-    const { RenewalEditor } = await import("../../web/app/v2/quote-renewal/renewal-editor");
+    const { MailCandidateReviewClient } = await import("../../web/app/v2/mail-candidate-review/review-client.js");
+    const { DocumentDraftClient } = await import("../../web/app/v2/quote-renewal/draft-client.js");
+    const { RenewalEditor } = await import("../../web/app/v2/quote-renewal/renewal-editor.js");
     const candidate = { id: "fixture-candidate", summary: "Fixture mail", senderCompany: null,
       receivedAt: null, createdAt: "2026-10-09T00:00:00Z", evidenceUrl: null, sourceLocator: "gmail://fixture", history: [] };
     const reviewData = { workspaceId, runtimeVersion: 1, accounts: [], candidates: [
