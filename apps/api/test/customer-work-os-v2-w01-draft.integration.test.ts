@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { V2Actor } from "@ai-crm/domain/customer-work-os-v2";
+import { createStandaloneCustomerWorkOsV2App } from "../src/customer-work-os-v2-routes.js";
 import {
   CustomerWorkOsV2RuntimeManager,
   InMemoryCwosV2StateStore,
@@ -46,6 +47,98 @@ const w01Payload = {
 };
 
 describe("W01 v2 authorized draft persistence", () => {
+  it("rejects unsafe raw JSON quantities through app.inject with unchanged state and audit", async () => {
+    const store = new InMemoryCwosV2StateStore();
+    const runtime = new CustomerWorkOsV2RuntimeManager(store, () => "2026-10-06T00:00:00.000Z");
+    await runtime.command({
+      workspaceId, actor: owner, expectedVersion: 0, idempotencyKey: "http-quantity-principal",
+      command: "identity.registerPrincipal",
+      payload: { id: owner.principalId, kind: "human", displayName: "Fixture Owner", active: true },
+    });
+    await runtime.command({
+      workspaceId, actor: owner, expectedVersion: 1, idempotencyKey: "http-quantity-membership",
+      command: "identity.addMembership", payload: { id: "http-quantity-membership", principalId: owner.principalId },
+    });
+    const app = createStandaloneCustomerWorkOsV2App({ store, profile: "test", actorBinding: owner });
+    const headers = {
+      "content-type": "application/json", "x-principal-kind": owner.kind,
+      "x-principal-id": owner.principalId, "x-workspace-id": workspaceId,
+    };
+    const before = await runtime.read(workspaceId);
+    const auditBefore = structuredClone(store.auditLog(workspaceId));
+    try {
+      for (const [index, rawQuantity] of ["9007199254740992", "9007199254740993", "1.5", "0", "-1"].entries()) {
+        const parsedQuantity = JSON.parse(rawQuantity) as number;
+        const payload = {
+          ...w01Payload,
+          lines: w01Payload.lines.map(line => ({ ...line, quantity: parsedQuantity, unitCostKrw: "1", unitPriceKrw: "1" })),
+          vat: { netAmountKrw: String(parsedQuantity), vatAmountKrw: "0", grossAmountKrw: String(parsedQuantity) },
+        };
+        const response = await app.inject({
+          method: "POST", url: "/api/cwos/v2/commands",
+          headers: { ...headers, "idempotency-key": `http-quantity-${index}` },
+          payload: JSON.stringify({ expectedVersion: 2, command: "w01.quoteDraft", payload })
+            .replace(`"quantity":${parsedQuantity}`, `"quantity":${rawQuantity}`),
+        });
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toMatchObject({ error: "INVALID_QUANTITY" });
+        expect(await runtime.read(workspaceId)).toEqual(before);
+        expect(store.auditLog(workspaceId)).toEqual(auditBefore);
+      }
+      const quantity = Number.MAX_SAFE_INTEGER;
+      const net = (BigInt(quantity) * 3n).toString();
+      const request = {
+        method: "POST" as const, url: "/api/cwos/v2/commands",
+        headers: { ...headers, "idempotency-key": "http-quantity-safe" },
+        payload: {
+          expectedVersion: 2, command: "w01.quoteDraft",
+          payload: {
+            ...w01Payload,
+            lines: w01Payload.lines.map(line => ({ ...line, quantity, unitCostKrw: "2", unitPriceKrw: "3" })),
+            vat: { netAmountKrw: net, vatAmountKrw: "0", grossAmountKrw: net },
+          },
+        },
+      };
+      const accepted = await app.inject(request);
+      expect(accepted.statusCode).toBe(200);
+      expect(accepted.json().result.quote.totalPriceKrw).toBe(net);
+      expect(accepted.json().result.quote.totalCostKrw).toBe((BigInt(quantity) * 2n).toString());
+      const replay = await app.inject(request);
+      expect(replay.statusCode).toBe(200);
+      expect(replay.json()).toEqual(accepted.json());
+      expect(store.auditLog(workspaceId)).toHaveLength(auditBefore.length + 1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each(["9007199254740992", "9007199254740993"])("rejects JSON quantity %s through the generic native command without state changes", async (rawQuantity) => {
+    const store = new InMemoryCwosV2StateStore();
+    const runtime = new CustomerWorkOsV2RuntimeManager(store, () => "2026-10-06T00:00:00.000Z");
+    await runtime.command({
+      workspaceId, actor: owner, expectedVersion: 0, idempotencyKey: "quantity-principal",
+      command: "identity.registerPrincipal",
+      payload: { id: owner.principalId, kind: "human", displayName: "Fixture Owner", active: true },
+    });
+    await runtime.command({
+      workspaceId, actor: owner, expectedVersion: 1, idempotencyKey: "quantity-membership",
+      command: "identity.addMembership", payload: { id: "quantity-membership", principalId: owner.principalId },
+    });
+    const before = await runtime.read(workspaceId);
+    const quantity = JSON.parse(rawQuantity) as number;
+    expect(quantity).toBe(9007199254740992);
+    await expect(runtime.command({
+      workspaceId, actor: owner, expectedVersion: 2, idempotencyKey: "quantity-rejected",
+      command: "w01.quoteDraft",
+      payload: {
+        ...w01Payload,
+        lines: w01Payload.lines.map(line => ({ ...line, quantity, unitCostKrw: "1", unitPriceKrw: "1" })),
+        vat: { netAmountKrw: String(quantity), vatAmountKrw: "0", grossAmountKrw: String(quantity) },
+      },
+    })).rejects.toMatchObject({ code: "INVALID_QUANTITY" });
+    expect(await runtime.read(workspaceId)).toEqual(before);
+  });
+
   it("persists the measured unapproved draft as the authorized command idempotency result", async () => {
     const store = new InMemoryCwosV2StateStore();
     const runtime = new CustomerWorkOsV2RuntimeManager(store, () => "2026-10-06T00:00:00.000Z");
