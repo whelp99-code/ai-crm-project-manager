@@ -226,6 +226,20 @@ describe("viewer boot isolation", () => {
     expect(() => parseOperatingConfig({ ...ownerOnly, CWOS_V2_VIEWER_PRINCIPAL_ID: viewerId })).toThrow(/CONFIG_REQUIRED/);
     expect(() => parseOperatingConfig({ ...ownerOnly, CWOS_V2_VIEWER_AUTH_STATE_PATH: f.viewerPath })).toThrow(/CONFIG_REQUIRED/);
   });
+  it("refuses production human boot without viewer settings, then allows viewer login and read while rejecting writes", async () => {
+    const f = fixture();
+    const { CWOS_V2_VIEWER_AUTH_STATE_PATH: _path, CWOS_V2_VIEWER_PRINCIPAL_ID: _principal, ...ownerOnly } = f.env;
+    expect(() => parseOperatingConfig({ ...ownerOnly, NODE_ENV: "production" })).toThrow(/OPS_BOOT_VIEWER_REQUIRED/);
+    expect(parseOperatingConfig({ ...f.env, NODE_ENV: "production" }).viewer).toEqual({
+      principalId: viewerId, authStatePath: f.viewerPath,
+    });
+    await f.seed();
+    const proof = await f.login("viewer");
+    expect((await f.app.inject({ method: "GET", url: "/api/cwos/v2/mail-candidate-review", headers: proof.headers })).statusCode).toBe(200);
+    const denied = await f.app.inject({ method: "POST", url: "/api/cwos/v2/mail-candidate-review", headers: proof.headers, payload: {} });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toEqual({ error: "VIEWER_WRITE_FORBIDDEN" });
+  });
   it("rejects equal principals, equal paths, and hard links to the same auth file", () => {
     const f = fixture();
     expect(() => parseOperatingConfig({ ...f.env, CWOS_V2_VIEWER_PRINCIPAL_ID: principalId })).toThrow(/VIEWER_NOT_DISTINCT/);

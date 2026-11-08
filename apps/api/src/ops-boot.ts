@@ -163,6 +163,9 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
       }
       viewer = { principalId: viewerPrincipal, authStatePath: viewerPath };
     }
+    if (env.NODE_ENV === "production" && !viewer) {
+      throw new Error("[OPS_BOOT_VIEWER_REQUIRED] production human boot requires distinct viewer settings");
+    }
     const sessionSecretFile = required(env, "CWOS_V2_OPERATOR_SESSION_SECRET_FILE");
     const sessionSecret = privateTextFile(sessionSecretFile, "operator session secret");
     if (sessionSecret.length < 32) {
