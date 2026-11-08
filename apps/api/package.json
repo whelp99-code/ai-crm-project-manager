@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./src/app.ts",
   "scripts": {
-    "typecheck": "tsc -b --noEmit",
+    "typecheck": "tsc -b --noEmit && tsc -p tsconfig.viewer-role.json --noEmit",
     "test": "vitest run"
   },
   "dependencies": {

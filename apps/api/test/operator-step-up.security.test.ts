@@ -100,6 +100,8 @@ describe("production human password/TOTP step-up", () => {
       const proof = await stepUp(f);
       expect(proof.setCookie).toContain("HttpOnly");
       expect(proof.setCookie).toContain("SameSite=Strict");
+      const claims = JSON.parse(Buffer.from(proof.setCookie.split(".")[1] ?? "", "base64url").toString("utf8"));
+      expect(claims).toMatchObject({ role: "owner", principalId });
       expect(f.authStore.read()).toMatchObject({ generation: 2, lastTotpStep: 1 });
       expect(await f.store.load(workspaceId)).toBeUndefined();
     } finally { await f.app.close(); }

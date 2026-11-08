@@ -15,7 +15,7 @@ export function registerOperatorSession(app: FastifyInstance, auth: OperatorStep
       auth.authorize({
         cookieHeader: request.headers.cookie, csrfHeader: undefined, method: "GET",
       });
-      return reply.send({ authenticated: true });
+      return reply.send({ authenticated: true, role: auth.sessionRole(request.headers.cookie) });
     } catch (error) {
       if (error instanceof OperatorStepUpError) {
         return reply.status(error.statusCode).send({ error: error.code });

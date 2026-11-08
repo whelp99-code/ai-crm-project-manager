@@ -164,11 +164,33 @@ export async function verifySelfEntry(cookieHeader: string,
     if (upstream.status !== 200) return denial(upstream);
     const body: unknown = await upstream.json();
     if (body === null || typeof body !== "object" || !("authenticated" in body)
-      || body.authenticated !== true || Object.keys(body).length !== 1) {
+      || body.authenticated !== true || !("role" in body) || (body.role !== "owner" && body.role !== "viewer")
+      || Object.keys(body).length !== 2) {
       return response(502, { error: "SESSION_RESPONSE_INVALID" });
     }
-    return response(200, { authenticated: true });
+    return response(200, { authenticated: true, role: body.role });
   } catch { return response(502, { error: "AUTHENTICATION_UNAVAILABLE" }); }
+}
+
+/** Unverified claims may deny early, never grant authority. The API still verifies every proof. */
+export function viewerWriteDenial(cookieHeader: string): Response | undefined {
+  const cookie = operatorCookie(cookieHeader);
+  const payload = cookie?.split(".")[1];
+  if (!payload) return undefined;
+  try {
+    const claims: unknown = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+    if (claims !== null && typeof claims === "object" && "role" in claims && claims.role === "viewer") {
+      return response(403, { error: "VIEWER_WRITE_FORBIDDEN" });
+    }
+  } catch { /* Malformed proofs are rejected by the authenticated session gate. */ }
+  return undefined;
+}
+
+export async function selfEntryRole(cookieHeader: string): Promise<"owner" | "viewer"> {
+  const verified = await verifySelfEntry(cookieHeader);
+  if (verified.status !== 200) return "viewer";
+  const session: { role: "owner" | "viewer" } = await verified.json();
+  return session.role;
 }
 
 export async function logoutSelfEntry(request: Request,

@@ -19,6 +19,8 @@ export interface OperatingEnv {
   readonly CWOS_V2_OPERATOR_WORKSPACE_ID?: string;
   readonly CWOS_V2_OPERATOR_PRINCIPAL_ID?: string;
   readonly CWOS_V2_OPERATOR_AUTH_STATE_PATH?: string;
+  readonly CWOS_V2_VIEWER_AUTH_STATE_PATH?: string;
+  readonly CWOS_V2_VIEWER_PRINCIPAL_ID?: string;
   readonly CWOS_V2_OPERATOR_SESSION_SECRET_FILE?: string;
   readonly CWOS_V2_OPERATOR_STEP_UP_VERIFIED?: string;
   readonly CWOS_V2_MAIL_READER_PRINCIPAL_ID?: string;
@@ -41,6 +43,7 @@ export interface OperatingConfig {
   readonly apiKey: string;
   readonly principalId: string;
   readonly authStatePath?: string;
+  readonly viewer?: { readonly principalId: string; readonly authStatePath: string };
   readonly sessionSecret?: string;
   readonly proxySecret?: string;
   readonly mailAccountMasterRead?: true;
@@ -52,7 +55,7 @@ function required(env: OperatingEnv, name: keyof OperatingEnv): string {
   return value;
 }
 
-function privateFile(path: string, label: string): void {
+function privateFile(path: string, label: string): string {
   if (!isAbsolute(path)) throw new Error(`[OPS_BOOT_PRIVATE_FILE_INVALID] ${label} path must be absolute`);
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -60,6 +63,7 @@ function privateFile(path: string, label: string): void {
     if (!stat.isFile() || (stat.mode & 0o077) !== 0) {
       throw new Error(`[OPS_BOOT_PRIVATE_FILE_INVALID] ${label} must be a regular, non-symlink private file`);
     }
+    return `${stat.dev}:${stat.ino}`;
   } finally {
     closeSync(fd);
   }
@@ -85,7 +89,7 @@ function rejectInheritedOperatorIdentity(env: OperatingEnv): void {
   const forbidden = Object.keys(env).filter((name) => (
     name === "AUTH_API_KEY" ||
     name === "API_AUTH_TOKEN" ||
-    name.startsWith("CWOS_V2_OPERATOR_")
+    name.startsWith("CWOS_V2_OPERATOR_") || name.startsWith("CWOS_V2_VIEWER_")
   ));
   const inherited = forbidden.filter((name) => env[name]?.trim());
   if (inherited.length) {
@@ -144,7 +148,24 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
     }
     const principalId = required(env, "CWOS_V2_OPERATOR_PRINCIPAL_ID");
     const authStatePath = required(env, "CWOS_V2_OPERATOR_AUTH_STATE_PATH");
-    privateFile(authStatePath, "operator auth state");
+    const ownerFile = privateFile(authStatePath, "operator auth state");
+    let viewer: OperatingConfig["viewer"];
+    if (env.CWOS_V2_VIEWER_AUTH_STATE_PATH !== undefined || env.CWOS_V2_VIEWER_PRINCIPAL_ID !== undefined) {
+      const viewerPrincipal = required(env, "CWOS_V2_VIEWER_PRINCIPAL_ID");
+      const viewerPath = required(env, "CWOS_V2_VIEWER_AUTH_STATE_PATH");
+      if (viewerPrincipal === principalId || privateFile(viewerPath, "viewer auth state") === ownerFile) {
+        throw new Error("[OPS_BOOT_VIEWER_NOT_DISTINCT] viewer principal and auth file must differ from owner");
+      }
+      const ownerRecord = new FileOperatorAuthStore(authStatePath).read();
+      const viewerRecord = new FileOperatorAuthStore(viewerPath, "viewer").read();
+      if (ownerRecord.totpSecret === viewerRecord.totpSecret || ownerRecord.passwordHash === viewerRecord.passwordHash) {
+        throw new Error("[OPS_BOOT_VIEWER_FACTORS_NOT_DISTINCT] viewer factors must differ from owner");
+      }
+      viewer = { principalId: viewerPrincipal, authStatePath: viewerPath };
+    }
+    if (env.NODE_ENV === "production" && !viewer) {
+      throw new Error("[OPS_BOOT_VIEWER_REQUIRED] production human boot requires distinct viewer settings");
+    }
     const sessionSecretFile = required(env, "CWOS_V2_OPERATOR_SESSION_SECRET_FILE");
     const sessionSecret = privateTextFile(sessionSecretFile, "operator session secret");
     if (sessionSecret.length < 32) {
@@ -164,6 +185,7 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
       apiKey,
       principalId,
       authStatePath,
+      ...(viewer ? { viewer } : {}),
       ...(proxySecret ? { proxySecret } : {}),
       sessionSecret,
     };
@@ -245,6 +267,10 @@ export function createOperatingApp(
         sessionSecret: config.sessionSecret ?? "",
         ...(config.proxySecret ? { proxySecret: config.proxySecret } : {}),
         store: seams.store ?? new FileOperatorAuthStore(config.authStatePath ?? ""),
+        ...(config.viewer ? { viewer: {
+          principalId: config.viewer.principalId,
+          store: new FileOperatorAuthStore(config.viewer.authStatePath, "viewer"),
+        } } : {}),
         ...(seams.now ? { now: seams.now } : {}),
         }),
         customerWorkOsV2ActorBinding: {

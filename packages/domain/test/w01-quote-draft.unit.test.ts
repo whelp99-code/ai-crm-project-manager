@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CustomerWorkOsError } from "../src/customer-work-os.js";
-import { createW01QuoteDraftStore, readMountedTemplateMeasurement, renderQuoteDraftPreview, W01QuoteDraftAdapter, type W01QuoteDraftInput } from "../src/index.js";
+import { buildW01QuoteDraft, createW01QuoteDraftStore, readMountedTemplateMeasurement, renderQuoteDraftPreview, W01QuoteDraftAdapter, type W01QuoteDraftInput } from "../src/index.js";
 
 const input: W01QuoteDraftInput = {
   engagement: { id: "engagement", workspaceId: "workspace-1", version: 1 },
@@ -32,6 +32,60 @@ const input: W01QuoteDraftInput = {
 };
 
 describe("W01 quote draft adapter", () => {
+  it.each([
+    Number.MAX_SAFE_INTEGER + 1,
+    JSON.parse("9007199254740993") as number,
+    1.5, 0, -1, NaN, Infinity, -Infinity,
+  ])("rejects invalid quantity %s without changing stored drafts or receipts", (quantity) => {
+    const store = createW01QuoteDraftStore();
+    const adapter = new W01QuoteDraftAdapter(store);
+    adapter.draft(input, "existing");
+    const before = structuredClone(store);
+    const invalid = {
+      ...input,
+      lines: input.lines.map(line => ({ ...line, quantity, unitCostKrw: "1", unitPriceKrw: "1" })),
+      vat: { netAmountKrw: String(quantity), vatAmountKrw: "0", grossAmountKrw: String(quantity) },
+    };
+    expect(() => buildW01QuoteDraft(invalid)).toThrowError(expect.objectContaining({ code: "INVALID_QUANTITY" }));
+    expect(() => adapter.draft(invalid, "rejected")).toThrowError(expect.objectContaining({ code: "INVALID_QUANTITY" }));
+    expect(store).toEqual(before);
+  });
+
+  it("keeps exact BigInt cost, price and VAT totals at the safe quantity boundary", () => {
+    const quantity = Number.MAX_SAFE_INTEGER;
+    const net = BigInt(quantity) * 3n + 5n;
+    const cost = BigInt(quantity) * 2n + 4n;
+    const draft = buildW01QuoteDraft({
+      ...input,
+      lines: [
+        ...input.lines.map(line => ({ ...line, quantity, unitCostKrw: "2", unitPriceKrw: "3" })),
+        { id: "second", sourceId: "second", productId: "fixture", description: "fixture", quantity: 1, unitCostKrw: "4", unitPriceKrw: "5" },
+      ],
+      vat: { netAmountKrw: String(net), vatAmountKrw: "7", grossAmountKrw: String(net + 7n) },
+    });
+    expect(draft.quote.totalPriceKrw).toBe(String(net));
+    expect(draft.quote.totalCostKrw).toBe(String(cost));
+    expect(draft.quote.grossProfitKrw).toBe(String(net - cost));
+    expect(draft.quote.bomLines[0]?.quantity).toBe(quantity);
+    expect(draft.vat.grossAmountKrw).toBe(String(net + 7n));
+    expect(draft.po).toEqual(input.po);
+  });
+
+  it("preserves VAT and PO rejection codes", () => {
+    const store = createW01QuoteDraftStore();
+    const adapter = new W01QuoteDraftAdapter(store);
+    adapter.draft(input, "existing");
+    const before = structuredClone(store);
+    for (const [invalid, code] of [
+      [{ ...input, vat: { ...input.vat, grossAmountKrw: "1" } }, "VAT_MISMATCH"],
+      [{ ...input, po: { customerPoId: "same", supplierPoId: "same" } }, "PO_IDENTITY_COLLISION"],
+    ] as const) {
+      expect(() => buildW01QuoteDraft(invalid)).toThrowError(expect.objectContaining({ code }));
+      expect(() => adapter.draft(invalid, "rejected")).toThrowError(expect.objectContaining({ code }));
+      expect(store).toEqual(before);
+    }
+  });
+
   it("keeps one row when a second adapter uses the same local store", () => {
     const store = createW01QuoteDraftStore();
     const first = new W01QuoteDraftAdapter(store);

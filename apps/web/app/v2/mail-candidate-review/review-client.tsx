@@ -63,7 +63,8 @@ type Decision = { readonly action: "LINK"; readonly accountId: string }
   | { readonly action: "UNDO"; readonly reviewId: string };
 const date = (value: string) => new Date(value).toLocaleString("ko-KR");
 
-function CandidateCard({ candidate, accounts, disabled, decide }: {
+function CandidateCard({ candidate, accounts, disabled, decide, role }: {
+  readonly role: "owner" | "viewer";
   readonly candidate: Candidate;
   readonly accounts: Queue["accounts"];
   readonly disabled: boolean;
@@ -91,11 +92,11 @@ function CandidateCard({ candidate, accounts, disabled, decide }: {
         <div className={styles.current}>
           <p>{candidate.review?.companyName ?? accounts.find(a => a.id === candidate.review?.accountId)?.name
             ?? candidate.review?.reason ?? "검토 기록을 보관했습니다."}</p>
-          <button type="button" disabled={disabled} onClick={() => {
+          {role === "owner" && <button type="button" disabled={disabled} onClick={() => {
             if (candidate.review) void decide(candidate.id, { action: "UNDO", reviewId: candidate.review.id });
-          }}>되돌리기</button>
+          }}>되돌리기</button>}
         </div>
-      ) : (
+      ) : role === "owner" ? (
         <div className={styles.controls}>
           <div className={styles.field}>
             <label htmlFor={`target-${candidate.id}`}>확정할 거래처</label>
@@ -123,7 +124,7 @@ function CandidateCard({ candidate, accounts, disabled, decide }: {
             <button type="button" disabled={disabled} onClick={() => void decide(candidate.id, { action: "DISCARD", reason })}>버리기</button>
           </div>
         </div>
-      )}
+      ) : null}
       {candidate.history.length > 0 && <details className={styles.history}><summary>감사 기록 {candidate.history.length}건</summary>
         <ol>{candidate.history.map(item => <li key={item.id}>{outcomeLabel[item.outcome]}
           {" · "}{date(item.reviewedAt)}{" · "}{item.reviewedByPrincipalId}</li>)}</ol></details>}
@@ -131,7 +132,7 @@ function CandidateCard({ candidate, accounts, disabled, decide }: {
   );
 }
 
-export function MailCandidateReviewClient() {
+export function MailCandidateReviewClient({ role }: { readonly role: "owner" | "viewer" }) {
   const [data, setData] = useState<Queue | null>(null);
   const [csrf, setCsrf] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
@@ -208,7 +209,7 @@ export function MailCandidateReviewClient() {
         <div><h2 id="owner-session-title">현재 로그인 세션</h2>
           <p className="meta">CRM 비밀번호·OTP로 확인한 세션을 사용합니다.</p>
           {expiresAt && <p className="meta">세션 만료 {date(expiresAt)}</p>}</div>
-        {!csrf && <label className={styles.fileLabel}>운영 세션 연결
+        {role === "owner" && !csrf && <label className={styles.fileLabel}>운영 세션 연결
           <input type="file" accept="application/json,.json" disabled={working} aria-label="운영 세션 증명 파일"
             onChange={e => { const file = e.target.files?.[0]; e.target.value = ""; if (file) void importProof(file); }} />
         </label>}
@@ -223,7 +224,7 @@ export function MailCandidateReviewClient() {
       {data?.candidates.length === 0 && <section className="panel"><h2>검토할 메일 후보가 없습니다</h2>
         <p className="meta">Mail이 후보를 기록하면 이 목록에 표시됩니다.</p></section>}
       <div className="stack">{data?.candidates.map(candidate => <CandidateCard key={candidate.id} candidate={candidate}
-        accounts={data.accounts} disabled={working || !csrf} decide={decide} />)}</div>
+        accounts={data.accounts} disabled={working || !csrf} decide={decide} role={role} />)}</div>
       <p className={`meta ${styles.note}`}>새 거래처 후보 확정은 검토 기록만 남깁니다. 실제 거래처를 자동 생성하지 않습니다.
         회사·수신 날짜가 미제공이면 원본 메타데이터를 추정하지 않습니다.</p>
     </div>

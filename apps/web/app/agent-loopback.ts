@@ -1,4 +1,4 @@
-import { selfEntryConfiguration, verifySelfEntry } from "./self-entry-server";
+import { selfEntryConfiguration, verifySelfEntry, viewerWriteDenial } from "./self-entry-server";
 
 function denied(status: number, error: string): Response {
   return Response.json({ error }, { status, headers: { "cache-control": "no-store" } });
@@ -48,9 +48,14 @@ async function admitted(request: Request, mutate: boolean): Promise<
   | { readonly ok: false; readonly response: Response }
   | { readonly ok: true; readonly bound: NonNullable<ReturnType<typeof boundLoopback>> }
 > {
+  if (mutate) {
+    const deniedWrite = viewerWriteDenial(request.headers.get("cookie") ?? "");
+    if (deniedWrite) return { ok: false, response: deniedWrite };
+  }
   const verified = await verifySelfEntry(request.headers.get("cookie") ?? "");
   if (verified.status !== 200) return { ok: false, response: verified };
-  await verified.body?.cancel();
+  const session: { role: "owner" | "viewer" } = await verified.json();
+  if (mutate && session.role === "viewer") return { ok: false, response: denied(403, "VIEWER_WRITE_FORBIDDEN") };
   const bound = boundLoopback();
   if (!bound) return { ok: false, response: denied(503, "LOOPBACK_REQUIRED") };
   if (!mutate) return { ok: true, bound };

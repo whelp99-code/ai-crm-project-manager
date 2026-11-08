@@ -49,7 +49,7 @@ function draftList(value: unknown): value is DraftList {
 }
 const money = (value: string) => `${BigInt(value).toLocaleString("ko-KR")} 원`;
 
-export function DocumentDraftClient() {
+export function DocumentDraftClient({ role }: { readonly role: "owner" | "viewer" }) {
   const [data, setData] = useState<DraftList | null>(null);
   const [csrf, setCsrf] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -160,14 +160,14 @@ export function DocumentDraftClient() {
       <p>입력과 기존 자료로 초안을 만듭니다. 발송·서명·결제는 하지 않습니다.</p></header>
     <section className={styles.panel} aria-labelledby="session-title">
       <h2 id="session-title">현재 로그인 세션</h2>
-      {!csrf && <label>운영 인증의 cookie·csrf JSON<input type="file" accept="application/json,.json" onChange={connect} disabled={pending} /></label>}
+      {role === "owner" && !csrf && <label>운영 인증의 cookie·csrf JSON<input type="file" accept="application/json,.json" onChange={connect} disabled={pending} /></label>}
       <p className={styles.muted}>CRM 비밀번호·OTP로 확인한 세션을 사용합니다.</p>
     </section>
     {error && <p role="alert" className={styles.error}>{error}</p>}
     {!data && !error && <p role="status">초안을 불러오는 중입니다.</p>}
     {data && <>
       <button type="button" disabled={pending} onClick={() => { setError(""); void load().catch((caught: unknown) => setError(caught instanceof Error ? caught.message : "불러오기 실패")); }}>목록 새로고침</button>
-      <form className={styles.panel} onSubmit={createQuote}>
+      {role === "owner" && <form className={styles.panel} onSubmit={createQuote}>
         <h2>1. 견적·발주 초안 만들기</h2>
         {data.engagements.length === 0 && <p>등록된 프로젝트가 없습니다. 기존 프로젝트 등록을 먼저 완료해 주세요.</p>}
         <div className={styles.grid}>
@@ -193,7 +193,7 @@ export function DocumentDraftClient() {
         <label>부가세 (원, 입력값)<input name="vat" inputMode="numeric" pattern="[0-9]+" required /></label>
         <p className={styles.muted}>양식 승인 여부는 확인하지 않은 초안입니다. 금액은 입력한 단가·수량·부가세로만 계산합니다.</p>
         <button className={styles.primary} disabled={pending || !csrf || data.engagements.length === 0}>{pending ? "저장 중…" : "견적·발주 초안 만들기"}</button>
-      </form>
+      </form>}
       <section className={styles.panel} aria-labelledby="saved-title"><h2 id="saved-title">저장된 견적·발주 초안</h2>
         {data.quoteDrafts.length === 0 && <p>아직 초안이 없습니다. 위에서 첫 초안을 만들어 주세요.</p>}
         {data.quoteDrafts.map(draft => <article key={draft.identity} className={styles.panel}>
@@ -206,7 +206,7 @@ export function DocumentDraftClient() {
           </div>
         </article>)}
       </section>
-      <RenewalEditor contracts={data.contracts} drafts={data.renewalDrafts}
+      <RenewalEditor contracts={data.contracts} drafts={data.renewalDrafts} role={role}
         runtimeVersion={data.runtimeVersion} csrf={csrf} onSaved={load}
         compareBusy={comparing}
         onCompare={(renewalId, revisionId) => { void compare(renewalId, revisionId); }} />

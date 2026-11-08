@@ -5,10 +5,11 @@ import { enrollOperator } from "./operator-auth-enrollment.js";
 // Owner-run offline CLI. Credential values never appear in argv, output or errors.
 try {
   const { values } = parseArgs({
-    options: { input: { type: "string" }, state: { type: "string" } },
+    options: { input: { type: "string" }, state: { type: "string" }, role: { type: "string" } },
     strict: true, allowPositionals: false,
   });
   if (!values.input || !values.state) throw new Error("ENROLLMENT_ARGUMENTS_REQUIRED");
+  if (values.role !== undefined && values.role !== "viewer") throw new Error("ENROLLMENT_ROLE_INVALID");
   const fd = openSync(values.input, constants.O_RDONLY | constants.O_NOFOLLOW);
   let input: unknown;
   try {
@@ -18,7 +19,7 @@ try {
     input = JSON.parse(readFileSync(fd, "utf8"));
   } finally { closeSync(fd); }
   const record = enrollOperator(input, Date.now());
-  writeFileSync(values.state, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: "wx" });
+  writeFileSync(values.state, `${JSON.stringify(values.role === "viewer" ? { ...record, role: "viewer" } : record)}\n`, { mode: 0o600, flag: "wx" });
   process.stdout.write("OPERATOR_ENROLLED\n");
 } catch {
   process.stderr.write("OPERATOR_ENROLLMENT_REJECTED\n");

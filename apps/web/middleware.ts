@@ -1,9 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { selfEntryConfiguration, verifySelfEntry } from "./app/self-entry-server";
+import { selfEntryConfiguration, verifySelfEntry, viewerWriteDenial } from "./app/self-entry-server";
 
 export async function middleware(request: NextRequest) {
   const path = request.nextUrl.pathname;
   if (path === "/login" || path === "/api/self-entry" || path === "/api/self-entry/logout") return NextResponse.next();
+  if (path.startsWith("/api/") && request.method !== "GET" && request.method !== "HEAD") {
+    const denied = viewerWriteDenial(request.headers.get("cookie") ?? "");
+    if (denied) return denied;
+  }
   const configuration = selfEntryConfiguration();
   const verified = await verifySelfEntry(request.headers.get("cookie") ?? "", configuration);
   if (verified.status === 200) return NextResponse.next();
