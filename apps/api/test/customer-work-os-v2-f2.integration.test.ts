@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { CustomerWorkOsV2Platform, type CustomerWorkOsV2State } from "@ai-crm/domain/customer-work-os-v2";
 import { createStandaloneCustomerWorkOsV2App } from "../src/customer-work-os-v2-routes.js";
 import { CustomerWorkOsV2RuntimeManager, InMemoryCwosV2StateStore } from "../src/customer-work-os-v2-runtime.js";
 
@@ -79,6 +80,43 @@ describe("native F2 local comparison", () => {
       expect(comparison?.findings.every(item => item.deadlineStatus === "UNKNOWN")).toBe(true);
       expect(comparison?.findings.find(item => item.id === "pay")?.next?.proposal.conditional).toBe(true);
       expect(comparison?.findings.find(item => item.id === "renew")?.prior?.text).toBe("Renew yearly");
+      const serialized = JSON.stringify(reopened.state);
+      const restored = new CustomerWorkOsV2Platform(workspaceId, () => "2026-10-07T00:00:00.000Z");
+      restored.hydrateState(JSON.parse(serialized) as CustomerWorkOsV2State);
+      const restoredState = restored.exportState();
+      expect(restoredState).toEqual(reopened.state);
+      expect(restoredState.contractComparisons?.comparisons).toHaveLength(1);
+      const restoredComparison = restoredState.contractComparisons?.comparisons[0];
+      if (!restoredComparison) throw new Error("restored F2 comparison required");
+      expect(restoredComparison).toEqual(comparison);
+      expect(restoredComparison).toMatchObject({
+        id: payload.comparisonId, workspaceId, recordedByPrincipalId: actor.principalId,
+        createdAt: "2026-10-06T00:00:00.000Z", approved: false, sent: false, sourceVerified: false,
+      });
+      for (const [actual, input] of [[restoredComparison.prior, payload.prior], [restoredComparison.next, payload.next]] as const) {
+        const expectedHash = createHash("sha256").update(Buffer.from(input.content, "utf8")).digest("hex");
+        expect(actual).toEqual({
+          workspaceId: input.workspaceId, sourceId: input.sourceId, revisionId: input.revisionId,
+          sourceUrl: input.sourceUrl, observedAt: input.observedAt, content: input.content, sourceHash: expectedHash,
+          clauses: input.clauses.map(clause => ({
+            id: clause.id, text: clause.text, startByte: clause.startByte, endByte: clause.endByte,
+            proposal: { status: "UNCONFIRMED", origin: "CALLER_PROPOSAL", conditional: clause.conditional,
+              kind: clause.kind, dueOn: clause.dueOn },
+          })).sort((left, right) => left.id.localeCompare(right.id)),
+        });
+        expect(actual.sourceHash).toBe(input.sourceHash);
+        expect(Buffer.from(actual.content, "utf8")).toEqual(Buffer.from(input.content, "utf8"));
+        for (const clause of actual.clauses) {
+          expect(Buffer.from(actual.content, "utf8").subarray(clause.startByte, clause.endByte))
+            .toEqual(Buffer.from(clause.text, "utf8"));
+        }
+      }
+      expect(restoredComparison.findings.every(item => item.interpretation === "UNCONFIRMED"
+        && item.deadlineStatus === "UNKNOWN")).toBe(true);
+      expect([...new Set(restoredComparison.findings.flatMap(item =>
+        [item.prior?.proposal.kind, item.next?.proposal.kind].filter(kind => kind !== undefined)))].sort())
+        .toEqual(["acceptance", "delivery", "payment", "renewal"]);
+      expect(JSON.stringify(reopened.state)).toBe(serialized);
       const replay = await post(app, "f2.compareRevisions", 0, "f2-compare", payload);
       expect(replay.json().result).toEqual(response.json().result);
       expect((await manager.readAuthorized(actor)).version).toBe(3);
