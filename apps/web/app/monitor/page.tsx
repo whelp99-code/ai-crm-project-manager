@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 interface Metrics {
   status: string;
   agent: { jobsTotal: number; jobsByStatus: Record<string, number> };

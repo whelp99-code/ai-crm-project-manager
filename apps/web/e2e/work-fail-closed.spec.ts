@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { loginOwner } from "./auth-fixture.js";
 
 /**
  * Contract-grade smoke: /work must render fail-closed copy when API_BASE_URL
@@ -6,6 +7,7 @@ import { test, expect } from "@playwright/test";
  */
 test.describe("work page fail-closed", () => {
   test("renders unavailable copy without API_BASE_URL", async ({ page }) => {
+    await loginOwner(page);
     const response = await page.goto("/work", { waitUntil: "domcontentloaded" });
     expect(response, "navigation should produce a response").toBeTruthy();
     expect(response!.ok() || response!.status() === 304).toBeTruthy();

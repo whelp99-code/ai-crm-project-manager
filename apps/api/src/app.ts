@@ -9,6 +9,7 @@ import {
 } from "./customer-work-os-v2-routes.js";
 import type { CwosV2StateStore, V2PgQueryable } from "./customer-work-os-v2-runtime.js";
 import type { OperatorStepUpService } from "./operator-step-up.js";
+import { registerOperatorSession } from "./operator-session-routes.js";
 
 export * from "./app-base.js";
 
@@ -34,6 +35,12 @@ export type CustomerWorkOsV2AppOptions = CreateAppOptions & {
     readonly kind: "ai" | "service";
     /** Reader-only credential: reject all non-read HTTP methods before command dispatch. */
     readonly readOnly?: boolean;
+    /** Explicitly admitted Mail reader may GET its bound workspace's account master. */
+    readonly mailAccountMasterRead?: true;
+    /** Separate service credential: only the Mail candidate-create route is admitted. */
+    readonly mailCandidateCreateOnly?: true;
+    /** Separate JARVIS credential: only candidate list/count GETs are admitted. */
+    readonly mailCandidateReadOnly?: true;
   };
   customerWorkOsV2NormalizedProjectionPool?: V2PgQueryable;
 };
@@ -87,6 +94,17 @@ export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInst
   )) {
     throw new Error("[CWOS_V2_MACHINE_BINDING_INVALID] workspace, principal, and machine kind are required");
   }
+  if (machineBinding?.mailAccountMasterRead && (machineBinding.kind !== "service" || !machineBinding.readOnly)) {
+    throw new Error("[CWOS_V2_MAIL_ACCOUNT_MASTER_BINDING_INVALID] account master requires a read-only service binding");
+  }
+  if (machineBinding?.mailCandidateCreateOnly && (machineBinding.kind !== "service"
+    || machineBinding.readOnly || machineBinding.mailAccountMasterRead || machineBinding.mailCandidateReadOnly)) {
+    throw new Error("[CWOS_V2_MAIL_CANDIDATE_BINDING_INVALID] candidate writer requires a separate create-only service binding");
+  }
+  if (machineBinding?.mailCandidateReadOnly && (machineBinding.kind !== "service" || !machineBinding.readOnly
+    || machineBinding.mailAccountMasterRead || machineBinding.mailCandidateCreateOnly)) {
+    throw new Error("[CWOS_V2_CANDIDATE_READER_BINDING_INVALID] candidate reader requires a separate read-only service binding");
+  }
   const actorBinding = machineBinding ? {
     workspaceId: machineBinding.workspaceId.trim(),
     principalId: machineBinding.principalId.trim(),
@@ -108,10 +126,37 @@ export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInst
     throw new Error("[CWOS_V2_ACTOR_BINDING_REQUIRES_API_KEY] trusted operator binding requires AUTH_API_KEY/API_AUTH_TOKEN");
   }
   const app = createBaseApp(options);
+  if (operatorStepUp) registerOperatorSession(app, operatorStepUp);
   if (machineBinding) {
     app.addHook("onRequest", async (request, reply) => {
-      if (!request.url.split("?")[0]?.startsWith("/api/cwos/v2/")) {
+      const path = request.url.split("?")[0];
+      if (machineBinding.mailCandidateReadOnly) {
+        if (request.method === "GET" && (path === "/api/cwos/v2/mail-candidates"
+          || path === "/api/cwos/v2/mail-candidates/count" || path === "/health")) return;
+        return reply.status(403).send({ error: "MAIL_CANDIDATE_READ_ONLY" });
+      }
+      if (machineBinding.mailCandidateCreateOnly) {
+        const ownCandidate = request.method === "GET" && path !== undefined
+          && /^\/api\/cwos\/v2\/mail-candidates\/mail-candidate-[a-f0-9]{64}$/.test(path);
+        if ((request.method === "POST" && path === "/api/cwos/v2/mail-candidates")
+          || (request.method === "GET" && path === "/health")
+          || ownCandidate) return;
+        return reply.status(403).send({ error: "MAIL_CANDIDATE_CREATE_ONLY" });
+      }
+      const mailAccountMaster = machineBinding.mailAccountMasterRead && request.method === "GET"
+        && path === "/api/cwos/accounts";
+      if (!path?.startsWith("/api/cwos/v2/") && !mailAccountMaster) {
         return reply.status(403).send({ error: "MACHINE_ROUTE_DENIED" });
+      }
+      if (mailAccountMaster) {
+        if (request.headers["x-workspace-id"] !== machineBinding.workspaceId
+          || request.headers["x-principal-id"] !== machineBinding.principalId
+          || request.headers["x-principal-kind"] !== "service") {
+          return reply.status(403).send({ error: "ACTOR_BINDING_MISMATCH" });
+        }
+        if (request.headers["x-step-up"]) {
+          return reply.status(403).send({ error: "UNTRUSTED_STEP_UP" });
+        }
       }
       if (machineBinding.readOnly && request.method !== "GET" && request.method !== "HEAD") {
         return reply.status(403).send({ error: "MACHINE_READ_ONLY" });
@@ -132,6 +177,8 @@ export function createApp(options: CustomerWorkOsV2AppOptions = {}): FastifyInst
       ...(options.customerWorkOsV2Profile ? { profile: options.customerWorkOsV2Profile } : {}),
       ...(actorBinding ? { actorBinding } : {}),
       ...(operatorStepUp ? { operatorStepUp } : {}),
+      ...(machineBinding?.mailCandidateCreateOnly ? { mailCandidateWriter: true } : {}),
+      ...(machineBinding?.mailCandidateReadOnly ? { mailCandidateReader: true } : {}),
       ...(options.customerWorkOsV2NormalizedProjectionPool
         ? { normalizedProjectionPool: options.customerWorkOsV2NormalizedProjectionPool } : {}),
     },

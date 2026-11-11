@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { buildW01QuoteDraft, type W01QuoteDraft, type W01QuoteDraftInput } from "../w01-quote-draft.js";
+import { CustomerWorkOsError } from "../customer-work-os.js";
 import { AiCouncilService, type AiCouncilState } from "./ai.js";
 import { MultiWorkspaceAdminService, type AdminState } from "./admin.js";
 import { ReadFirstConnectorService, type ConnectorState } from "./connectors.js";
@@ -73,6 +75,7 @@ export interface CustomerWorkOsV2State {
   /** Optional when loading snapshots written before the local W05 fixture path existed. */
   renewals?: RenewalState;
   contractComparisons?: ContractComparisonState;
+  quoteDrafts?: W01QuoteDraft[];
   normalizedArchiveRefs?: NormalizedArchiveReference[];
   milestones: ReleaseMilestone[];
   findings: Finding[];
@@ -203,6 +206,7 @@ export class CustomerWorkOsV2Platform {
   private findings = new Map<string, Finding>();
   private releaseManifests = new Map<string, ReleaseManifest>();
   private normalizedArchiveRefs = new Map<string, NormalizedArchiveReference>();
+  private quoteDrafts = new Map<string, W01QuoteDraft>();
 
   constructor(
     readonly workspaceId: string,
@@ -378,6 +382,7 @@ export class CustomerWorkOsV2Platform {
       delivery: this.deliveries.exportState(),
       renewals: this.renewals.exportState(),
       contractComparisons: this.contractComparisons.exportState(),
+      quoteDrafts: [...this.quoteDrafts.values()].map(item => copy(item)),
       normalizedArchiveRefs: [...this.normalizedArchiveRefs.values()].map(item => copy(item)),
       milestones: this.milestones.map((item) => copy(item)),
       findings: [...this.findings.values()].map((item) => copy(item)).sort((left, right) => left.id.localeCompare(right.id)),
@@ -436,6 +441,7 @@ export class CustomerWorkOsV2Platform {
     this.deliveries.hydrateState(copy(input.delivery ?? { schemaVersion: 1, orders: [] }));
     this.renewals.hydrateState(copy(input.renewals ?? { schemaVersion: 1, drafts: [] }));
     this.contractComparisons.hydrateState(copy(input.contractComparisons ?? { schemaVersion: 1, comparisons: [] }));
+    this.quoteDrafts = new Map((input.quoteDrafts ?? []).map(item => [item.identity, copy(item)]));
     this.followUps.hydrateState(copy(input.followUps ?? { schemaVersion: 1, items: [] }));
     this.connectors.hydrateState(copy(input.connectors));
     this.graphs.hydrateState(copy(input.graphs));
@@ -451,6 +457,29 @@ export class CustomerWorkOsV2Platform {
     this.findings = findings;
     this.releaseManifests = manifests;
     this.normalizedArchiveRefs = new Map((input.normalizedArchiveRefs ?? []).map(item => [item.id, copy(item)]));
+  }
+
+  recordQuoteDraft(input: W01QuoteDraftInput, actor: V2Actor): W01QuoteDraft {
+    assertHuman(actor);
+    assertStepUp(actor);
+    assertWorkspace(this.workspaceId, actor.workspaceId);
+    assertWorkspace(this.workspaceId, input.engagement.workspaceId);
+    let draft: W01QuoteDraft;
+    try {
+      draft = buildW01QuoteDraft(input);
+    } catch (error) {
+      if (error instanceof CustomerWorkOsError) throw new CustomerWorkOsV2Error(error.code, error.message);
+      throw error;
+    }
+    const prior = this.quoteDrafts.get(draft.identity);
+    if (prior) {
+      if (JSON.stringify(stable(prior)) !== JSON.stringify(stable(draft))) {
+        throw new CustomerWorkOsV2Error("IDEMPOTENCY_CONFLICT", "draft identity already records different input");
+      }
+      return copy(prior);
+    }
+    this.quoteDrafts.set(draft.identity, copy(draft));
+    return copy(draft);
   }
 
   recordNormalizedArchiveReference(

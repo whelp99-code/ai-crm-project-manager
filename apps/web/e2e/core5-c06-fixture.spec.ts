@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { loginOwner } from "./auth-fixture.js";
 
 const widths = [
   { name: "desktop", width: 1440, height: 1000 },
@@ -7,9 +8,10 @@ const widths = [
 
 test.describe("C06 follow-up correction closure fixture", () => {
   for (const viewport of widths) {
-    test(`${viewport.name} renders the isolated fail-closed fixture`, async ({ browser }, testInfo) => {
+    test(`${viewport.name} renders the isolated fail-closed fixture`, async ({ browser }) => {
       const context = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height } });
       const page = await context.newPage();
+      await loginOwner(page);
       const response = await page.goto("/core5-c06", { waitUntil: "domcontentloaded" });
       expect(response, "navigation should produce a response").toBeTruthy();
       expect(response!.ok()).toBeTruthy();

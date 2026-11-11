@@ -129,17 +129,17 @@ detect_dump_mode() {
   local server_major host_major
   server_major="$(server_major_version)"
   host_major="$(host_pg_dump_major_version)"
-  if [[ -n "${server_major}" && -n "${host_major}" && "${host_major}" -ge "${server_major}" ]]; then
+  if [[ -n "${server_major}" && -n "${host_major}" && "${host_major}" -eq "${server_major}" ]]; then
     DUMP_MODE="host"
     return
   fi
   DRILL_CONTAINER="$(find_container_for_port || true)"
   if [[ -n "${DRILL_CONTAINER}" ]]; then
     DUMP_MODE="docker"
-    log "host pg_dump major=${host_major} < server major=${server_major}; using docker exec ${DRILL_CONTAINER}"
+    log "host pg_dump major=${host_major} != server major=${server_major}; using docker exec ${DRILL_CONTAINER}"
     return
   fi
-  echo "REFUSE: host pg_dump (major ${host_major}) is older than server (major ${server_major}) and no matching docker container was found on port ${PGPORT} to exec into." >&2
+  echo "REFUSE: host pg_dump (major ${host_major}) does not match server (major ${server_major}) and no matching docker container was found on port ${PGPORT} to exec into." >&2
   exit 3
 }
 

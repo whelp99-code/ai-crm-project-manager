@@ -94,6 +94,78 @@ that authentication or an operating transition has completed.
 
 ## Tests
 
+### JARVIS candidate-only reader
+
+The separate `CORE5_API_MODE=jarvis-candidate-reader` profile requires
+`CWOS_V2_JARVIS_CANDIDATE_READER_PRINCIPAL_ID`,
+`CWOS_V2_JARVIS_CANDIDATE_READER_KEY_FILE`, `WORKSPACE_ID`, an explicit
+`CORE5_API_PORT` and the existing three distinct PostgreSQL role profiles.
+It rejects inherited operator or Mail credentials; Mail profiles reject
+JARVIS credentials. A private regular, non-symlink key file must contain
+at least 32 non-whitespace characters. After separately approved merge and
+deployment, the key path is
+`/home/jm/.config/core5/crm/blro-jarvis-candidate-reader.key` (0600).
+This PR does not issue a live principal or key, deploy a unit, or configure
+the JARVIS `jarvis-svc` system unit's `LoadCredential`.
+
+Only `GET /api/cwos/v2/mail-candidates` and
+`GET /api/cwos/v2/mail-candidates/count` expose data; data-free `GET /health`
+is allowed. Both data routes require the dedicated key and matching
+workspace/service-principal headers, plus active native principal/membership.
+The list returns `{workspaceId,count,candidates}`; the count route returns
+`{workspaceId,count}`. Each candidate is explicitly serialized with only
+`id`, `status`, `confirmed`, `freshness` and `createdAt`. Mailbox, source
+locator/event ID, subject, body digest and creator identity are omitted;
+new fields in stored candidates are not automatically exposed.
+Legacy snapshots without candidates return an empty
+list and count 0. No state, customer, project, quotation, detail or normalized
+projection route is admitted. POST/PATCH/DELETE/confirmation and other
+workspace claims return 403. Neither read mutates state or audit, confirms a
+candidate, or promotes its `producer_unverified` source.
+Existing Mail reader and candidate-writer authority remain unchanged.
+
+### MR candidate-only writer
+
+The separate `CORE5_API_MODE=mail-candidate-writer` profile uses its own
+`CWOS_V2_MAIL_CANDIDATE_WRITER_PRINCIPAL_ID` and
+`CWOS_V2_MAIL_CANDIDATE_WRITER_KEY_FILE`, three distinct DB profiles,
+`WORKSPACE_ID` and an explicit `CORE5_API_PORT`. It rejects inherited operator
+or Mail reader identity/credentials. The existing reader remains GET-only.
+After a separately approved merge/deployment, the planned writer key path is
+`/home/jm/.config/core5/crm/blro-mail-candidate-writer.key` (0600).
+This code change does not enroll that principal or generate the key.
+
+Only `POST /api/cwos/v2/mail-candidates` is admitted, plus data-free
+`GET /health`. Send matching workspace/service principal headers,
+`idempotency-key`, and JSON `{expectedVersion,provider,mailbox,sourceLocator,
+providerEventId,subject,bodyDigest}`. Provider is GMAIL or OUTLOOK; bodyDigest
+is lowercase SHA-256. Use the separate existing reader or the previous create
+response to obtain the workspace runtime version; the writer cannot read state.
+Creation returns201 with only the candidate and runtimeVersion, not business
+state. Records are append-only CANDIDATE/confirmed=false/producer_unverified.
+Source replay is immutable; changed source content conflicts409. Native
+CAS/audit checks active principal/membership before replay or mutation.
+PUT/PATCH/DELETE, confirmation, commands, customer/project/quotation routes,
+and other workspaces are denied. No mailbox send or work confirmation occurs.
+
+### Dedicated Mail account-master admission
+
+After approval and deployment, set `CWOS_V2_MAIL_READER_ACCOUNT_MASTER_GET=1`
+only in the admitted BLRO Mail reader profile. Its existing dedicated key,
+`WORKSPACE_ID` and `CWOS_V2_MAIL_READER_PRINCIPAL_ID` remain unchanged.
+This permits only `GET /api/cwos/accounts` with matching workspace, service
+principal and kind headers. The response and parameterized workspace-scoped
+transaction remain the maintained account-master contract. HEAD, writes,
+engagement/finance routes and other workspace/principal claims remain denied.
+Without explicit admission the machine credential still rejects legacy routes.
+
+The maintained v2 Mail reader consumes `/api/cwos/v2/state` and
+`/api/cwos/v2/normalized-projections/:planId`. An existing APPLIED source plan
+can be linked using native `business.reconcileNormalized` with only `planId`;
+the server binds original hashes/version and preserves
+`ARCHIVE_PROJECTION_ONLY`/`approved=false`. This is archive context for
+read-only mailbox intake and candidates, not mailbox-send/write permission.
+
 `apps/api/test/authn.integration.test.ts` — key required when configured;
 wrong/missing key → 401; agent without principal still fails; dev mode without
 key still accepts principal headers.

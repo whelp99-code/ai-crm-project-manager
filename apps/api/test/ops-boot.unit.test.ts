@@ -62,10 +62,71 @@ describe("operating boot configuration", () => {
     })).toThrowError(/OPS_BOOT_DATABASE_ROLES_NOT_DISTINCT/);
   });
 
+  it("requires explicit account-master GET admission on the dedicated Mail profile", () => {
+    const env = baseEnv();
+    expect(parseOperatingConfig(env).mailAccountMasterRead).toBeUndefined();
+    expect(parseOperatingConfig({ ...env, CWOS_V2_MAIL_READER_ACCOUNT_MASTER_GET: "1" }).mailAccountMasterRead)
+      .toBe(true);
+    expect(() => parseOperatingConfig({ ...env, CWOS_V2_MAIL_READER_ACCOUNT_MASTER_GET: "true" }))
+      .toThrow(/OPS_BOOT_READER_ACCOUNT_MASTER_INVALID/);
+  });
+
+  it("requires a separate candidate-writer profile, private key and explicit port", () => {
+    const env = { ...baseEnv(), CWOS_V2_MAIL_READER_PRINCIPAL_ID: "", CWOS_V2_MAIL_READER_KEY_FILE: "",
+      CORE5_API_MODE: "mail-candidate-writer", CORE5_API_PORT: "44321",
+      CWOS_V2_MAIL_CANDIDATE_WRITER_PRINCIPAL_ID: "candidate-writer",
+      CWOS_V2_MAIL_CANDIDATE_WRITER_KEY_FILE: privateFile("writer.key", "w".repeat(40)) };
+    expect(parseOperatingConfig(env)).toMatchObject({ mode: "mail-candidate-writer", port: 44321,
+      principalId: "candidate-writer", apiKey: "w".repeat(40) });
+    const missingPort = { ...env, CORE5_API_PORT: "" };
+    expect(() => parseOperatingConfig(missingPort)).toThrow(/OPS_BOOT_CONFIG_REQUIRED/);
+    expect(() => parseOperatingConfig({ ...env, AUTH_API_KEY: "human-key" })).toThrow(/READER_OPERATOR_ENV_FORBIDDEN/);
+    expect(() => parseOperatingConfig({ ...env, CWOS_V2_MAIL_READER_PRINCIPAL_ID: "reader" }))
+      .toThrow(/WRITER_READER_ENV_FORBIDDEN/);
+    expect(() => parseOperatingConfig({ ...baseEnv(), CWOS_V2_MAIL_CANDIDATE_WRITER_PRINCIPAL_ID: "writer" }))
+      .toThrow(/READER_WRITER_ENV_FORBIDDEN/);
+    expect(() => parseOperatingConfig({ ...env,
+      CWOS_V2_MAIL_CANDIDATE_WRITER_KEY_FILE: privateFile("short-writer.key", "short") }))
+      .toThrow(/WRITER_KEY_TOO_SHORT/);
+  });
+
   it("refuses query parameters that override the declared driver role", () => {
     expect(() => parseOperatingConfig({
       ...baseEnv(), DATABASE_URL: "postgres://runtime_api@localhost/owned_fixture?user=admin",
     })).toThrowError(/OPS_BOOT_DATABASE_PROFILE_INVALID/);
+  });
+
+  it("admits a dedicated private JARVIS candidate-reader profile without Mail credentials", () => {
+    const env = { ...baseEnv(), CWOS_V2_MAIL_READER_PRINCIPAL_ID: "", CWOS_V2_MAIL_READER_KEY_FILE: "",
+      CORE5_API_MODE: "jarvis-candidate-reader", CORE5_API_PORT: "44322",
+      CWOS_V2_JARVIS_CANDIDATE_READER_PRINCIPAL_ID: "jarvis-reader",
+      CWOS_V2_JARVIS_CANDIDATE_READER_KEY_FILE: privateFile("jarvis.key", "j".repeat(40)) };
+    expect(parseOperatingConfig(env)).toMatchObject({ mode: "jarvis-candidate-reader", port: 44322,
+      principalId: "jarvis-reader", apiKey: "j".repeat(40) });
+    expect(() => parseOperatingConfig({ ...env, CORE5_API_PORT: "" })).toThrow(/OPS_BOOT_CONFIG_REQUIRED/);
+    expect(() => parseOperatingConfig({ ...env, AUTH_API_KEY: "human-key" })).toThrow(/READER_OPERATOR_ENV_FORBIDDEN/);
+    expect(() => parseOperatingConfig({ ...env, CWOS_V2_MAIL_READER_PRINCIPAL_ID: "reader" }))
+      .toThrow(/JARVIS_MAIL_ENV_FORBIDDEN/);
+    expect(() => parseOperatingConfig({ ...env, CWOS_V2_MAIL_CANDIDATE_WRITER_PRINCIPAL_ID: "writer" }))
+      .toThrow(/JARVIS_MAIL_ENV_FORBIDDEN/);
+    expect(() => parseOperatingConfig({ ...baseEnv(), CWOS_V2_JARVIS_CANDIDATE_READER_PRINCIPAL_ID: "jarvis" }))
+      .toThrow(/MAIL_JARVIS_ENV_FORBIDDEN/);
+    expect(() => parseOperatingConfig({ ...env,
+      CWOS_V2_JARVIS_CANDIDATE_READER_KEY_FILE: privateFile("short-jarvis.key", "short") }))
+      .toThrow(/JARVIS_KEY_TOO_SHORT/);
+  });
+
+  it("rejects exposed or whitespace JARVIS key files", () => {
+    const path = privateFile("jarvis.key", "j".repeat(40));
+    const env = { ...baseEnv(), CWOS_V2_MAIL_READER_PRINCIPAL_ID: "", CWOS_V2_MAIL_READER_KEY_FILE: "",
+      CORE5_API_MODE: "jarvis-candidate-reader", CORE5_API_PORT: "44322",
+      CWOS_V2_JARVIS_CANDIDATE_READER_PRINCIPAL_ID: "jarvis-reader",
+      CWOS_V2_JARVIS_CANDIDATE_READER_KEY_FILE: path };
+    chmodSync(path, 0o644);
+    expect(() => parseOperatingConfig(env)).toThrow(/PRIVATE_FILE_INVALID/);
+    expect(() => parseOperatingConfig({ ...env,
+      CWOS_V2_JARVIS_CANDIDATE_READER_KEY_FILE: privateFile("spaces.key", `${"j".repeat(32)} space`) }))
+      .toThrow(/JARVIS_KEY_TOO_SHORT/);
   });
 
   it("rejects short Unicode or internal-whitespace reader credentials", () => {

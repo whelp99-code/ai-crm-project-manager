@@ -1,5 +1,7 @@
 import { DecideClient } from "./decide-client";
 
+export const dynamic = "force-dynamic";
+
 interface ControlRequest {
   id: string;
   actionType: string;

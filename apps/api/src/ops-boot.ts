@@ -19,15 +19,22 @@ export interface OperatingEnv {
   readonly CWOS_V2_OPERATOR_WORKSPACE_ID?: string;
   readonly CWOS_V2_OPERATOR_PRINCIPAL_ID?: string;
   readonly CWOS_V2_OPERATOR_AUTH_STATE_PATH?: string;
+  readonly CWOS_V2_VIEWER_AUTH_STATE_PATH?: string;
+  readonly CWOS_V2_VIEWER_PRINCIPAL_ID?: string;
   readonly CWOS_V2_OPERATOR_SESSION_SECRET_FILE?: string;
   readonly CWOS_V2_OPERATOR_STEP_UP_VERIFIED?: string;
   readonly CWOS_V2_MAIL_READER_PRINCIPAL_ID?: string;
   readonly CWOS_V2_MAIL_READER_KEY_FILE?: string;
+  readonly CWOS_V2_MAIL_READER_ACCOUNT_MASTER_GET?: string;
+  readonly CWOS_V2_MAIL_CANDIDATE_WRITER_PRINCIPAL_ID?: string;
+  readonly CWOS_V2_MAIL_CANDIDATE_WRITER_KEY_FILE?: string;
+  readonly CWOS_V2_JARVIS_CANDIDATE_READER_PRINCIPAL_ID?: string;
+  readonly CWOS_V2_JARVIS_CANDIDATE_READER_KEY_FILE?: string;
   readonly [key: string]: string | undefined;
 }
 
 export interface OperatingConfig {
-  readonly mode: "human" | "mail-reader";
+  readonly mode: "human" | "mail-reader" | "mail-candidate-writer" | "jarvis-candidate-reader";
   readonly databaseUrl: string;
   readonly adminDatabaseUrl: string;
   readonly modelGatewayDatabaseUrl: string;
@@ -36,7 +43,10 @@ export interface OperatingConfig {
   readonly apiKey: string;
   readonly principalId: string;
   readonly authStatePath?: string;
+  readonly viewer?: { readonly principalId: string; readonly authStatePath: string };
   readonly sessionSecret?: string;
+  readonly proxySecret?: string;
+  readonly mailAccountMasterRead?: true;
 }
 
 function required(env: OperatingEnv, name: keyof OperatingEnv): string {
@@ -45,7 +55,7 @@ function required(env: OperatingEnv, name: keyof OperatingEnv): string {
   return value;
 }
 
-function privateFile(path: string, label: string): void {
+function privateFile(path: string, label: string): string {
   if (!isAbsolute(path)) throw new Error(`[OPS_BOOT_PRIVATE_FILE_INVALID] ${label} path must be absolute`);
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -53,6 +63,7 @@ function privateFile(path: string, label: string): void {
     if (!stat.isFile() || (stat.mode & 0o077) !== 0) {
       throw new Error(`[OPS_BOOT_PRIVATE_FILE_INVALID] ${label} must be a regular, non-symlink private file`);
     }
+    return `${stat.dev}:${stat.ino}`;
   } finally {
     closeSync(fd);
   }
@@ -78,7 +89,7 @@ function rejectInheritedOperatorIdentity(env: OperatingEnv): void {
   const forbidden = Object.keys(env).filter((name) => (
     name === "AUTH_API_KEY" ||
     name === "API_AUTH_TOKEN" ||
-    name.startsWith("CWOS_V2_OPERATOR_")
+    name.startsWith("CWOS_V2_OPERATOR_") || name.startsWith("CWOS_V2_VIEWER_")
   ));
   const inherited = forbidden.filter((name) => env[name]?.trim());
   if (inherited.length) {
@@ -88,8 +99,8 @@ function rejectInheritedOperatorIdentity(env: OperatingEnv): void {
 
 export function parseOperatingConfig(env: OperatingEnv = process.env): OperatingConfig {
   const mode = required(env, "CORE5_API_MODE");
-  if (mode !== "human" && mode !== "mail-reader") {
-    throw new Error("[OPS_BOOT_MODE_INVALID] CORE5_API_MODE must be human or mail-reader");
+  if (mode !== "human" && mode !== "mail-reader" && mode !== "mail-candidate-writer" && mode !== "jarvis-candidate-reader") {
+    throw new Error("[OPS_BOOT_MODE_INVALID] CORE5_API_MODE must be human, mail-reader, mail-candidate-writer or jarvis-candidate-reader");
   }
   const databaseUrl = required(env, "DATABASE_URL");
   const adminDatabaseUrl = required(env, "ADMIN_DATABASE_URL");
@@ -118,7 +129,8 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
   if (new Set(roles).size !== 3) {
     throw new Error("[OPS_BOOT_DATABASE_ROLES_NOT_DISTINCT] API, admin and model gateway roles must differ");
   }
-  const portText = env.CORE5_API_PORT?.trim() || "4312";
+  const portText = mode === "mail-candidate-writer" || mode === "jarvis-candidate-reader" ? required(env, "CORE5_API_PORT")
+    : env.CORE5_API_PORT?.trim() || "4312";
   const port = Number(portText);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("[OPS_BOOT_PORT_INVALID] CORE5_API_PORT must be an integer from 1 to 65535");
@@ -136,11 +148,32 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
     }
     const principalId = required(env, "CWOS_V2_OPERATOR_PRINCIPAL_ID");
     const authStatePath = required(env, "CWOS_V2_OPERATOR_AUTH_STATE_PATH");
-    privateFile(authStatePath, "operator auth state");
+    const ownerFile = privateFile(authStatePath, "operator auth state");
+    let viewer: OperatingConfig["viewer"];
+    if (env.CWOS_V2_VIEWER_AUTH_STATE_PATH !== undefined || env.CWOS_V2_VIEWER_PRINCIPAL_ID !== undefined) {
+      const viewerPrincipal = required(env, "CWOS_V2_VIEWER_PRINCIPAL_ID");
+      const viewerPath = required(env, "CWOS_V2_VIEWER_AUTH_STATE_PATH");
+      if (viewerPrincipal === principalId || privateFile(viewerPath, "viewer auth state") === ownerFile) {
+        throw new Error("[OPS_BOOT_VIEWER_NOT_DISTINCT] viewer principal and auth file must differ from owner");
+      }
+      const ownerRecord = new FileOperatorAuthStore(authStatePath).read();
+      const viewerRecord = new FileOperatorAuthStore(viewerPath, "viewer").read();
+      if (ownerRecord.totpSecret === viewerRecord.totpSecret || ownerRecord.passwordHash === viewerRecord.passwordHash) {
+        throw new Error("[OPS_BOOT_VIEWER_FACTORS_NOT_DISTINCT] viewer factors must differ from owner");
+      }
+      viewer = { principalId: viewerPrincipal, authStatePath: viewerPath };
+    }
+    if (env.NODE_ENV === "production" && !viewer) {
+      throw new Error("[OPS_BOOT_VIEWER_REQUIRED] production human boot requires distinct viewer settings");
+    }
     const sessionSecretFile = required(env, "CWOS_V2_OPERATOR_SESSION_SECRET_FILE");
     const sessionSecret = privateTextFile(sessionSecretFile, "operator session secret");
     if (sessionSecret.length < 32) {
       throw new Error("[OPS_BOOT_SESSION_SECRET_TOO_SHORT] operator session secret must contain at least 32 characters");
+    }
+    const proxySecret = env.CWOS_V2_OPERATOR_PROXY_SECRET?.trim();
+    if (proxySecret && proxySecret.length < 32) {
+      throw new Error("[OPS_BOOT_PROXY_SECRET_TOO_SHORT] authenticated proxy key must contain at least 32 characters");
     }
     return {
       mode,
@@ -152,16 +185,50 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
       apiKey,
       principalId,
       authStatePath,
+      ...(viewer ? { viewer } : {}),
+      ...(proxySecret ? { proxySecret } : {}),
       sessionSecret,
     };
   }
 
   rejectInheritedOperatorIdentity(env);
+  if (mode === "jarvis-candidate-reader") {
+    if (Object.keys(env).some(name => name.startsWith("CWOS_V2_MAIL_") && env[name]?.trim())) {
+      throw new Error("[OPS_BOOT_JARVIS_MAIL_ENV_FORBIDDEN] JARVIS must not inherit Mail credentials");
+    }
+    const principalId = required(env, "CWOS_V2_JARVIS_CANDIDATE_READER_PRINCIPAL_ID");
+    const apiKey = privateTextFile(required(env, "CWOS_V2_JARVIS_CANDIDATE_READER_KEY_FILE"), "JARVIS candidate reader key");
+    if (apiKey.length < 32 || /\s/u.test(apiKey)) {
+      throw new Error("[OPS_BOOT_JARVIS_KEY_TOO_SHORT] candidate reader key requires at least 32 non-whitespace characters");
+    }
+    return { mode, databaseUrl, adminDatabaseUrl, modelGatewayDatabaseUrl, port, workspaceId, apiKey, principalId };
+  }
+  if (Object.keys(env).some(name => name.startsWith("CWOS_V2_JARVIS_CANDIDATE_READER_") && env[name]?.trim())) {
+    throw new Error("[OPS_BOOT_MAIL_JARVIS_ENV_FORBIDDEN] Mail profiles must not inherit JARVIS credentials");
+  }
+  if (mode === "mail-candidate-writer") {
+    if (Object.keys(env).some(name => name.startsWith("CWOS_V2_MAIL_READER_") && env[name]?.trim())) {
+      throw new Error("[OPS_BOOT_WRITER_READER_ENV_FORBIDDEN] candidate writer must not inherit the Mail reader profile");
+    }
+    const principalId = required(env, "CWOS_V2_MAIL_CANDIDATE_WRITER_PRINCIPAL_ID");
+    const apiKey = privateTextFile(required(env, "CWOS_V2_MAIL_CANDIDATE_WRITER_KEY_FILE"), "Mail candidate writer key");
+    if (apiKey.length < 32 || /\s/u.test(apiKey)) {
+      throw new Error("[OPS_BOOT_WRITER_KEY_TOO_SHORT] candidate writer key requires at least 32 non-whitespace characters");
+    }
+    return { mode, databaseUrl, adminDatabaseUrl, modelGatewayDatabaseUrl, port, workspaceId, apiKey, principalId };
+  }
+  if (Object.keys(env).some(name => name.startsWith("CWOS_V2_MAIL_CANDIDATE_WRITER_") && env[name]?.trim())) {
+    throw new Error("[OPS_BOOT_READER_WRITER_ENV_FORBIDDEN] Mail reader must not inherit the candidate writer profile");
+  }
   const principalId = required(env, "CWOS_V2_MAIL_READER_PRINCIPAL_ID");
   const keyFile = required(env, "CWOS_V2_MAIL_READER_KEY_FILE");
   const apiKey = privateTextFile(keyFile, "mail reader key");
   if (apiKey.length < 32 || /\s/u.test(apiKey)) {
     throw new Error("[OPS_BOOT_READER_KEY_TOO_SHORT] mail-reader key requires at least 32 non-whitespace characters");
+  }
+  const accountMasterGet = env.CWOS_V2_MAIL_READER_ACCOUNT_MASTER_GET?.trim();
+  if (accountMasterGet && accountMasterGet !== "1") {
+    throw new Error("[OPS_BOOT_READER_ACCOUNT_MASTER_INVALID] account master GET admission must be 1 or unset");
   }
   return {
     mode,
@@ -172,6 +239,7 @@ export function parseOperatingConfig(env: OperatingEnv = process.env): Operating
     workspaceId,
     apiKey,
     principalId,
+    ...(accountMasterGet === "1" ? { mailAccountMasterRead: true } : {}),
   };
 }
 
@@ -197,7 +265,12 @@ export function createOperatingApp(
         workspaceId: config.workspaceId,
         principalId: config.principalId,
         sessionSecret: config.sessionSecret ?? "",
+        ...(config.proxySecret ? { proxySecret: config.proxySecret } : {}),
         store: seams.store ?? new FileOperatorAuthStore(config.authStatePath ?? ""),
+        ...(config.viewer ? { viewer: {
+          principalId: config.viewer.principalId,
+          store: new FileOperatorAuthStore(config.viewer.authStatePath, "viewer"),
+        } } : {}),
         ...(seams.now ? { now: seams.now } : {}),
         }),
         customerWorkOsV2ActorBinding: {
@@ -217,9 +290,12 @@ export function createOperatingApp(
             workspaceId: config.workspaceId,
             principalId: config.principalId,
             kind: "service",
-            readOnly: true,
+            ...(config.mode === "mail-candidate-writer" ? { mailCandidateCreateOnly: true } : { readOnly: true }),
+            ...(config.mode === "jarvis-candidate-reader" ? { mailCandidateReadOnly: true } : {}),
+            ...(config.mailAccountMasterRead ? { mailAccountMasterRead: true } : {}),
           },
       });
+  if (config.mode === "mail-candidate-writer" || config.mode === "jarvis-candidate-reader") return app;
   const listPool = seams.readonlyPool ?? new Pool({
     connectionString: config.databaseUrl,
     max: 4,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { createHmac, randomBytes, randomUUID, scryptSync } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { Pool } from "pg";
 import { describe, it } from "vitest";
@@ -8,6 +8,7 @@ import { z } from "zod";
 import { createApp } from "../src/app.js";
 import { OperatorStepUpService } from "../src/operator-step-up.js";
 import type { OperatorAuthRecord, OperatorAuthStore } from "../src/operator-auth-store.js";
+import { operatorPasswordHash } from "../src/operator-auth-crypto.js";
 import { PgCwosV2StateStore, type V2PgQueryable } from "../src/customer-work-os-v2-runtime.js";
 
 const errorSchema = z.object({ error: z.string() });
@@ -83,12 +84,10 @@ describe.skipIf(process.env.LIVE_PG_TEST !== "1")("owned PG real HTTP operator s
       const humanKey = randomBytes(32).toString("hex");
       const readerKey = randomBytes(32).toString("hex");
       const humanPassword = "isolated-http-owner-password";
-      const salt = Buffer.alloc(16, 5).toString("base64url");
       const now = 59_000;
       let record: OperatorAuthRecord = {
         generation: 1, enrolled: true, totpPending: false,
-        passwordSalt: salt,
-        passwordHash: scryptSync(humanPassword, Buffer.from(salt, "base64url"), 32, { N: 16384, r: 8, p: 1 }).toString("base64url"),
+        passwordHash: operatorPasswordHash(humanPassword),
         totpSecret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
       };
       const authStore: OperatorAuthStore = {

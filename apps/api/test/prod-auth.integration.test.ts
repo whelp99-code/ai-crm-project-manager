@@ -4,6 +4,7 @@ import type { ModelClient } from "@ai-crm/model-gateway";
 import { createApp } from "../src/app.js";
 import { InMemoryCwosV2StateStore } from "../src/customer-work-os-v2-runtime.js";
 import { OperatorStepUpService } from "../src/operator-step-up.js";
+import { operatorPasswordHash } from "../src/operator-auth-crypto.js";
 
 /**
  * G-05: production-mode fail-closed auth posture.
@@ -32,6 +33,7 @@ afterEach(async () => {
 const WS = "ws-prod-auth";
 const OPERATOR = "operator-prod-auth";
 const KEY = "test-api-key-prod";
+const passwordHash = operatorPasswordHash("prod-auth-synthetic-password");
 
 function planClient(): ModelClient {
   return {
@@ -68,8 +70,7 @@ async function ready(options: Parameters<typeof createApp>[0] = {}): Promise<Fas
             store: {
               read: () => ({
                 generation: 1, enrolled: true, totpPending: false,
-                passwordSalt: Buffer.alloc(16, 1).toString("base64url"),
-                passwordHash: Buffer.alloc(32, 2).toString("base64url"),
+                passwordHash,
                 totpSecret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
               }),
               write: () => { throw new Error("legacy auth regression must not authenticate a native owner"); },

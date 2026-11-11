@@ -1,6 +1,36 @@
 import { createHash } from "node:crypto";
 import { canonicalHashOf } from "@ai-crm/policy-engine";
 import { CustomerWorkOsV2Error, assertStepUp, assertWorkspace, copy, integer, mapValues, required, sorted, type V2Actor } from "./shared.js";
+import type { W05ContractDraft } from "./renewals.js";
+
+export interface W05ContractComparison {
+  fields: { key: "period" | "amount" | "items" | "conditions"; status: "CHANGED" | "UNCHANGED" | "UNKNOWN" }[];
+  amountDeltaKrw: string | null;
+}
+
+export function compareW05ContractDraft(draft: W05ContractDraft): W05ContractComparison {
+  const original = draft.source.terms;
+  const next = draft.terms;
+  const status = (before: unknown, after: unknown, unknown: boolean): "CHANGED" | "UNCHANGED" | "UNKNOWN" =>
+    unknown ? "UNKNOWN" : canonicalHashOf("w05.contractCompare", before) === canonicalHashOf("w05.contractCompare", after) ? "UNCHANGED" : "CHANGED";
+  const originalItems = original.items === null ? null : [...original.items].sort((left, right) => left.id.localeCompare(right.id));
+  const nextItems = next.items === null ? null : [...next.items].sort((left, right) => left.id.localeCompare(right.id));
+  const originalConditions = original.conditions === null ? null : [...original.conditions].sort();
+  const nextConditions = next.conditions === null ? null : [...next.conditions].sort();
+  const oldAmount = original.valueKrw === null ? null : BigInt(original.valueKrw);
+  const newAmount = next.valueKrw === null ? null : BigInt(next.valueKrw);
+  return {
+    fields: [
+      { key: "period", status: status([original.startDate, original.endDate], [next.startDate, next.endDate],
+        original.startDate === null || original.endDate === null || next.startDate === null || next.endDate === null) },
+      { key: "amount", status: status(oldAmount?.toString(), newAmount?.toString(), oldAmount === null || newAmount === null) },
+      { key: "items", status: status(originalItems, nextItems, originalItems === null || nextItems === null
+        || originalItems.some(item => item.unitPriceKrw === null) || nextItems.some(item => item.unitPriceKrw === null)) },
+      { key: "conditions", status: status(originalConditions, nextConditions, originalConditions === null || nextConditions === null) },
+    ],
+    amountDeltaKrw: oldAmount === null || newAmount === null ? null : (newAmount - oldAmount).toString(),
+  };
+}
 
 export interface F2Clause {
   id: string;

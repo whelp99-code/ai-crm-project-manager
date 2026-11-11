@@ -1,10 +1,13 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import { z } from "zod";
 import {
   CustomerWorkOsV2Error,
   buildCompanyOverview,
+  compareW05ContractDraft,
   assertStepUp,
   type PrincipalKind,
   type V2Actor,
+  type W05ContractSource,
 } from "@ai-crm/domain/customer-work-os-v2";
 import {
   CustomerWorkOsV2RuntimeManager,
@@ -16,6 +19,7 @@ import {
 } from "./customer-work-os-v2-runtime.js";
 import { readNormalizedBusinessProjection } from "./customer-work-os-v2-normalized-projection.js";
 import { OperatorStepUpError, type OperatorStepUpService } from "./operator-step-up.js";
+import { contractTermsSchema, renewalDraftRequestSchema } from "./customer-work-os-v2-document-schemas.js";
 
 export interface CustomerWorkOsV2ActorBinding {
   workspaceId: string;
@@ -36,6 +40,102 @@ export interface CustomerWorkOsV2RouteOptions {
   profile?: "test" | "development" | "production";
   /** Existing workspace-scoped business producer, injectable for isolated PG verification. */
   normalizedProjectionPool?: V2PgQueryable;
+  readonly mailCandidateWriter?: true;
+  readonly mailCandidateReader?: true;
+}
+
+const mailCandidateRequestSchema = z.object({
+  expectedVersion: z.number().int().nonnegative(),
+  workspaceId: z.string().trim().min(1).optional(),
+  provider: z.enum(["GMAIL", "OUTLOOK"]),
+  mailbox: z.string().trim().email().max(254),
+  sourceLocator: z.string().trim().min(1).max(1000),
+  providerEventId: z.string().trim().min(1).max(500),
+  subject: z.string().trim().min(1).max(500),
+  bodyDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  senderCompany: z.string().trim().min(1).max(300).optional(),
+  summary: z.string().trim().min(1).max(2000).optional(),
+  receivedAt: z.string().datetime().optional(),
+  evidenceUrl: z.string().url().max(2000).refine(value => {
+    const parsed = new URL(value);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && !parsed.username && !parsed.password;
+  }).optional(),
+}).strict();
+
+const reviewRequestSchema = z.discriminatedUnion("action", [
+  z.object({ expectedVersion: z.number().int().nonnegative(), candidateId: z.string().trim().min(1), action: z.literal("LINK"), accountId: z.string().trim().min(1) }).strict(),
+  z.object({ expectedVersion: z.number().int().nonnegative(), candidateId: z.string().trim().min(1), action: z.literal("NEW_ACCOUNT"), companyName: z.string().trim().min(1).max(300) }).strict(),
+  z.object({ expectedVersion: z.number().int().nonnegative(), candidateId: z.string().trim().min(1), action: z.literal("DISCARD"), reason: z.enum(["NOT_RELEVANT", "DUPLICATE", "SPAM", "OTHER"]) }).strict(),
+  z.object({ expectedVersion: z.number().int().nonnegative(), candidateId: z.string().trim().min(1), action: z.literal("UNDO"), reviewId: z.string().trim().min(1) }).strict(),
+]);
+
+const draftMoneySchema = z.string().regex(/^\d+$/).max(30);
+const quoteDraftRequestSchema = z.object({
+  action: z.literal("QUOTE"),
+  expectedVersion: z.number().int().nonnegative(),
+  input: z.object({
+    engagement: z.object({ id: z.string().trim().min(1), version: z.number().int().positive() }).strict(),
+    versionLabel: z.string().trim().min(1).max(200),
+    validUntil: z.string().date(),
+    scope: z.string().trim().min(1).max(5000),
+    lines: z.array(z.object({
+      id: z.string().trim().min(1), sourceId: z.string().trim().min(1),
+      productId: z.string().trim().min(1), description: z.string().trim().min(1).max(2000),
+      quantity: z.number().int().positive().max(1_000_000),
+      unitCostKrw: draftMoneySchema, unitPriceKrw: draftMoneySchema,
+      vendorAccountId: z.string().trim().min(1).optional(),
+    }).strict()).min(1).max(100),
+    options: z.array(z.string().trim().min(1).max(2000)).max(100),
+    templateRef: z.string().trim().min(1).max(1000),
+    vat: z.object({
+      netAmountKrw: draftMoneySchema, vatAmountKrw: draftMoneySchema, grossAmountKrw: draftMoneySchema,
+    }).strict(),
+    po: z.object({ customerPoId: z.string().trim().min(1), supplierPoId: z.string().trim().min(1) }).strict(),
+  }).strict(),
+}).strict();
+
+const documentDraftRequestSchema = z.discriminatedUnion("action", [quoteDraftRequestSchema, renewalDraftRequestSchema]);
+const comparisonQuerySchema = z.object({
+  renewalId: z.string().trim().min(1).max(200),
+  revisionId: z.string().trim().min(1).max(200),
+}).strict();
+const contractRowSchema = z.object({
+  id: z.string(), version: z.number().int().positive(),
+  valueKrw: z.string(), startDate: z.string().nullable(), endDate: z.string().nullable(),
+  scope: z.string(), exclusions: z.array(z.unknown()), billingMilestones: z.array(z.unknown()).min(1), items: z.unknown(),
+});
+
+async function readContractSources(pool: V2PgQueryable, workspaceId: string, id?: string): Promise<W05ContractSource[]> {
+  if (!pool.withWorkspaceScope) throw new CustomerWorkOsV2Error("NORMALIZED_STORAGE_REQUIRED", "scoped contract storage is required");
+  const result = await pool.withWorkspaceScope(workspaceId, db => db.query(
+    `SELECT c.id,c.version,c.contract_value_krw::text AS "valueKrw",
+      c.effective_from::text AS "startDate",c.effective_to::text AS "endDate",
+      c.scope,c.exclusions,c.billing_milestones AS "billingMilestones",q.bom_lines AS items
+     FROM cwos_contracts c LEFT JOIN cwos_quotes q
+       ON q.workspace_id=c.workspace_id AND q.id=c.quote_id
+     WHERE c.workspace_id=$1::uuid${id === undefined ? "" : " AND c.id=$2"} ORDER BY c.id`,
+    id === undefined ? [workspaceId] : [workspaceId, id],
+  ));
+  return result.rows.map(value => {
+    const row = contractRowSchema.safeParse(value);
+    if (!row.success) throw new CustomerWorkOsV2Error("INVALID_STATE", "stored contract is not readable");
+    const source = row.data;
+    const items = z.array(contractTermsSchema.shape.items.unwrap().element.strip()
+      .extend({ unitPriceKrw: z.string().regex(/^\d+$/).nullable().default(null) }))
+      .nullable().safeParse(source.items);
+    const billing = source.billingMilestones;
+    const conditions = [source.scope,
+      ...source.exclusions.map(value => typeof value === "string" ? value : JSON.stringify(value)),
+      JSON.stringify(billing)].filter(Boolean);
+    const terms = contractTermsSchema.safeParse({
+      startDate: source.startDate, endDate: source.endDate, valueKrw: source.valueKrw,
+      items: items.success ? items.data : null,
+      conditions: conditions.length > 0 ? conditions : null,
+    });
+    if (!terms.success) throw new CustomerWorkOsV2Error("INVALID_STATE", "stored contract terms are not readable");
+    return { kind: "NORMALIZED", id: source.id, version: source.version,
+      reference: `cwos_contracts:${source.id}@${source.version}`, terms: terms.data };
+  });
 }
 
 interface RawConnection {
@@ -175,6 +275,7 @@ function status(error: CustomerWorkOsV2Error): number {
       "INVALID_BOOTSTRAP_PRINCIPAL",
       "ACTOR_BINDING_MISMATCH",
       "UNTRUSTED_STEP_UP",
+      "MAIL_CANDIDATE_WRITER_REQUIRED",
     ].includes(error.code)
   ) {
     return 403;
@@ -185,6 +286,7 @@ function status(error: CustomerWorkOsV2Error): number {
       "IDEMPOTENCY_CONFLICT",
       "REPLAYED_APPROVAL",
       "STALE_APPROVAL",
+      "CANDIDATE_CONFLICT",
     ].includes(error.code)
   ) {
     return 409;
@@ -236,6 +338,9 @@ export function registerCustomerWorkOsV2Routes(
     || options.actorBinding.principalId !== options.operatorStepUp.principalId)) {
     throw new Error("[CWOS_V2_OPERATOR_AUTH_SCOPE] step-up authentication requires its admitted human binding");
   }
+  if (options.mailCandidateWriter && options.actorBinding?.kind !== "service") {
+    throw new Error("[CWOS_V2_MAIL_CANDIDATE_BINDING_INVALID] candidate writer requires its server-bound service principal");
+  }
   if (profile === "production" && options.actorBinding?.kind === "human" && !options.operatorStepUp) {
     throw new Error("[CWOS_V2_OPERATOR_AUTH_REQUIRED] production human actor requires fresh authenticated proof");
   }
@@ -277,10 +382,17 @@ export function registerCustomerWorkOsV2Routes(
       try {
         // Validate server-bound claims without granting step-up or reading/mutating native state.
         actor(request, options.actorBinding);
-        const proof = operatorStepUp.authenticate(request.body, request.ip);
+        const proof = operatorStepUp.authenticate(request.body, operatorStepUp.clientAddress(request.headers));
         reply.header("set-cookie", proof.cookie);
         return reply.status(200).send({ csrf: proof.csrf, expiresAt: proof.expiresAt });
       } catch (error) {
+        if (error instanceof OperatorStepUpError) {
+          request.log.warn({ reason: error.code }, "Operator authentication rejected");
+          if (error.retryAfterMs !== undefined) {
+            reply.header("retry-after", String(Math.ceil(error.retryAfterMs / 1000)));
+          }
+          return reply.status(401).send({ error: "OPERATOR_UNAUTHENTICATED" });
+        }
         return sendKnownError(reply, error);
       }
     });
@@ -294,6 +406,255 @@ export function registerCustomerWorkOsV2Routes(
     } catch (error) {
       return sendKnownError(reply, error);
     }
+  });
+
+  if (options.mailCandidateReader) {
+    for (const path of ["/api/cwos/v2/mail-candidates", "/api/cwos/v2/mail-candidates/count"]) {
+      app.get(path, async (request, reply) => {
+        try {
+          const authenticatedActor = actor(request, options.actorBinding);
+          const envelope = await runtime.readAuthorized(authenticatedActor);
+          const candidates = (envelope.state.inbox.mailCandidates ?? [])
+            .filter(candidate => candidate.workspaceId === authenticatedActor.workspaceId)
+            .map(candidate => ({
+              id: candidate.id, status: candidate.status, confirmed: candidate.confirmed,
+              freshness: candidate.freshness, createdAt: candidate.createdAt,
+            }));
+          return reply.status(200).send({
+            workspaceId: authenticatedActor.workspaceId, count: candidates.length,
+            ...(path === "/api/cwos/v2/mail-candidates" ? { candidates } : {}),
+          });
+        } catch (error) {
+          return sendKnownError(reply, error);
+        }
+      });
+    }
+  }
+
+  if (options.mailCandidateWriter) {
+    app.post("/api/cwos/v2/mail-candidates", async (request, reply) => {
+      try {
+        const authenticatedActor = actor(request, options.actorBinding);
+        const parsed = mailCandidateRequestSchema.safeParse(request.body);
+        if (!parsed.success) {
+          throw new CustomerWorkOsV2Error("INVALID_INPUT", "invalid Mail candidate creation payload");
+        }
+        const input = parsed.data;
+        if (input.workspaceId && input.workspaceId !== authenticatedActor.workspaceId) {
+          throw new CustomerWorkOsV2Error("CROSS_WORKSPACE", "candidate workspace must match the admitted writer");
+        }
+        const result = await runtime.command({
+          workspaceId: authenticatedActor.workspaceId, actor: authenticatedActor,
+          expectedVersion: input.expectedVersion, idempotencyKey: header(request, "idempotency-key"),
+          command: "mail.candidate.create",
+          payload: {
+            id: `mail-candidate-${v2Hash({ workspaceId: authenticatedActor.workspaceId, provider: input.provider,
+              mailbox: input.mailbox, providerEventId: input.providerEventId })}`,
+            provider: input.provider, mailbox: input.mailbox, sourceLocator: input.sourceLocator,
+            providerEventId: input.providerEventId, subject: input.subject, bodyDigest: input.bodyDigest,
+            ...(input.senderCompany ? { senderCompany: input.senderCompany } : {}),
+            ...(input.summary ? { summary: input.summary } : {}),
+            ...(input.receivedAt ? { receivedAt: input.receivedAt } : {}),
+            ...(input.evidenceUrl ? { evidenceUrl: input.evidenceUrl } : {}),
+          },
+        });
+        return reply.status(201).send({ candidate: result.result, runtimeVersion: result.envelope.version });
+      } catch (error) {
+        return sendKnownError(reply, error);
+      }
+    });
+    app.get("/api/cwos/v2/mail-candidates/:id", async (request, reply) => {
+      try {
+        const authenticatedActor = actor(request, options.actorBinding);
+        const id = (request.params as { id?: string }).id ?? "";
+        if (!/^mail-candidate-[a-f0-9]{64}$/.test(id)) {
+          throw new CustomerWorkOsV2Error("MAIL_CANDIDATE_NOT_FOUND", "mail candidate not found");
+        }
+        const envelope = await runtime.readAuthorized(authenticatedActor);
+        const item = (envelope.state.inbox.mailCandidates ?? []).find(candidate => candidate.id === id
+          && candidate.workspaceId === authenticatedActor.workspaceId
+          && candidate.createdByPrincipalId === authenticatedActor.principalId);
+        if (!item) throw new CustomerWorkOsV2Error("MAIL_CANDIDATE_NOT_FOUND", "mail candidate not found");
+        return reply.status(200).send({
+          workspaceId: authenticatedActor.workspaceId,
+          runtimeVersion: envelope.version,
+          candidate: {
+            id: item.id, provider: item.provider, mailbox: item.mailbox,
+            sourceLocator: item.sourceLocator, providerEventId: item.providerEventId,
+            subject: item.subject, bodyDigest: item.bodyDigest,
+            createdByPrincipalId: item.createdByPrincipalId,
+            status: item.status, confirmed: item.confirmed, freshness: item.freshness,
+            version: item.version,
+          },
+        });
+      } catch (error) {
+        return sendKnownError(reply, error);
+      }
+    });
+  }
+
+  app.get("/api/cwos/v2/mail-candidate-review", async (request, reply) => {
+    try {
+      const authenticatedActor = actor(request, options.actorBinding, options.operatorStepUp);
+      if (authenticatedActor.kind !== "human" || !authenticatedActor.stepUpVerified || !options.operatorStepUp) {
+        throw new CustomerWorkOsV2Error("STEP_UP_REQUIRED", "fresh admitted operator proof is required");
+      }
+      const envelope = await runtime.readAuthorized(authenticatedActor);
+      const pool = options.normalizedProjectionPool ?? (rawPool ? scopedPool(rawPool) : undefined);
+      if (!pool?.withWorkspaceScope) throw new CustomerWorkOsV2Error("NORMALIZED_STORAGE_REQUIRED", "workspace-scoped accounts require PostgreSQL");
+      const accounts = await pool.withWorkspaceScope(authenticatedActor.workspaceId, async db => {
+        const result = await db.query<{ id: string; name: string }>(
+          "SELECT id, name FROM cwos_accounts WHERE workspace_id=$1::uuid ORDER BY name", [authenticatedActor.workspaceId],
+        );
+        return result.rows;
+      });
+      const candidates = (envelope.state.inbox.mailCandidates ?? [])
+        .filter(candidate => candidate.workspaceId === authenticatedActor.workspaceId)
+        .map(candidate => {
+          const history = (envelope.state.inbox.mailCandidateReviews ?? [])
+            .filter(item => item.candidateId === candidate.id)
+            .sort((left, right) => left.version - right.version);
+          return {
+            id: candidate.id, provider: candidate.provider, senderCompany: candidate.senderCompany ?? null,
+            summary: candidate.summary ?? candidate.subject, receivedAt: candidate.receivedAt ?? null,
+            createdAt: candidate.createdAt, evidenceUrl: candidate.evidenceUrl ?? null,
+            sourceLocator: candidate.sourceLocator, review: history.at(-1) ?? null, history,
+          };
+        });
+      return reply.status(200).send({ workspaceId: authenticatedActor.workspaceId, runtimeVersion: envelope.version, accounts, candidates });
+    } catch (error) { return sendKnownError(reply, error); }
+  });
+
+  app.post("/api/cwos/v2/mail-candidate-review", async (request, reply) => {
+    try {
+      const authenticatedActor = actor(request, options.actorBinding, options.operatorStepUp);
+      if (authenticatedActor.kind !== "human" || !authenticatedActor.stepUpVerified || !options.operatorStepUp) {
+        throw new CustomerWorkOsV2Error("STEP_UP_REQUIRED", "fresh admitted operator proof is required");
+      }
+      const parsed = reviewRequestSchema.safeParse(request.body);
+      if (!parsed.success) throw new CustomerWorkOsV2Error("INVALID_INPUT", "invalid Mail candidate review request");
+      const input = parsed.data;
+      const key = header(request, "idempotency-key");
+      let command: string;
+      let payload: Record<string, unknown>;
+      if (input.action === "UNDO") {
+        command = "mail.candidate.review.undo";
+        payload = { id: `mail-review-${v2Hash({ workspaceId: authenticatedActor.workspaceId, candidateId: input.candidateId, reviewId: input.reviewId, key }).slice(0, 32)}`, candidateId: input.candidateId, reviewId: input.reviewId };
+      } else {
+        let outcome: "LINKED" | "NEW_ACCOUNT_CANDIDATE" | "DISCARDED";
+        let accountId: string | undefined;
+        let companyName: string | undefined;
+        let reason: string | undefined;
+        switch (input.action) {
+          case "LINK": {
+            const pool = options.normalizedProjectionPool ?? (rawPool ? scopedPool(rawPool) : undefined);
+            if (!pool?.withWorkspaceScope) throw new CustomerWorkOsV2Error("NORMALIZED_STORAGE_REQUIRED", "workspace-scoped accounts require PostgreSQL");
+            const rows = await pool.withWorkspaceScope(authenticatedActor.workspaceId, db => db.query<{ id: string }>(
+              "SELECT id FROM cwos_accounts WHERE workspace_id=$1::uuid AND id=$2", [authenticatedActor.workspaceId, input.accountId],
+            ));
+            if (!rows.rows[0]) throw new CustomerWorkOsV2Error("ACCOUNT_NOT_FOUND", "account is not available in this workspace");
+            outcome = "LINKED"; accountId = rows.rows[0].id; break;
+          }
+          case "NEW_ACCOUNT": outcome = "NEW_ACCOUNT_CANDIDATE"; companyName = input.companyName; break;
+          case "DISCARD": outcome = "DISCARDED"; reason = input.reason; break;
+        }
+        command = "mail.candidate.review";
+        payload = { id: `mail-review-${v2Hash({ workspaceId: authenticatedActor.workspaceId, candidateId: input.candidateId, key }).slice(0, 32)}`, candidateId: input.candidateId, outcome,
+          ...(accountId ? { accountId } : {}), ...(companyName ? { companyName } : {}), ...(reason ? { reason } : {}) };
+      }
+      const result = await runtime.command({ workspaceId: authenticatedActor.workspaceId, actor: authenticatedActor,
+        expectedVersion: input.expectedVersion, idempotencyKey: key, command, payload });
+      return reply.status(200).send({ review: result.result, runtimeVersion: result.envelope.version });
+    } catch (error) { return sendKnownError(reply, error); }
+  });
+
+  app.get("/api/cwos/v2/document-drafts", async (request, reply) => {
+    try {
+      const owner = actor(request, options.actorBinding, options.operatorStepUp);
+      if (owner.kind !== "human" || !owner.stepUpVerified || !options.operatorStepUp) {
+        throw new CustomerWorkOsV2Error("STEP_UP_REQUIRED", "fresh admitted operator proof is required");
+      }
+      const envelope = await runtime.readAuthorized(owner);
+      if (Object.keys(body(request.query)).length > 0) {
+        const selection = comparisonQuerySchema.safeParse(request.query);
+        if (!selection.success) throw new CustomerWorkOsV2Error("INVALID_INPUT", "comparison requires renewalId and revisionId");
+        const renewal = envelope.state.renewals?.drafts.find(draft => draft.id === selection.data.renewalId);
+        const revision = renewal?.revisions.find(item => item.revisionId === selection.data.revisionId);
+        if (!renewal || !revision?.contractDraft) throw new CustomerWorkOsV2Error("RENEWAL_NOT_FOUND", "structured renewal revision is not available");
+        return reply.status(200).send({
+          workspaceId: owner.workspaceId, runtimeVersion: envelope.version,
+          renewalId: renewal.id, revisionId: revision.revisionId,
+          source: revision.contractDraft.source, terms: revision.contractDraft.terms,
+          comparison: compareW05ContractDraft(revision.contractDraft),
+          approvalStatus: "NOT_APPROVED",
+        });
+      }
+      const pool = options.normalizedProjectionPool ?? (rawPool ? scopedPool(rawPool) : undefined);
+      if (!pool?.withWorkspaceScope) throw new CustomerWorkOsV2Error("NORMALIZED_STORAGE_REQUIRED", "workspace-scoped business data requires PostgreSQL");
+      const engagements = await pool.withWorkspaceScope(owner.workspaceId, async db =>
+        (await db.query<{ id: string; name: string; version: number }>(
+          "SELECT id,name,version FROM cwos_engagements WHERE workspace_id=$1::uuid ORDER BY name", [owner.workspaceId],
+        )).rows);
+      const sources = new Map((await readContractSources(pool, owner.workspaceId)).map(source => [`${source.kind}:${source.id}`, source]));
+      for (const revision of [...(envelope.state.renewals?.drafts.flatMap(draft => draft.revisions) ?? [])]
+        .sort((left, right) => left.observedAt.localeCompare(right.observedAt))) {
+        const source = revision.contractDraft?.source;
+        if (source?.kind === "OWNER_INPUT") sources.set(`${source.kind}:${source.id}`, source);
+      }
+      return reply.status(200).send({
+        workspaceId: owner.workspaceId, runtimeVersion: envelope.version, engagements,
+        quoteDrafts: envelope.state.quoteDrafts ?? [],
+        contracts: [...sources.values()],
+        renewalDrafts: envelope.state.renewals?.drafts.filter(draft => draft.revisions.some(revision => revision.contractDraft !== undefined)) ?? [],
+      });
+    } catch (error) { return sendKnownError(reply, error); }
+  });
+
+  app.post("/api/cwos/v2/document-drafts", async (request, reply) => {
+    try {
+      const owner = actor(request, options.actorBinding, options.operatorStepUp);
+      if (owner.kind !== "human" || !owner.stepUpVerified || !options.operatorStepUp) {
+        throw new CustomerWorkOsV2Error("STEP_UP_REQUIRED", "fresh admitted operator proof is required");
+      }
+      await runtime.readAuthorized(owner);
+      const parsed = documentDraftRequestSchema.safeParse(request.body);
+      if (!parsed.success) throw new CustomerWorkOsV2Error("INVALID_INPUT", "invalid document draft input");
+      const input = parsed.data;
+      const pool = options.normalizedProjectionPool ?? (rawPool ? scopedPool(rawPool) : undefined);
+      if (!pool?.withWorkspaceScope) throw new CustomerWorkOsV2Error("NORMALIZED_STORAGE_REQUIRED", "workspace-scoped business data requires PostgreSQL");
+      if (input.action === "RENEWAL") {
+        let source: W05ContractSource;
+        if (input.source.kind === "NORMALIZED") {
+          const stored = (await readContractSources(pool, owner.workspaceId, input.source.id))[0];
+          if (!stored) throw new CustomerWorkOsV2Error("CONTRACT_NOT_FOUND", "contract is not available in this workspace");
+          if (stored.version !== input.source.version) throw new CustomerWorkOsV2Error("CONCURRENT_MODIFICATION", "source contract changed; refresh before drafting");
+          source = stored;
+        } else {
+          source = { ...input.source, version: null };
+        }
+        const result = await runtime.command({
+          workspaceId: owner.workspaceId, actor: owner, expectedVersion: input.expectedVersion,
+          idempotencyKey: header(request, "idempotency-key"), command: "w05.contractDraft",
+          payload: { renewalId: input.renewalId, revisionId: input.revisionId,
+            revisionLabel: input.revisionLabel, source, terms: input.terms },
+        });
+        return reply.status(201).send({ draft: result.result, runtimeVersion: result.envelope.version });
+      }
+      const source = await pool.withWorkspaceScope(owner.workspaceId, db =>
+        db.query<{ version: number }>(
+          "SELECT version FROM cwos_engagements WHERE workspace_id=$1::uuid AND id=$2",
+          [owner.workspaceId, input.input.engagement.id],
+        ));
+      if (!source.rows[0]) throw new CustomerWorkOsV2Error("ENGAGEMENT_NOT_FOUND", "engagement is not available in this workspace");
+      if (source.rows[0].version !== input.input.engagement.version) {
+        throw new CustomerWorkOsV2Error("CONCURRENT_MODIFICATION", "source engagement changed; refresh before drafting");
+      }
+      const result = await runtime.command({
+        workspaceId: owner.workspaceId, actor: owner, expectedVersion: input.expectedVersion,
+        idempotencyKey: header(request, "idempotency-key"), command: "w01.quoteDraft", payload: input.input,
+      });
+      return reply.status(201).send({ draft: result.result, runtimeVersion: result.envelope.version });
+    } catch (error) { return sendKnownError(reply, error); }
   });
 
   app.get("/api/cwos/v2/company-overview", async (request, reply) => {
@@ -371,6 +732,9 @@ export function registerCustomerWorkOsV2Routes(
           "INVALID_INPUT",
           "command and non-negative expectedVersion are required",
         );
+      }
+      if (typeof command === "string" && (command.startsWith("mail.candidate.review") || command === "w05.contractDraft")) {
+        throw new CustomerWorkOsV2Error("TRUSTED_REVIEW_ROUTE_REQUIRED", "candidate reviews must use the trusted review route");
       }
       const idempotencyKey = header(request, "idempotency-key");
       let commandPayload = payload;
