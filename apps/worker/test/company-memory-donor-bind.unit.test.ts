@@ -99,7 +99,9 @@ process.exit(2);
 `;
 
 function tempDir(): string {
-  return mkdtempSync(join(tmpdir(), "crm-donor-bind-"));
+  const dir = mkdtempSync(join(tmpdir(), "crm-donor-bind-"));
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ type: "commonjs" }));
+  return dir;
 }
 
 function writePem(dir: string): string {
