@@ -1,0 +1,92 @@
+name: CWOS One Shot Public Contracts
+
+on:
+  push:
+    branches:
+      - feat/customer-work-os-v1-full
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'fix(cwos): normalize public package contracts') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/customer-work-os-v1-full
+          fetch-depth: 0
+      - name: Normalize public exports and receipt resources
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json, re
+
+          exports = {
+            Path('packages/domain/src/index.ts'): [
+              'export * from "./customer-work-os.js";',
+              'export * from "./customer-work-os-graphs.js";',
+            ],
+            Path('packages/ai-orchestrator/src/index.ts'): [
+              'export * from "./customer-work-os-ai.js";',
+            ],
+            Path('packages/imports/src/index.ts'): [
+              'export * from "./notion-cwos.js";',
+            ],
+            Path('packages/reports/src/index.ts'): [
+              'export * from "./customer-work-os-reports.js";',
+            ],
+          }
+          for path, lines in exports.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            text = path.read_text() if path.exists() else ''
+            for line in lines:
+              if line not in text:
+                text = text.rstrip() + ('\n\n' if text.strip() else '') + line + '\n'
+            path.write_text(text)
+
+          domain = Path('packages/domain/src/customer-work-os.ts')
+          text = domain.read_text()
+          match = re.search(r'(export interface ApprovalReceipt \{.*?resourceType:\s*)(.*?)(;\n)', text, flags=re.S)
+          if not match:
+            raise SystemExit('ApprovalReceipt.resourceType not found')
+          current = match.group(2)
+          required = ['"quote"','"contract"','"change_request"','"purchase_order"','"financial_item"','"delivery_project"','"engagement"','"import_plan"','"artifact"']
+          types = []
+          for item in re.findall(r'"[^"]+"', current) + required:
+            if item not in types:
+              types.append(item)
+          replacement = match.group(1) + '\n    | ' + '\n    | '.join(types) + match.group(3)
+          text = text[:match.start()] + replacement + text[match.end():]
+          domain.write_text(text)
+
+          package_roots = {
+            Path('packages/domain/package.json'): './src/index.ts',
+            Path('packages/ai-orchestrator/package.json'): './src/index.ts',
+            Path('packages/imports/package.json'): './src/index.ts',
+            Path('packages/reports/package.json'): './src/index.ts',
+          }
+          for path, target in package_roots.items():
+            data = json.loads(path.read_text())
+            exports_map = data.get('exports')
+            if isinstance(exports_map, str):
+              exports_map = {'.': exports_map}
+            if not isinstance(exports_map, dict):
+              exports_map = {}
+            exports_map['.'] = target
+            data['exports'] = exports_map
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+
+          Path('.github/workflows/cwos-one-shot-public-contracts.yml').unlink()
+          PY
+      - name: Lockfile and commit
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.15.0 --activate
+          pnpm install --lockfile-only
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages pnpm-lock.yaml .github/workflows/cwos-one-shot-public-contracts.yml
+          git commit -m "fix(cwos): normalize public package contracts"
+          git push origin HEAD:feat/customer-work-os-v1-full

@@ -1,0 +1,41 @@
+name: CWOS One Shot Contract Test Binding
+
+on:
+  push:
+    branches:
+      - feat/customer-work-os-v1-full
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'test(cwos): bind contract approval to current engagement version') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/customer-work-os-v1-full
+          fetch-depth: 0
+      - name: Patch tests
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          targets = [
+            Path('packages/domain/test/customer-work-os.integration.test.ts'),
+            Path('packages/domain/test/customer-work-os-hardening.adversarial.test.ts'),
+          ]
+          for path in targets:
+            text = path.read_text()
+            text = text.replace('resourceVersion: 2,\n        action: "CONTRACT_ACTIVATE"', 'resourceVersion: service.getEngagementSnapshot(WORKSPACE, "engagement").engagement.version,\n        action: "CONTRACT_ACTIVATE"')
+            text = text.replace('resourceVersion: 2, action: "CONTRACT_ACTIVATE"', 'resourceVersion: service.getEngagementSnapshot(WORKSPACE, "eng").engagement.version, action: "CONTRACT_ACTIVATE"')
+            path.write_text(text)
+          Path('.github/workflows/cwos-one-shot-contract-test-binding.yml').unlink()
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/domain/test .github/workflows/cwos-one-shot-contract-test-binding.yml
+          git commit -m "test(cwos): bind contract approval to current engagement version"
+          git push origin HEAD:feat/customer-work-os-v1-full
