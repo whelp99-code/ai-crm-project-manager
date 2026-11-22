@@ -1,9 +1,11 @@
+> ENGINEERING-MAP-START: 작업을 시작하면 `/home/jm/orca/engineering-vault/index.json`에서 이 디렉터리의 프로젝트 기록을 읽고 relations와 depends_on을 따라간다. 측정하지 않은 배포는 unknown이다. 이 문장은 기존 규칙을 바꾸지 않는다.
+
 # packages/domain
 
 Core domain-logic layer. Owns CRM / PM / delivery / workflow-graph services **and** the live Customer Work OS v2 domain (`src/customer-work-os-v2`). Pure TypeScript; persistence happens only through the RLS-scoped pg adapters exported here. Depends on `@ai-crm/contracts` + `@ai-crm/policy-engine`.
 
 ## OVERVIEW
-Package entry `src/index.ts` re-exports crm/delivery/pm/workflow-graph + pg adapters. Subpath exports: `./crm`, `./pm`, `./delivery`, `./workflow-graph`, `./customer-work-os-v2`, `./pg-{crm,crm-sub,pm}-adapter`.
+Package entry `src/index.ts` re-exports crm/delivery/pm/workflow-graph + the three pg adapters only. It does not re-export Customer Work OS. Subpaths: `./crm`, `./pm`, `./delivery`, `./workflow-graph`, `./customer-work-os-graphs`, `./customer-work-os` (stateful v1), `./customer-work-os-core` (pure v1), `./customer-work-os-v2`, `./pg-{crm,crm-sub,pm}-adapter`.
 
 ## STRUCTURE
 ```
@@ -22,7 +24,8 @@ test/ — per-package vitest (`test/` dir, tag-suffixed).
 | Task | File | Notes |
 |------|------|-------|
 | CRM/PM/delivery logic | `src/{crm,pm,delivery}.ts` | service classes + action-bound receipts |
-| CWOS v2 domain | `src/customer-work-os-v2/` | pure logic; API layer (app.ts) is transport only |
+| CWOS v2 domain | `src/customer-work-os-v2/` | not on the main barrel; import the subpath |
+| CWOS v1 | `./customer-work-os` / `./customer-work-os-core` | stateful wrapper vs pure `customer-work-os.ts` |
 | PG access | `src/pg-*-adapter.ts` | each ships an InMemory impl for tests |
 
 ## CONVENTIONS (this dir)
