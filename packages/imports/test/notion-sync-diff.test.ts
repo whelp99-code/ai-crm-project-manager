@@ -15,6 +15,13 @@ function liveOf(entity: NotionSyncEntity, extra: Partial<NotionSyncLiveEntity> =
   return { ...entity, version: 1, syncedVersion: 1, archivedAt: null, ...extra, fields: { ...entity.fields, ...extra.fields } };
 }
 
+function financialItem(): NotionSyncEntity {
+  return {
+    kind: "financial_item", id: "financial-aaaaaaaa", notionPageId: "fin-1", pageId: "fin-1",
+    fields: { net_amount_krw: "100", vat_amount_krw: "10", gross_amount_krw: "110", direction: "IN", account_id: "account-aaaaaaaa" },
+  };
+}
+
 describe("diffNotionSync", () => {
   it("classifies a new page id as insert", () => {
     const diff = diffNotionSync({
@@ -77,6 +84,90 @@ describe("diffNotionSync", () => {
     expect(diff.settlementInserts).toHaveLength(0);
     expect(diff.settlementUpdates).toHaveLength(0);
     expect(diff.deletes).toHaveLength(0);
+  });
+
+  describe("money holds regardless of settlement presence", () => {
+    const changes = [
+      ["net_amount_krw", "200"], ["vat_amount_krw", "20"], ["gross_amount_krw", "220"],
+      ["direction", "OUT"], ["account_id", "account-bbbbbbbb"],
+    ] as const;
+    it.each(changes.flatMap(([field, value]) => [false, true, undefined].map(hasSettlement => ({ field, value, hasSettlement }))))(
+      "holds $field with hasSettlement=$hasSettlement",
+      ({ field, value, hasSettlement }) => {
+        const before = financialItem();
+        const live = liveOf(before, hasSettlement === undefined ? {} : { hasSettlement });
+        const after = { ...before, fields: { ...before.fields, [field]: value } };
+        const diff = diffNotionSync({ desired: [after], live: [live], snapshotPageIds: new Set([before.pageId]) });
+        expect(diff.updates).toHaveLength(0);
+        expect(diff.holds).toEqual([{ notionPageId: before.pageId, kind: "financial_item", reason: "AMOUNT_OR_DIRECTION" }]);
+        expect(live.fields).toEqual(before.fields);
+        expect(after.fields[field]).toBe(value);
+      },
+    );
+
+    it.each(["0", "-1", "9007199254740993"])("holds exact integer amount %s without numeric rounding", value => {
+      const before = financialItem();
+      const after = { ...before, fields: { ...before.fields, gross_amount_krw: value } };
+      const diff = diffNotionSync({ desired: [after], live: [liveOf(before, { hasSettlement: false })], snapshotPageIds: new Set([before.pageId]) });
+      expect(diff.updates).toHaveLength(0);
+      expect(diff.holds.map(row => row.reason)).toEqual(["AMOUNT_OR_DIRECTION"]);
+      expect(after.fields.gross_amount_krw).toBe(value);
+    });
+
+    it("holds the combined net VAT and gross change of an unsettled item", () => {
+      const before = financialItem();
+      const after = { ...before, fields: { ...before.fields, net_amount_krw: "200", vat_amount_krw: "20", gross_amount_krw: "220" } };
+      const diff = diffNotionSync({ desired: [after], live: [liveOf(before, { hasSettlement: false })], snapshotPageIds: new Set([before.pageId]) });
+      expect(diff.updates).toHaveLength(0);
+      expect(diff.holds).toEqual([{ notionPageId: before.pageId, kind: "financial_item", reason: "AMOUNT_OR_DIRECTION" }]);
+    });
+
+    it("keeps permitted non-money and unrelated updates while excluding held money fields", () => {
+      const before = financialItem();
+      before.fields.expected_date = "2026-12-01";
+      const after = { ...before, fields: { ...before.fields, net_amount_krw: "200", expected_date: "2026-12-02" } };
+      const oldAccount = account("account-bbbbbbbb", "acc-2", "before");
+      const newAccount = account("account-bbbbbbbb", "acc-2", "after");
+      const diff = diffNotionSync({
+        desired: [after, newAccount], live: [liveOf(before, { hasSettlement: false }), liveOf(oldAccount)],
+        snapshotPageIds: new Set([before.pageId, oldAccount.pageId]),
+      });
+      expect(diff.updates.map(row => ({ id: row.id, fields: row.fields }))).toEqual([
+        { id: before.id, fields: { expected_date: "2026-12-02" } },
+        { id: oldAccount.id, fields: { name: "after", normalized_name: "after" } },
+      ]);
+      expect(diff.holds.map(row => row.reason)).toEqual(["AMOUNT_OR_DIRECTION"]);
+    });
+
+    it("keeps equivalent numeric representations and an unchanged unsettled item at zero writes", () => {
+      const before = financialItem();
+      const after = { ...before, fields: { ...before.fields, net_amount_krw: 100n, vat_amount_krw: 10 } };
+      const diff = diffNotionSync({ desired: [after], live: [liveOf(before, { hasSettlement: false })], snapshotPageIds: new Set([before.pageId]) });
+      expect(diff.updates).toHaveLength(0);
+      expect(diff.holds).toHaveLength(0);
+      expect(diff.inserts).toHaveLength(0);
+      expect(diff.archives).toHaveLength(0);
+    });
+
+    it("does not insert a settlement carrying held money while preserving unrelated settlement inserts", () => {
+      const before = financialItem();
+      const after = { ...before, fields: { ...before.fields, gross_amount_krw: "220" } };
+      const other = { ...before, id: "financial-bbbbbbbb", notionPageId: "fin-2", pageId: "fin-2" };
+      const safeSettlement = { id: "settlement-bbbbbbbb", financialItemId: other.id, notionPageId: other.pageId, direction: "IN" as const, amountKrw: "110", settledAt: "2026-12-01" };
+      const diff = diffNotionSync({
+        desired: [after, other], live: [liveOf(before, { hasSettlement: false }), liveOf(other, { hasSettlement: false })],
+        snapshotPageIds: new Set([before.pageId, other.pageId]),
+        desiredSettlements: [
+          { ...safeSettlement, id: "settlement-aaaaaaaa", financialItemId: before.id, notionPageId: before.pageId, amountKrw: "220" },
+          safeSettlement,
+        ],
+      });
+      expect(diff.updates).toHaveLength(0);
+      expect(diff.holds.map(row => row.reason)).toEqual(["AMOUNT_OR_DIRECTION"]);
+      expect(diff.settlementInserts).toEqual([safeSettlement]);
+      expect(diff.settlementUpdates).toHaveLength(0);
+      expect(diff.deletes).toHaveLength(0);
+    });
   });
 
   it("does not archive a financial item that has a settlement", () => {
